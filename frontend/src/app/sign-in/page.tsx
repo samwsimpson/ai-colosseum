@@ -65,7 +65,7 @@ export default function SignInPage() {
     };
 
     // Handle failed sign-in with Google
-    const handleGoogleFailure = (error: any) => {
+    const handleGoogleFailure = (error: Error) => {
         console.error('Google sign-in failed:', error);
         setIsLoading(false);
     };
