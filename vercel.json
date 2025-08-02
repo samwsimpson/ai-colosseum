@@ -1,5 +1,19 @@
 {
   "installCommand": "npm install --prefix frontend",
   "buildCommand": "npm run build --prefix frontend",
-  "outputDirectory": "frontend/.next"
+  "builds": [
+    {
+      "src": "frontend/next.config.js",
+      "use": "@vercel/next@20.0.0",
+      "config": {
+        "outputDirectory": "frontend/.next"
+      }
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "/frontend/$1"
+    }
+  ]
 }
