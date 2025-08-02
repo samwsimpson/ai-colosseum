@@ -32,7 +32,13 @@ export default function SignInPage() {
 
         try {
             // Send the id_token to your backend for verification
-            const res = await fetch('http://localhost:8000/api/google-auth', {
+            const backendUrl = process.env.NEXT_PUBLIC_WS_URL;
+            if (!backendUrl) {
+                console.error("NEXT_PUBLIC_WS_URL environment variable is not set.");
+                setIsLoading(false);
+                return;
+            }            
+            const res = await fetch(`${backendUrl}/api/google-auth`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
