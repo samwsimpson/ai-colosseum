@@ -17,7 +17,7 @@ interface TypingState {
 }
 
 export default function ChatPage() {
-    const { userName, userToken, clearUser } = useUser();
+    const { userName, userToken, handleLogout } = useUser();
     const router = useRouter();
     const pathname = usePathname();
 
