@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 
-print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION) <<")
+print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 2.0) <<")
 
 load_dotenv()
 
@@ -29,6 +29,8 @@ app = FastAPI()
 
 origins = [
     "http://localhost:3000",
+    "https://colosseum-ten.vercel.app/",
+    "https://aicolosseum.app",
     "https://www.aicolosseum.app"
 ]
 app.add_middleware(
