@@ -27,7 +27,10 @@ load_dotenv()
 
 app = FastAPI()
 
-origins = ["http://localhost:3000"]
+origins = [
+    "http://localhost:3000",
+    "https://www.aicolosseum.app"
+]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
