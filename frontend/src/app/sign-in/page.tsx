@@ -86,7 +86,7 @@ export default function SignInPage() {
                         // This uses the simpler `CredentialResponse` flow
                         <GoogleLogin
                             onSuccess={handleGoogleSuccess}
-                            onError={(error: Error) => handleGoogleFailure(error)}
+                            onError={() => handleGoogleFailure(new Error("Google sign-in failed."))}
                         />
                     )}
                 </div>
