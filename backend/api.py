@@ -27,12 +27,8 @@ load_dotenv()
 
 app = FastAPI()
 
-origins = [
-    "http://localhost:3000",
-    "https://colosseum-ten.vercel.app/",
-    "https://aicolosseum.app",
-    "https://www.aicolosseum.app"
-]
+CORS_ORIGINS = os.getenv("CORS_ORIGINS", "http://localhost:3000").split(',')
+origins = [origin.strip() for origin in CORS_ORIGINS]
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
