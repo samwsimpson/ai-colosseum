@@ -13,7 +13,7 @@ export const metadata = {
   title: 'The Colosseum',
   description: 'AI Chat Application',
 };
-export const revalidate = 0;
+
 export default function RootLayout({
   children,
 }: {
