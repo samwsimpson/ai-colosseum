@@ -22,7 +22,6 @@ export default function SignInPage() {
     // Handle successful sign-in with Google
     const handleGoogleSuccess = async (response: CredentialResponse) => {
         setIsLoading(true);
-        // The Google response object contains a `credential` (id_token) in this flow
         const { credential } = response;
         if (!credential) {
             console.error("Google login failed: No credential received.");
@@ -31,21 +30,17 @@ export default function SignInPage() {
         }
 
         try {
-            // Use the Vercel environment variable for the backend URL
             const backendUrl = process.env.NEXT_PUBLIC_WS_URL;
             if (!backendUrl) {
                 console.error("NEXT_PUBLIC_WS_URL environment variable is not set.");
-                setIsLoading(false);
                 return;
             }
             
-            // Send the id_token to your backend for verification
             const res = await fetch(`${backendUrl}/api/google-auth`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                // The body now sends a simple object with the id_token
                 body: JSON.stringify({ id_token: credential }),
             });
 
@@ -56,16 +51,11 @@ export default function SignInPage() {
             }
 
             const data = await res.json();
-            // Store the access token and user info directly in state and local storage
             localStorage.setItem('userToken', data.access_token);
             localStorage.setItem('userName', data.user_name);
             setUserToken(data.access_token);
             setUserName(data.user_name);
 
-            // Introduce a small delay to ensure state is fully updated before redirecting
-            setTimeout(() => {
-                 router.push('/chat'); 
-            }, 500); // 500ms delay
         } catch (error) {
             console.error('Sign-in failed:', error);
             setIsLoading(false);
