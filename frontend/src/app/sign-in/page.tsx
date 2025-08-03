@@ -11,7 +11,7 @@ export default function SignInPage() {
     const router = useRouter();
     const [isLoading, setIsLoading] = useState(false);
     const googleClientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '';
-
+console.log("GOOGLE_CLIENT_ID", googleClientId);
     // Effect to check if the user is already logged in
     useEffect(() => {
         if (userToken) {
