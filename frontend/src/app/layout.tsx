@@ -13,7 +13,7 @@ export const metadata = {
   title: 'The Colosseum',
   description: 'AI Chat Application',
 };
-
+export const revalidate = 0;
 export default function RootLayout({
   children,
 }: {
@@ -21,7 +21,7 @@ export default function RootLayout({
 }) {
   const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
   //const clientId = '418819543347-8aes37r4191r49df7dnsue14p049orls.apps.googleusercontent.com';
-  console.log("The clientId is:", clientId);
+  
   if (!clientId) {
     return (
       <html lang="en">
