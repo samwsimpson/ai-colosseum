@@ -10,10 +10,10 @@ export default function SignInPage() {
     const { userToken, setUserToken, setUserName } = useUser();
     const router = useRouter();
     const [isLoading, setIsLoading] = useState(false);
-    //const googleClientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '';
-    const googleClientId = '418819543347-8aes37r4191r49df7dnsue14p049orls.apps.googleusercontent.com';
+    const googleClientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID || '';
+    //const googleClientId = '418819543347-8aes37r4191r49df7dnsue14p049orls.apps.googleusercontent.com';
 
-//onsole.log("GOOGLE_CLIENT_ID", googleClientId);
+    // console.log("GOOGLE_CLIENT_ID", googleClientId);
     // Effect to check if the user is already logged in
     useEffect(() => {
         if (userToken) {
