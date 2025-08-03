@@ -77,16 +77,7 @@ export default function SignInPage() {
                 <p className="text-lg text-gray-400 mb-8">
                     Sign in to start a conversation with your AI team.
                 </p>
-                {isLoading ? (
-                    <div className="flex justify-center items-center h-12">
-                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
-                    </div>
-                ) : (
-                    <GoogleLogin
-                        onSuccess={handleGoogleSuccess}
-                        onError={() => handleGoogleFailure(new Error("Google sign-in failed."))}
-                    />
-                )}
+
             </div>
         </div>
     );

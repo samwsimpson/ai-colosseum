@@ -102,16 +102,16 @@ export default function ChatPage() {
             return;
         }
 
-// Only create a new WebSocket if one does not exist or is already closed
-        if (!ws.current || ws.current.readyState === WebSocket.CLOSED) {
-            const backendUrl = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
-            const wsProtocol = backendUrl.startsWith('https://') ? 'wss://' : 'ws://';
-            const wsUrl = `${wsProtocol}${backendUrl.replace(/^https?:\/\//, '')}/ws/colosseum-chat?token=${userToken}`;
-            
-            const socket = new WebSocket(wsUrl);
-            ws.current = socket;
-            setIsWsOpen(false); // Set to false while connecting
-        }
+        // Only create a new WebSocket if one does not exist or is already closed
+        if (!ws.current || ws.current.readyState === WebSocket.CLOSED) {
+            const backendUrl = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
+            const wsProtocol = backendUrl.startsWith('https://') ? 'wss://' : 'ws://';
+            const wsUrl = `${wsProtocol}${backendUrl.replace(/^https?:\/\//, '')}/ws/colosseum-chat?token=${userToken}`;
+            
+            const socket = new WebSocket(wsUrl);
+            ws.current = socket;
+            setIsWsOpen(false); // Set to false while connecting
+        }
         
         // Create a stable local reference to the current WebSocket instance
         const currentWs = ws.current; 
