@@ -17,7 +17,7 @@ export default function HomePage() {
           Unleash the Power of Collaborative AI
         </h2>
         <p className="text-xl text-gray-400 mb-8 max-w-3xl">
-          The Colosseum is a groundbreaking platform where multiple AI models work together to solve complex problems, generate creative content, and bring your ideas to life.
+          The AI Colosseum is a groundbreaking platform where multiple AI models work together to solve complex problems, generate creative content, and bring your ideas to life.
         </p>
         <Link href="/chat">
           <button className="bg-blue-600 text-white text-lg font-bold py-3 px-8 rounded-full hover:bg-blue-700 transition duration-300 shadow-lg">
