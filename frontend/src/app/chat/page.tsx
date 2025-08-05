@@ -174,7 +174,7 @@ export default function ChatPage() {
     return (
         <div className="flex flex-col h-screen w-full bg-gray-950 text-white font-sans antialiased">
             <main ref={chatContainerRef} className="flex-1 overflow-y-auto p-4 md:p-6 bg-gray-900 custom-scrollbar">
-                <div className="max-w-4xl mx-auto flex flex-col space-y-4 md:space-y-6">
+                <div className="max-w-4xl mx-auto mt-[72px] flex flex-col space-y-4 md:space-y-6">
                     {/* Conditional rendering for the initial message */}
                     {!isWsOpen && userToken ? (
                         <p className="text-center text-gray-500 py-12 text-lg">Connecting to chat...</p>

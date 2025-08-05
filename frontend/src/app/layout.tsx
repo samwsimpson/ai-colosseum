@@ -2,10 +2,9 @@
 import { Inter } from 'next/font/google';
 import './globals.css';
 import { GoogleOAuthProvider } from '@react-oauth/google';
-import { Header } from '../components/Header';
-import Footer from '../components/Footer';
-import React from 'react';
 import { UserProvider } from '../context/UserContext';
+import LayoutWrapper from '../components/LayoutWrapper';
+import React from 'react';
 
 const inter = Inter({ subsets: ['latin'] });
 
@@ -41,13 +40,9 @@ export default function RootLayout({
       <body className={`flex flex-col min-h-screen bg-gray-950 ${inter.className}`}>
         <GoogleOAuthProvider clientId={clientId}>
           <UserProvider>
-            {/* The header is now fixed and will stay at the top */}
-            <Header />
-            {/* The `main` element now fills the space between header and footer */}
-            <main className="flex-1 pt-20">
+            <LayoutWrapper>
               {children}
-            </main>
-            <Footer />
+            </LayoutWrapper>
           </UserProvider>
         </GoogleOAuthProvider>
       </body>

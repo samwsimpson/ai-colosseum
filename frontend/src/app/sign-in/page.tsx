@@ -73,7 +73,7 @@ export default function SignInPage() {
     return (
         <div className="flex flex-col items-center justify-center h-screen bg-gray-950 text-white">
             <div className="text-center p-8 bg-gray-900 rounded-2xl shadow-xl max-w-md w-full">
-                <h1 className="text-4xl font-extrabold mb-4 text-white">Welcome to Colosseum</h1>
+                <h1 className="text-4xl font-extrabold mb-4 text-white">Welcome to The AI Colosseum</h1>
                 <p className="text-lg text-gray-400 mb-8">
                     Sign in to start a conversation with your AI team.
                 </p>
