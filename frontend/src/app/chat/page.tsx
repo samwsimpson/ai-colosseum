@@ -173,8 +173,8 @@ export default function ChatPage() {
     
     return (
         <div className="flex flex-col h-screen w-full bg-gray-950 text-white font-sans antialiased">
-            <main ref={chatContainerRef} className="flex-1 overflow-y-auto p-6 bg-gray-900 custom-scrollbar">
-                <div className="max-w-4xl mx-auto flex flex-col space-y-6">
+            <main ref={chatContainerRef} className="flex-1 overflow-y-auto p-4 md:p-6 bg-gray-900 custom-scrollbar">
+                <div className="max-w-4xl mx-auto flex flex-col space-y-4 md:space-y-6">
                     {/* Conditional rendering for the initial message */}
                     {!isWsOpen && userToken ? (
                         <p className="text-center text-gray-500 py-12 text-lg">Connecting to chat...</p>
@@ -190,9 +190,9 @@ export default function ChatPage() {
                         chatHistory.map((msg, index) => (
                             <div
                                 key={index}
-                                className={`flex ${msg.sender === (userName || 'You') ? 'justify-end' : 'justify-start'} ${index === 0 ? 'mt-44' : ''}`}
+                                className={`flex ${msg.sender === (userName || 'You') ? 'justify-end' : 'justify-start'}`}
                             >
-                                <div className={`relative p-4 max-w-2xl text-white rounded-3xl shadow-lg transition-all duration-200 ease-in-out transform hover:scale-[1.01] ${
+                                <div className={`relative p-3 md:p-4 max-w-[80%] text-white rounded-2xl md:rounded-3xl shadow-lg transition-all duration-200 ease-in-out transform hover:scale-[1.01] ${
                                     msg.sender === (userName || 'You')
                                         ? 'bg-blue-600 text-white rounded-tr-none'
                                         : msg.sender === 'Claude'
@@ -217,7 +217,7 @@ export default function ChatPage() {
                     )}
                     <div className="flex flex-col space-y-2">
                         {isTyping.ChatGPT && (
-                            <div className="flex items-center space-x-2 px-4 py-3 rounded-2xl max-w-xs bg-gray-800 text-white shadow-md">
+                            <div className="flex items-center space-x-2 px-3 py-2 md:px-4 md:py-3 rounded-2xl max-w-xs bg-gray-800 text-white shadow-md">
                                 <div className="flex space-x-1">
                                     <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-fast"></span>
                                     <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slow"></span>
@@ -227,7 +227,7 @@ export default function ChatPage() {
                             </div>
                         )}
                         {isTyping.Claude && (
-                            <div className="flex items-center space-x-2 px-4 py-3 rounded-2xl max-w-xs bg-gray-700 text-white shadow-md">
+                            <div className="flex items-center space-x-2 px-3 py-2 md:px-4 md:py-3 rounded-2xl max-w-xs bg-gray-700 text-white shadow-md">
                                 <div className="flex space-x-1">
                                     <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-fast"></span>
                                     <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slow"></span>
@@ -237,7 +237,7 @@ export default function ChatPage() {
                             </div>
                         )}
                         {isTyping.Gemini && (
-                            <div className="flex items-center space-x-2 px-4 py-3 rounded-2xl max-w-xs bg-purple-800 text-white shadow-md">
+                            <div className="flex items-center space-x-2 px-3 py-2 md:px-4 md:py-3 rounded-2xl max-w-xs bg-purple-800 text-white shadow-md">
                                 <div className="flex space-x-1">
                                     <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-fast"></span>
                                     <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slow"></span>
@@ -247,7 +247,7 @@ export default function ChatPage() {
                             </div>
                         )}
                         {isTyping.Mistral && (
-                            <div className="flex items-center space-x-2 px-4 py-3 rounded-2xl max-w-xs bg-green-800 text-white shadow-md">
+                            <div className="flex items-center space-x-2 px-3 py-2 md:px-4 md:py-3 rounded-2xl max-w-xs bg-green-800 text-white shadow-md">
                                 <div className="flex space-x-1">
                                     <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-fast"></span>
                                     <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slow"></span>
@@ -263,59 +263,26 @@ export default function ChatPage() {
 
             <form
                 onSubmit={handleSubmit}
-                className="fixed bottom-0 left-0 right-0 z-10 bg-gray-900 border-t border-gray-800 p-6 shadow-lg"
+                className="fixed bottom-0 left-0 right-0 z-10 bg-gray-900 border-t border-gray-800 p-4 md:p-6 shadow-lg"
             >
-              
                 <div className="flex gap-4 max-w-4xl mx-auto">
-                
-                    
-                        
                     <input
                         type="text"
                         value={message}
                         onChange={(e) => setMessage(e.target.value)}
                         placeholder="Type your message..."
-                        className="flex-grow p-3 rounded-xl border border-gray-700 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200"
+                        className="flex-grow p-3 rounded-xl border border-gray-700 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200 text-sm md:text-base"
                         disabled={!isWsOpen || !userName}
                     />
                     <button
                         type="submit"
-                        className="px-6 py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 disabled:opacity-50 transition-colors duration-200"
+                        className="px-4 py-2 md:px-6 md:py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 disabled:opacity-50 transition-colors duration-200 text-sm"
                         disabled={!isWsOpen || !userName}
                     >
                         Send
                     </button>
                 </div>
             </form>
-
-            <style jsx>{`
-                .custom-scrollbar::-webkit-scrollbar {
-                    width: 10px;
-                }
-                .custom-scrollbar::-webkit-scrollbar-track {
-                    background: #2d3748;
-                }
-                .custom-scrollbar::-webkit-scrollbar-thumb {
-                    background-color: #4a5568;
-                    border-radius: 20px;
-                    border: 3px solid #2d3748;
-                }
-                @keyframes pulse-fast {
-                    0%, 100% { opacity: 0.5; }
-                    50% { opacity: 1; }
-                }
-                @keyframes pulse-slow {
-                    0%, 100% { opacity: 0.5; }
-                    50% { opacity: 1; }
-                }
-                @keyframes pulse-slower {
-                    0%, 100% { opacity: 0.5; }
-                    50% { opacity: 1; }
-                }
-                .animate-pulse-fast { animation: pulse-fast 1.2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
-                .animate-pulse-slow { animation: pulse-slow 1.2s cubic-bezier(0.4, 0, 0.6, 1) infinite 0.2s; }
-                .animate-pulse-slower { animation: pulse-slower 1.2s cubic-bezier(0.4, 0, 0.6, 1) infinite 0.4s; }
-            `}</style>
         </div>
     );
 }

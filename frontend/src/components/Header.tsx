@@ -20,6 +20,8 @@ export const Header = () => {
         <nav className="space-x-4 flex items-center">
           <Link href="/" className="hover:text-blue-400">Home</Link>
           <Link href="/chat" className="hover:text-blue-400">Chat</Link>
+          {/* NEW: Added a new Link for the Contact Page */}
+          <Link href="/contact" className="hover:text-blue-400">Contact</Link>
           {userName ? (
             <>
               <span className="font-bold">Welcome, {userName}!</span>

@@ -20,8 +20,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   const clientId = process.env.NEXT_PUBLIC_GOOGLE_CLIENT_ID;
-  //const clientId = '418819543347-8aes37r4191r49df7dnsue14p049orls.apps.googleusercontent.com';
-  
+
   if (!clientId) {
     return (
       <html lang="en">
