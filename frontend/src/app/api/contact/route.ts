@@ -1,9 +1,9 @@
 // frontend/src/app/api/contact/route.ts
 
 import { NextRequest, NextResponse } from 'next/server';
-import Resend from 'resend';
+import { Resend } from 'resend'; // CORRECTED: Named import for the Resend class
 
-const resend = new Resend.Resend(process.env.RESEND_API_KEY);
+const resend = new Resend(process.env.RESEND_API_KEY);
 const RECIPIENT_EMAIL = process.env.RECIPIENT_EMAIL;
 const FROM_EMAIL = process.env.FROM_EMAIL;
 const RECAPTCHA_SECRET_KEY = process.env.RECAPTCHA_SECRET_KEY;
