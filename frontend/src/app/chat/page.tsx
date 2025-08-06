@@ -24,31 +24,27 @@ export default function ChatPage() {
     const [message, setMessage] = useState<string>('');
     const [chatHistory, setChatHistory] = useState<Message[]>([]);
     const [isWsOpen, setIsWsOpen] = useState<boolean>(false);
-    // New state to track which agents are typing
     const [isTyping, setIsTyping] = useState<TypingState>({
         ChatGPT: false,
         Claude: false,
         Gemini: false,
         Mistral: false,
     });
-    const chatContainerRef = useRef<HTMLDivElement>(null);
-    const chatEndRef = useRef<HTMLDivElement>(null);
+    // Renamed ref to be more descriptive of its purpose
+    const messagesEndRef = useRef<HTMLDivElement>(null);
     const ws = useRef<WebSocket | null>(null);
 
-    // A simple ref to distinguish the first render
-    const isInitialRender = useRef(true);
+    // FIX: A simple scroll function that can be called whenever needed
+    const scrollToBottom = () => {
+        if (messagesEndRef.current) {
+            messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
+        }
+    };
     
-    // Unconditional scroll to the last message
+    // FIX: Replaced the old useEffect with a new one that scrolls on every chatHistory update
     useEffect(() => {
-        if (isInitialRender.current) {
-            isInitialRender.current = false;
-            return;
-        }
-        if (chatEndRef.current) {
-            const behavior = 'smooth';
-            chatEndRef.current.scrollIntoView({ behavior });
-        }
-    }, [chatHistory]);
+        scrollToBottom();
+    }, [chatHistory, isTyping]);
     
     // Handle redirection to sign-in page when userToken is not present
     useEffect(() => {
@@ -74,13 +70,11 @@ export default function ChatPage() {
 
     const handleSubmit = (e: FormEvent) => {
         e.preventDefault();
-        // Updated condition
         if (!message.trim() || !ws.current || ws.current.readyState !== WebSocket.OPEN) return;
         
         const userMessage = { sender: userName || 'You', model: 'Human User', text: message };
         setChatHistory(prev => [...prev, userMessage]);
         
-        // Prepare the payload for the backend with Mistral flag
         const payload = {
             message,
             user_name: userName,
@@ -90,9 +84,7 @@ export default function ChatPage() {
         setMessage('');
     };
 
-    // WebSocket connection logic
     useEffect(() => {
-        // Guard clause to prevent connection without a token
         if (!userToken) {
             if (ws.current) {
                 ws.current.close();
@@ -102,7 +94,6 @@ export default function ChatPage() {
             return;
         }
 
-        // Only create a new WebSocket if one does not exist or is already closed
         if (!ws.current || ws.current.readyState === WebSocket.CLOSED) {
             const backendUrl = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
             const wsProtocol = backendUrl.startsWith('https://') ? 'wss://' : 'ws://';
@@ -110,10 +101,9 @@ export default function ChatPage() {
             
             const socket = new WebSocket(wsUrl);
             ws.current = socket;
-            setIsWsOpen(false); // Set to false while connecting
+            setIsWsOpen(false);
         }
         
-        // Create a stable local reference to the current WebSocket instance
         const currentWs = ws.current; 
 
         currentWs.onopen = () => {
@@ -157,9 +147,7 @@ export default function ChatPage() {
             setIsWsOpen(false);
         };
 
-        // Cleanup function for the useEffect hook
         return () => {
-            // Close the socket only if it's the one we just opened and it's still open
             if (currentWs && currentWs.readyState === WebSocket.OPEN) {
                 console.log('Component unmounting, closing WebSocket.');
                 currentWs.close();
@@ -173,9 +161,10 @@ export default function ChatPage() {
     
     return (
         <div className="flex flex-col h-screen w-full bg-gray-950 text-white font-sans antialiased">
-            <main ref={chatContainerRef} className="flex-1 overflow-y-auto p-4 md:p-6 bg-gray-900 custom-scrollbar">
-                <div className="max-w-4xl mx-auto mt-[72px] flex flex-col space-y-4 md:space-y-6">
-                    {/* Conditional rendering for the initial message */}
+            {/* Removed the large top margin mt-[72px] here */}
+            {/* FIX: New main container class with flex-1 and padding for the header */}
+            <main className="flex-1 overflow-y-auto pt-[72px] pb-[100px] md:pt-[72px] md:pb-[100px] bg-gray-900 custom-scrollbar">
+                <div className="max-w-4xl mx-auto flex flex-col space-y-4 md:space-y-6">
                     {!isWsOpen && userToken ? (
                         <p className="text-center text-gray-500 py-12 text-lg">Connecting to chat...</p>
                     ) : (
@@ -257,7 +246,7 @@ export default function ChatPage() {
                             </div>
                         )}
                     </div>
-                    <div ref={chatEndRef} />
+                    <div ref={messagesEndRef} />
                 </div>
             </main>
 
