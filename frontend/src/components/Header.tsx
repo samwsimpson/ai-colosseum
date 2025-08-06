@@ -23,6 +23,7 @@ export const Header = () => {
         <nav className="space-x-4 flex items-center">
           <Link href="/" className="hover:text-blue-400">Home</Link>
           <Link href="/chat" className="hover:text-blue-400">Chat</Link>
+          <Link href="/subscriptions" className="hover:text-blue-400">Subscriptions</Link>
           <Link href="/contact" className="hover:text-blue-400">Contact</Link>
           {userName ? (
             <>

@@ -1,18 +1,19 @@
-from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
 import autogen
+import asyncio
+import re
 from typing import List, Dict, Any, Union
 import httpx
 from jose import JWTError, jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from google.auth.transport import requests as google_requests
 from google.oauth2.id_token import verify_oauth2_token
-import re
-import asyncio
-
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey
+import stripe
+from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey, DateTime
 from sqlalchemy.orm import sessionmaker, declarative_base, relationship
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
@@ -20,11 +21,28 @@ from sqlalchemy.orm import Session
 from passlib.context import CryptContext
 from fastapi.security import OAuth2PasswordBearer
 
+
 print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 2.0) <<")
 
 load_dotenv()
 
 app = FastAPI()
+
+# Re-added CORS middleware for local development
+origins = [
+    "http://localhost:3000",
+    "https://aicolosseum.app",
+    "https://www.aicolosseum.app"
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
@@ -58,6 +76,7 @@ class Subscription(Base):
     __tablename__ = "subscriptions"
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, index=True)
+    monthly_limit = Column(Integer, nullable=True)
     users = relationship("User", back_populates="subscription")
 
 class User(Base):
@@ -68,6 +87,16 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     subscription_id = Column(Integer, ForeignKey("subscriptions.id"), default=1)
     subscription = relationship("Subscription", back_populates="users")
+    conversations = relationship("Conversation", back_populates="user")
+    
+class Conversation(Base):
+    __tablename__ = "conversations"
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    subscription_id = Column(Integer, ForeignKey("subscriptions.id"))  # Track conversation's subscription
+    user = relationship("User", back_populates="conversations")
+
 
 def get_db():
     db = SessionLocal()
@@ -105,20 +134,63 @@ def startup_event():
     try:
         free = db.query(Subscription).filter_by(name="Free").first()
         if not free:
-            free = Subscription(name="Free")
+            free = Subscription(name="Free", monthly_limit=5)
             db.add(free)
+        
+        starter = db.query(Subscription).filter_by(name="Starter").first()
+        if not starter:
+            starter = Subscription(name="Starter", monthly_limit=25)
+            db.add(starter)
+
+        pro = db.query(Subscription).filter_by(name="Pro").first()
+        if not pro:
+            pro = Subscription(name="Pro", monthly_limit=200)
+            db.add(pro)
+        
+        enterprise = db.query(Subscription).filter_by(name="Enterprise").first()
+        if not enterprise:
+            enterprise = Subscription(name="Enterprise", monthly_limit=None)
+            db.add(enterprise)
+            
         db.commit()
-        for user in db.query(User).all():
-            user.subscription_id = free.id
-        db.commit()
-    except:
+
+        free_plan = db.query(Subscription).filter_by(name="Free").first()
+        if free_plan:
+            for user in db.query(User).filter(User.subscription_id == None).all():
+                user.subscription_id = free_plan.id
+            db.commit()
+            
+    except Exception as e:
+        print(f"Error during startup: {e}")
         db.rollback()
     finally:
         db.close()
 
 @app.get("/api/users/me")
 def read_users_me(current_user: User = Depends(get_current_user)):
-    return {"user_name": current_user.name, "user_id": current_user.id}
+    return {
+        "user_name": current_user.name,
+        "user_id": current_user.id,
+        "user_plan_name": current_user.subscription.name if current_user.subscription else "Free"
+    }
+    
+@app.get("/api/users/me/usage")
+def get_user_usage(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    first_day_of_month = date.today().replace(day=1)
+    
+    # Updated query to filter by subscription ID
+    monthly_usage = db.query(Conversation).filter(
+        Conversation.user_id == current_user.id,
+        Conversation.timestamp >= first_day_of_month,
+        Conversation.subscription_id == current_user.subscription.id
+    ).count()
+    
+    monthly_limit = current_user.subscription.monthly_limit if current_user.subscription else 0
+    
+    return {
+        "monthly_usage": monthly_usage,
+        "monthly_limit": monthly_limit
+    }
 
 @app.post("/api/google-auth", response_model=Token)
 async def google_auth(id_token: GoogleIdToken, db: Session = Depends(get_db)):
@@ -133,10 +205,13 @@ async def google_auth(id_token: GoogleIdToken, db: Session = Depends(get_db)):
 
         if not user:
             user = User(google_id=idinfo['sub'], name=idinfo['name'], email=idinfo['email'])
+            free_plan = db.query(Subscription).filter_by(name="Free").first()
+            if free_plan:
+                user.subscription_id = free_plan.id
             db.add(user)
             db.commit()
             db.refresh(user)
-            print(f"New user created: {user.name}")
+            print(f"New user created: {user.name} on Free plan.")
         else:
             print(f"User found in database: {user.name}")
 
@@ -147,6 +222,69 @@ async def google_auth(id_token: GoogleIdToken, db: Session = Depends(get_db)):
         print(f"Google auth failed: {e}")
         raise HTTPException(status_code=401, detail="Google authentication failed")
 
+# === STRIPE IMPLEMENTATION ===
+stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
+stripe_webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
+
+class SubscriptionRequest(BaseModel):
+    price_id: str
+
+@app.post("/api/create-checkout-session")
+async def create_checkout_session(request: SubscriptionRequest, current_user: User = Depends(get_current_user)):
+    try:
+        checkout_session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[
+                {
+                    "price": request.price_id,
+                    "quantity": 1,
+                },
+            ],
+            mode="subscription",
+            success_url="https://aicolosseum.app/success?session_id={CHECKOUT_SESSION_ID}",
+            cancel_url="https://aicolosseum.app/cancel",
+            customer_email=current_user.email,
+        )
+        return {"id": checkout_session.id, "url": checkout_session.url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/stripe-webhook")
+async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature")
+    event = None
+
+    try:
+        event = stripe.Webhook.construct_event(
+            payload, sig_header, stripe_webhook_secret
+        )
+    except ValueError as e:
+        # Invalid payload
+        raise HTTPException(status_code=400, detail="Invalid payload")
+    except stripe.error.SignatureVerificationError as e:
+        # Invalid signature
+        raise HTTPException(status_code=400, detail="Invalid signature")
+
+    # Handle the checkout.session.completed event
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        customer_email = session["customer_email"]
+        price_id = session["line_items"]["data"][0]["price"]["id"]
+        
+        # Find the user and the new subscription plan
+        user = db.query(User).filter(User.email == customer_email).first()
+        new_subscription = db.query(Subscription).filter(Subscription.price_id == price_id).first()
+
+        if user and new_subscription:
+            # Update the user's subscription
+            user.subscription_id = new_subscription.id
+            db.commit()
+            print(f"User {user.email} successfully subscribed to the {new_subscription.name} plan.")
+    
+    return {"status": "success"}
+
+# === END STRIPE IMPLEMENTATION ===
 
 @app.websocket("/ws/colosseum-chat")
 async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Depends(get_db)):
@@ -154,6 +292,34 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
         await websocket.accept()
 
         user = get_current_user(token=token, db=db)
+        
+        # === SUBSCRIPTION LOGIC: CHECK USAGE LIMIT ===
+        user_subscription = user.subscription
+        if user_subscription and user_subscription.monthly_limit is not None:
+            first_day_of_month = date.today().replace(day=1)
+            conversation_count = db.query(Conversation).filter(
+                Conversation.user_id == user.id,
+                Conversation.timestamp >= first_day_of_month,
+                Conversation.subscription_id == user_subscription.id
+            ).count()
+            
+            if conversation_count >= user_subscription.monthly_limit:
+                await websocket.send_json({
+                    "sender": "System",
+                    "text": "Your monthly conversation limit has been reached. Please upgrade your plan to continue."
+                })
+                await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Limit reached")
+                return
+        
+        # Log the start of a new conversation
+        new_conversation = Conversation(
+            user_id=user.id,
+            subscription_id=user.subscription.id if user.subscription else None
+        )
+        db.add(new_conversation)
+        db.commit()
+        db.refresh(new_conversation)
+
         initial_config = await websocket.receive_json()
 
         print("INITIAL CONFIG RECEIVED:", initial_config)
