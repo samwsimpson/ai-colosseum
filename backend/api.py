@@ -1,5 +1,4 @@
 from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
@@ -19,27 +18,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from passlib.context import CryptContext
-from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.security import OAuth2PasswordBearer
 
 print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 2.0) <<")
 
 load_dotenv()
 
 app = FastAPI()
-
-origins = [
-    "http://localhost:3000",
-    "https://aicolosseum.app",
-    "https://www.aicolosseum.app"
-]
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[origins],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
@@ -125,7 +110,7 @@ def startup_event():
         db.commit()
         for user in db.query(User).all():
             user.subscription_id = free.id
-        db.commit() 
+        db.commit()
     except:
         db.rollback()
     finally:
@@ -143,7 +128,7 @@ async def google_auth(id_token: GoogleIdToken, db: Session = Depends(get_db)):
             raise ValueError("Missing Google Client ID")
 
         idinfo = verify_oauth2_token(id_token.id_token, google_requests.Request(), GOOGLE_CLIENT_ID)
-        
+
         user = db.query(User).filter_by(google_id=idinfo['sub']).first()
 
         if not user:
@@ -175,7 +160,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
 
         message_output_queue = asyncio.Queue()
         user_name = initial_config.get('user_name', 'User')
-        
+
         sanitized_user_name = user_name.replace(" ", "_")
 
         # === AGENT CONFIGS ===
@@ -361,7 +346,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
             code_execution_config={"use_docker": False},
             is_termination_msg=lambda x: isinstance(x, dict) and x.get("content", "").endswith("TERMINATE")
         )
-
+        
         agents = [user_proxy]
         agents.append(WebSocketAssistantAgent("ChatGPT", llm_config=chatgpt_llm_config, system_message=CHATGPT_SYSTEM, message_output_queue=message_output_queue))
         agents.append(WebSocketAssistantAgent("Claude", llm_config=claude_llm_config, system_message=CLAUDE_SYSTEM, message_output_queue=message_output_queue))
@@ -391,34 +376,40 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
             llm_config=False,
             system_message=GROUPCHAT_SYSTEM_MESSAGE
         )
-
-        async def message_consumer():
+        
+        async def message_consumer_task(queue: asyncio.Queue, ws: WebSocket):
             while True:
-                msg = await message_output_queue.get()
-                await websocket.send_json(msg)
+                msg = await queue.get()
+                await ws.send_json(msg)
 
-        consumer_task = asyncio.create_task(message_consumer())
-        
-        conversation_task = asyncio.create_task(user_proxy.a_initiate_chat(manager, message=initial_config['message']))
-        
-        async def user_input_handler():
+        async def user_input_handler_task(ws: WebSocket, proxy: WebSocketUserProxyAgent):
             while True:
                 try:
-                    data = await websocket.receive_json()
+                    data = await ws.receive_json()
                     user_message = data['message']
-                    await user_proxy.a_inject_user_message(user_message)
+                    await proxy.a_inject_user_message(user_message)
                 except WebSocketDisconnect:
                     break
                 except Exception as e:
                     print(f"Error handling user input: {e}")
-                    await websocket.send_json({"sender": "System", "text": f"Error: {e}"})
-        
-        input_handler_task = asyncio.create_task(user_input_handler())
-        
-        await asyncio.gather(consumer_task, conversation_task, input_handler_task)
+                    await ws.send_json({"sender": "System", "text": f"Error: {e}"})
+
+        consumer_task = asyncio.create_task(message_consumer_task(message_output_queue, websocket))
+        conversation_task = asyncio.create_task(user_proxy.a_initiate_chat(manager, message=initial_config['message']))
+        input_handler_task = asyncio.create_task(user_input_handler_task(websocket, user_proxy))
+
+        try:
+            done, pending = await asyncio.wait([consumer_task, conversation_task, input_handler_task], return_when=asyncio.FIRST_COMPLETED)
+        finally:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
 
     except WebSocketDisconnect:
         print("WebSocket closed")
     except Exception as e:
         print(f"General exception: {e}")
-        await websocket.send_json({"sender": "System", "text": f"Error: {e}"})
+        try:
+            await websocket.send_json({"sender": "System", "text": f"Error: {e}"})
+        except WebSocketDisconnect:
+            pass
