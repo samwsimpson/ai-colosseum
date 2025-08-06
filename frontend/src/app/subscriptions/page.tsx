@@ -25,7 +25,7 @@ interface PlanCardProps {
   isEnterprise?: boolean;
   priceId?: string;
   isCurrentPlan: boolean;
-  conversationsUsed?: number;
+  conversationsUsed?: number ! null;
   monthlyLimit?: number | null;
 }
 
