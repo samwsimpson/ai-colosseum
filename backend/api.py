@@ -13,16 +13,9 @@ from datetime import datetime, timedelta, date
 from google.auth.transport import requests as google_requests
 from google.oauth2.id_token import verify_oauth2_token
 import stripe
-from sqlalchemy import create_engine, Column, Integer, String, Boolean, ForeignKey, DateTime
-from sqlalchemy.orm import sessionmaker, declarative_base, relationship
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
+from google.cloud import firestore
 
-from passlib.context import CryptContext
-from fastapi.security import OAuth2PasswordBearer
-
-
-print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 2.0) <<")
+print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 2.0 - FIRESTORE) <<")
 
 load_dotenv()
 
@@ -57,61 +50,15 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     user_name: str
-    user_id: int
+    user_id: str
 
 class GoogleIdToken(BaseModel):
     id_token: str
 
-DATABASE_URL = "sqlite:///./sql_app.db"
-engine = create_engine(
-    DATABASE_URL,
-    connect_args={"check_same_thread": False},
-    pool_size=20,
-    max_overflow=40
-)
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
-Base = declarative_base()
+# Initialize Firestore DB client without explicit credentials
+db = firestore.Client()
 
-class Subscription(Base):
-    __tablename__ = "subscriptions"
-    id = Column(Integer, primary_key=True, index=True)
-    name = Column(String, unique=True, index=True)
-    monthly_limit = Column(Integer, nullable=True)
-    users = relationship("User", back_populates="subscription")
-
-class User(Base):
-    __tablename__ = "users"
-    id = Column(Integer, primary_key=True, index=True)
-    google_id = Column(String, unique=True, index=True)
-    name = Column(String)
-    email = Column(String, unique=True, index=True)
-    subscription_id = Column(Integer, ForeignKey("subscriptions.id"), default=1)
-    subscription = relationship("Subscription", back_populates="users")
-    conversations = relationship("Conversation", back_populates="user")
-    
-class Conversation(Base):
-    __tablename__ = "conversations"
-    id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"))
-    timestamp = Column(DateTime, default=datetime.utcnow)
-    subscription_id = Column(Integer, ForeignKey("subscriptions.id"))
-    user = relationship("User", back_populates="conversations")
-
-
-def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
-
-def create_access_token(data: dict, expires_delta: Union[timedelta, None] = None):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -119,103 +66,123 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     )
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = int(payload.get("sub"))
-        user = db.query(User).filter(User.id == user_id).first()
-        if not user:
+        user_id = payload.get("sub")
+        
+        user_ref = db.collection('users').document(user_id)
+        user_doc = user_ref.get()
+
+        if not user_doc.exists:
             raise credentials_exception
+            
+        user = user_doc.to_dict()
+        user['id'] = user_doc.id
         return user
     except JWTError:
         raise credentials_exception
 
+def create_access_token(data: dict, expires_delta: Union[timedelta, None] = None):
+    to_encode = data.copy()
+    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
+    to_encode.update({"exp": expire})
+    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
 @app.on_event("startup")
-def startup_event():
-    Base.metadata.create_all(bind=engine)
-    db = SessionLocal()
-    try:
-        free = db.query(Subscription).filter_by(name="Free").first()
-        if not free:
-            free = Subscription(name="Free", monthly_limit=5)
-            db.add(free)
-        
-        starter = db.query(Subscription).filter_by(name="Starter").first()
-        if not starter:
-            starter = Subscription(name="Starter", monthly_limit=25)
-            db.add(starter)
-
-        pro = db.query(Subscription).filter_by(name="Pro").first()
-        if not pro:
-            pro = Subscription(name="Pro", monthly_limit=200)
-            db.add(pro)
-        
-        enterprise = db.query(Subscription).filter_by(name="Enterprise").first()
-        if not enterprise:
-            enterprise = Subscription(name="Enterprise", monthly_limit=None)
-            db.add(enterprise)
-            
-        db.commit()
-
-        free_plan = db.query(Subscription).filter_by(name="Free").first()
-        if free_plan:
-            for user in db.query(User).filter(User.subscription_id == None).all():
-                user.subscription_id = free_plan.id
-            db.commit()
-            
-    except Exception as e:
-        print(f"Error during startup: {e}")
-        db.rollback()
-    finally:
-        db.close()
+async def startup_event():
+    print("Connecting to Firestore...")
+    
+    subscriptions_ref = db.collection('subscriptions')
+    plans = {
+        'Free': {'monthly_limit': 5, 'price_id': 'free_price_id_placeholder'},
+        'Starter': {'monthly_limit': 25, 'price_id': 'starter_price_id_placeholder'},
+        'Pro': {'monthly_limit': 200, 'price_id': 'pro_price_id_placeholder'},
+        'Enterprise': {'monthly_limit': None, 'price_id': 'enterprise_price_id_placeholder'},
+    }
+    
+    for name, data in plans.items():
+        doc_ref = subscriptions_ref.document(name)
+        doc = doc_ref.get()
+        if not doc.exists:
+            doc_ref.set(data)
+            print(f"Created subscription plan: {name}")
 
 @app.get("/api/users/me")
-def read_users_me(current_user: User = Depends(get_current_user)):
+async def read_users_me(current_user: dict = Depends(get_current_user)):
+    user_doc = db.collection('users').document(current_user['id']).get()
+    user_data = user_doc.to_dict()
+    
+    subscription_doc = db.collection('subscriptions').document(user_data['subscription_id']).get()
+    subscription_data = subscription_doc.to_dict()
+    
     return {
-        "user_name": current_user.name,
-        "user_id": current_user.id,
-        "user_plan_name": current_user.subscription.name if current_user.subscription else "Free"
+        "user_name": user_data['name'],
+        "user_id": user_data['id'],
+        "user_plan_name": subscription_data['name']
     }
     
 @app.get("/api/users/me/usage")
-def get_user_usage(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    first_day_of_month = date.today().replace(day=1)
+async def get_user_usage(current_user: dict = Depends(get_current_user)):
+    user_doc = db.collection('users').document(current_user['id']).get()
+    user_data = user_doc.to_dict()
     
-    monthly_usage = db.query(Conversation).filter(
-        Conversation.user_id == current_user.id,
-        Conversation.timestamp >= first_day_of_month,
-        Conversation.subscription_id == current_user.subscription.id
-    ).count()
+    subscription_doc = db.collection('subscriptions').document(user_data['subscription_id']).get()
+    subscription_data = subscription_doc.to_dict()
     
-    monthly_limit = current_user.subscription.monthly_limit if current_user.subscription else 0
+    if subscription_data['monthly_limit'] is None:
+        return {
+            "monthly_usage": 0,
+            "monthly_limit": None
+        }
+
+    first_day_of_month = datetime.today().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    monthly_usage_query = db.collection('conversations').where(
+        'user_id', '==', current_user['id']
+    ).where(
+        'subscription_id', '==', user_data['subscription_id']
+    ).where(
+        'timestamp', '>=', first_day_of_month
+    )
     
+    monthly_usage_docs = monthly_usage_query.stream()
+    monthly_usage = len(list(monthly_usage_docs))
+
     return {
         "monthly_usage": monthly_usage,
-        "monthly_limit": monthly_limit
+        "monthly_limit": subscription_data['monthly_limit']
     }
 
 @app.post("/api/google-auth", response_model=Token)
-async def google_auth(id_token: GoogleIdToken, db: Session = Depends(get_db)):
+async def google_auth(id_token: GoogleIdToken):
     try:
         GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
         if not GOOGLE_CLIENT_ID:
             raise ValueError("Missing Google Client ID")
 
         idinfo = verify_oauth2_token(id_token.id_token, google_requests.Request(), GOOGLE_CLIENT_ID)
+        google_id = idinfo['sub']
 
-        user = db.query(User).filter_by(google_id=idinfo['sub']).first()
+        users_ref = db.collection('users')
+        user_doc_query = users_ref.where('google_id', '==', google_id).limit(1).stream()
+        user_list = [doc for doc in user_doc_query]
 
-        if not user:
-            user = User(google_id=idinfo['sub'], name=idinfo['name'], email=idinfo['email'])
-            free_plan = db.query(Subscription).filter_by(name="Free").first()
-            if free_plan:
-                user.subscription_id = free_plan.id
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-            print(f"New user created: {user.name} on Free plan.")
+        if not user_list:
+            free_plan_doc = db.collection('subscriptions').document('Free').get()
+            
+            new_user_ref = users_ref.document()
+            user_data = {
+                'google_id': google_id,
+                'name': idinfo['name'],
+                'email': idinfo['email'],
+                'subscription_id': free_plan_doc.id,
+            }
+            new_user_ref.set(user_data)
+            user_id = new_user_ref.id
+            print(f"New user created: {idinfo['name']} on Free plan.")
         else:
-            print(f"User found in database: {user.name}")
+            user_id = user_list[0].id
+            print(f"User found in database: {user_list[0].to_dict()['name']}")
 
-        token = create_access_token({"sub": str(user.id)}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-        return {"access_token": token, "token_type": "bearer", "user_name": user.name, "user_id": user.id}
+        token = create_access_token({"sub": user_id}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+        return {"access_token": token, "token_type": "bearer", "user_name": idinfo['name'], "user_id": user_id}
 
     except Exception as e:
         print(f"Google auth failed: {e}")
@@ -229,7 +196,7 @@ class SubscriptionRequest(BaseModel):
     price_id: str
 
 @app.post("/api/create-checkout-session")
-async def create_checkout_session(request: SubscriptionRequest, current_user: User = Depends(get_current_user)):
+async def create_checkout_session(request: SubscriptionRequest, current_user: dict = Depends(get_current_user)):
     try:
         checkout_session = stripe.checkout.Session.create(
             payment_method_types=["card"],
@@ -242,14 +209,14 @@ async def create_checkout_session(request: SubscriptionRequest, current_user: Us
             mode="subscription",
             success_url="https://aicolosseum.app/success?session_id={CHECKOUT_SESSION_ID}",
             cancel_url="https://aicolosseum.app/cancel",
-            customer_email=current_user.email,
+            customer_email=current_user['email'],
         )
         return {"id": checkout_session.id, "url": checkout_session.url}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/stripe-webhook")
-async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
+async def stripe_webhook(request: Request):
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
     event = None
@@ -268,33 +235,49 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
         customer_email = session["customer_email"]
         price_id = session["line_items"]["data"][0]["price"]["id"]
         
-        user = db.query(User).filter(User.email == customer_email).first()
-        new_subscription = db.query(Subscription).filter(Subscription.price_id == price_id).first()
+        users_ref = db.collection('users')
+        user_doc_query = users_ref.where('email', '==', customer_email).limit(1).stream()
+        user_docs = [doc for doc in user_doc_query]
+        
+        subscriptions_ref = db.collection('subscriptions')
+        new_subscription_doc_query = subscriptions_ref.where('price_id', '==', price_id).limit(1).stream()
+        new_subscription_list = [doc for doc in new_subscription_doc_query]
 
-        if user and new_subscription:
-            user.subscription_id = new_subscription.id
-            db.commit()
-            print(f"User {user.email} successfully subscribed to the {new_subscription.name} plan.")
+        if user_docs and new_subscription_list:
+            user_ref = users_ref.document(user_docs[0].id)
+            await user_ref.update({'subscription_id': new_subscription_list[0].id})
+            print(f"User {customer_email} successfully subscribed to the {new_subscription_list[0].id} plan.")
     
     return {"status": "success"}
 
 @app.websocket("/ws/colosseum-chat")
-async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Depends(get_db)):
+async def websocket_endpoint(websocket: WebSocket, token: str):
     try:
         await websocket.accept()
 
-        user = get_current_user(token=token, db=db)
+        user = get_current_user(token=token)
         
-        user_subscription = user.subscription
-        if user_subscription and user_subscription.monthly_limit is not None:
-            first_day_of_month = date.today().replace(day=1)
-            conversation_count = db.query(Conversation).filter(
-                Conversation.user_id == user.id,
-                Conversation.timestamp >= first_day_of_month,
-                Conversation.subscription_id == user_subscription.id
-            ).count()
+        user_doc = db.collection('users').document(user['id']).get()
+        user_data = user_doc.to_dict()
+        
+        user_subscription_doc = db.collection('subscriptions').document(user_data['subscription_id']).get()
+        user_subscription_data = user_subscription_doc.to_dict()
+
+        if user_subscription_data['monthly_limit'] is not None:
+            first_day_of_month = datetime.today().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             
-            if conversation_count >= user_subscription.monthly_limit:
+            conversation_count_query = db.collection('conversations').where(
+                'user_id', '==', user['id']
+            ).where(
+                'subscription_id', '==', user_data['subscription_id']
+            ).where(
+                'timestamp', '>=', first_day_of_month
+            )
+
+            conversation_docs = conversation_count_query.stream()
+            conversation_count = len(list(conversation_docs))
+            
+            if conversation_count >= user_subscription_data['monthly_limit']:
                 await websocket.send_json({
                     "sender": "System",
                     "text": "Your monthly conversation limit has been reached. Please upgrade your plan to continue."
@@ -302,21 +285,17 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Limit reached")
                 return
         
-        new_conversation = Conversation(
-            user_id=user.id,
-            subscription_id=user.subscription.id if user.subscription else None
-        )
-        db.add(new_conversation)
-        db.commit()
-        db.refresh(new_conversation)
+        new_conversation_data = {
+            'user_id': user['id'],
+            'timestamp': datetime.utcnow(),
+            'subscription_id': user_data['subscription_id'],
+        }
+        db.collection('conversations').add(new_conversation_data)
 
         initial_config = await websocket.receive_json()
-
         print("INITIAL CONFIG RECEIVED:", initial_config)
-
         message_output_queue = asyncio.Queue()
         user_name = initial_config.get('user_name', 'User')
-
         sanitized_user_name = user_name.replace(" ", "_")
 
         CHATGPT_SYSTEM = f"""Your name is ChatGPT. You are a helpful AI assistant. You are in a group chat with a user named {user_name} and three other AIs: Claude, Gemini, and Mistral. Refer to yourself in the first person (I, me, my). Do not attempt to pass the turn to another agent. Your response should conclude with your assigned termination phrase. Pay close attention to the entire conversation history. When prompted as a group, you must provide a direct and helpful response to the user's prompt. Your goal is to work with your team to solve the user's request. Conclude with 'TERMINATE' when the task is complete."""
