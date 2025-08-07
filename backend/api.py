@@ -58,7 +58,7 @@ class GoogleIdToken(BaseModel):
 # Initialize Firestore DB client without explicit credentials
 db = firestore.Client()
 
-def get_current_user(token: str = Depends(oauth2_scheme)):
+async def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Could not validate credentials",
@@ -69,7 +69,7 @@ def get_current_user(token: str = Depends(oauth2_scheme)):
         user_id = payload.get("sub")
         
         user_ref = db.collection('users').document(user_id)
-        user_doc = user_ref.get()
+        user_doc = await user_ref.get()
 
         if not user_doc.exists:
             raise credentials_exception
@@ -100,7 +100,7 @@ async def startup_event():
     
     for name, data in plans.items():
         doc_ref = subscriptions_ref.document(name)
-        doc = doc_ref.get()
+        doc = await doc_ref.get()
         if not doc.exists:
             await doc_ref.set(data)
             print(f"Created subscription plan: {name}")
@@ -255,7 +255,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
     try:
         await websocket.accept()
 
-        user = get_current_user(token=token)
+        user = await get_current_user(token=token)
         
         user_doc = await db.collection('users').document(user['id']).get()
         user_data = user_doc.to_dict()
@@ -297,15 +297,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         message_output_queue = asyncio.Queue()
         user_name = initial_config.get('user_name', 'User')
         sanitized_user_name = user_name.replace(" ", "_")
-
-        CHATGPT_SYSTEM = f"""Your name is ChatGPT. You are a helpful AI assistant. You are in a group chat with a user named {user_name} and three other AIs: Claude, Gemini, and Mistral. Refer to yourself in the first person (I, me, my). Do not attempt to pass the turn to another agent. Your response should conclude with your assigned termination phrase. Pay close attention to the entire conversation history. When prompted as a group, you must provide a direct and helpful response to the user's prompt. Your goal is to work with your team to solve the user's request. Conclude with 'TERMINATE' when the task is complete."""
-        CLAUDE_SYSTEM = f"""Your name is Claude. You are a helpful AI assistant. You are in a group chat with a user named {user_name} and three other AIs: ChatGPT, Gemini, and Mistral. Refer to yourself in the first person (I, me, my). Do not attempt to pass the turn to another agent. Your response should conclude with your assigned termination phrase. Pay close attention to the entire conversation history. When prompted as a group, you must provide a direct and helpful response to the user's prompt. Your goal is to work with your team to solve the user's request. Conclude with 'Task Completed.' at the end of your response."""
-        GEMINI_SYSTEM = f"""Your name is Gemini. You are a helpful AI assistant. You are in a group chat with a user named {user_name} and three other AIs: ChatGPT, Claude, and Mistral. Refer to yourself in the first person (I, me, my). Do not attempt to pass the turn to another agent. Your response should conclude with your assigned termination phrase. Pay close attention to the entire conversation history. When prompted as a group, you must provide a direct and helpful response to the user's prompt. Your goal is to work with your team to solve the user's request. Conclude with 'Task Completed.' at the end of your response."""
-        MISTRAL_SYSTEM = f"""Your name is Mistral. You are a helpful AI assistant. You are in a group chat with a user named {user_name}, and three other AIs: ChatGPT, Claude, and Gemini. Refer to yourself in the first person (I, me, my). Do not attempt to pass the turn to another agent. Your response should conclude with your assigned termination phrase. Pay close attention to the entire conversation history. When prompted as a group, you must provide a direct and helpful response to the user's prompt. Your goal is to work with your team to solve the user's request. Conclude with 'Task Completed.' at the end of your response."""
-        GROUPCHAT_SYSTEM_MESSAGE = f"""
-        You are the GroupChatManager. You are in a chat with a user named {user_name}, a ChatGPT assistant, a Claude assistant, a Gemini assistant, and a Mistral assistant.
-        The available agents are ['User', 'ChatGPT', 'Claude', 'Gemini', 'Mistral']. Your goal is to manage the conversation and select the next speaker.
-        """
 
         chatgpt_llm_config = {
             "config_list": [{
