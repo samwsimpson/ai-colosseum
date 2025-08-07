@@ -142,7 +142,7 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
         'timestamp', '>=', first_day_of_month
     )
     
-    monthly_usage_docs = monthly_usage_query.stream()
+    monthly_usage_docs = await monthly_usage_query.stream()
     monthly_usage = len(list(monthly_usage_docs))
 
     return {
