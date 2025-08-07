@@ -141,34 +141,44 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
     
 @app.get("/api/users/me/usage")
 async def get_user_usage(current_user: dict = Depends(get_current_user)):
-    user_doc = await db.collection('users').document(current_user['id']).get()
-    user_data = user_doc.to_dict()
-    
-    subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
-    subscription_data = subscription_doc.to_dict()
-    
-    if subscription_data['monthly_limit'] is None:
+    print(f"USAGE_ENDPOINT: User {current_user['id']} requested usage.")
+    try:
+        user_doc = await db.collection('users').document(current_user['id']).get()
+        user_data = user_doc.to_dict()
+        print(f"USAGE_ENDPOINT: User data found for {current_user['id']}.")
+
+        subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
+        subscription_data = subscription_doc.to_dict()
+        print(f"USAGE_ENDPOINT: Subscription data found for {user_data['subscription_id']}.")
+
+        if subscription_data['monthly_limit'] is None:
+            print("USAGE_ENDPOINT: User has unlimited plan. Returning 0 usage.")
+            return {
+                "monthly_usage": 0,
+                "monthly_limit": None
+            }
+
+        first_day_of_month = datetime.today().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        monthly_usage_query = db.collection('conversations').where(
+            'user_id', '==', current_user['id']
+        ).where(
+            'subscription_id', '==', user_data['subscription_id']
+        ).where(
+            'timestamp', '>=', first_day_of_month
+        )
+        print("USAGE_ENDPOINT: Query created.")
+
+        monthly_usage_docs = await monthly_usage_query.get()
+        monthly_usage = len(monthly_usage_docs)
+        print(f"USAGE_ENDPOINT: Found {monthly_usage} conversations this month.")
+
         return {
-            "monthly_usage": 0,
-            "monthly_limit": None
+            "monthly_usage": monthly_usage,
+            "monthly_limit": subscription_data['monthly_limit']
         }
-
-    first_day_of_month = datetime.today().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    monthly_usage_query = db.collection('conversations').where(
-        'user_id', '==', current_user['id']
-    ).where(
-        'subscription_id', '==', user_data['subscription_id']
-    ).where(
-        'timestamp', '>=', first_day_of_month
-    )
-    
-    monthly_usage_docs = await monthly_usage_query.stream()
-    monthly_usage = len(list(monthly_usage_docs))
-
-    return {
-        "monthly_usage": monthly_usage,
-        "monthly_limit": subscription_data['monthly_limit']
-    }
+    except Exception as e:
+        print(f"USAGE_ENDPOINT: Error getting user usage: {e}")
+        raise HTTPException(status_code=500, detail="Error getting user usage")
 
 @app.post("/api/google-auth", response_model=Token)
 async def google_auth(id_token: GoogleIdToken):
