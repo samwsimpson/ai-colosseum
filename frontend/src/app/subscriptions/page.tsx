@@ -94,7 +94,7 @@ const PlanCard: React.FC<PlanCardProps> = ({
       
       {isCurrentPlan && monthlyLimit !== null && (
         <p className="mt-2 text-sm text-gray-400">
-          You've used {conversationsUsed} of {monthlyLimit} conversations this month.
+          You&apos;ve used {conversationsUsed} of {monthlyLimit} conversations this month.
         </p>
       )}
 
@@ -253,7 +253,7 @@ export default function SubscriptionPage() {
         <section className="text-center mb-16">
             <h2 className="text-3xl md:text-4xl font-bold text-blue-400">Why The AI Colosseum?</h2>
             <p className="mt-4 text-lg text-gray-300 max-w-3xl mx-auto">
-                Unlike a single AI model, The Colosseum orchestrates a team of the world's most advanced AIs, including <strong>ChatGPT, Claude, Gemini, and Mistral</strong>. They collaborate, critique each other's work, and combine their unique strengths to deliver more comprehensive, accurate, and creative solutions. This isn't just about getting an answer—it's about getting the best answer from a diverse, expert team.
+                Unlike a single AI model, The Colosseum orchestrates a team of the world&apos;s most advanced AIs, including <strong>ChatGPT, Claude, Gemini, and Mistral</strong>. They collaborate, critique each other&apos;s work, and combine their unique strengths to deliver more comprehensive, accurate, and creative solutions. This isn&apos;t just about getting an answer—it&apos;s about getting the best answer from a diverse, expert team.
             </p>
         </section>
 
