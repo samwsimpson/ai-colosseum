@@ -94,7 +94,7 @@ class Conversation(Base):
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"))
     timestamp = Column(DateTime, default=datetime.utcnow)
-    subscription_id = Column(Integer, ForeignKey("subscriptions.id"))  # Track conversation's subscription
+    subscription_id = Column(Integer, ForeignKey("subscriptions.id"))
     user = relationship("User", back_populates="conversations")
 
 
@@ -178,7 +178,6 @@ def read_users_me(current_user: User = Depends(get_current_user)):
 def get_user_usage(current_user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     first_day_of_month = date.today().replace(day=1)
     
-    # Updated query to filter by subscription ID
     monthly_usage = db.query(Conversation).filter(
         Conversation.user_id == current_user.id,
         Conversation.timestamp >= first_day_of_month,
@@ -260,31 +259,24 @@ async def stripe_webhook(request: Request, db: Session = Depends(get_db)):
             payload, sig_header, stripe_webhook_secret
         )
     except ValueError as e:
-        # Invalid payload
         raise HTTPException(status_code=400, detail="Invalid payload")
     except stripe.error.SignatureVerificationError as e:
-        # Invalid signature
         raise HTTPException(status_code=400, detail="Invalid signature")
 
-    # Handle the checkout.session.completed event
     if event["type"] == "checkout.session.completed":
         session = event["data"]["object"]
         customer_email = session["customer_email"]
         price_id = session["line_items"]["data"][0]["price"]["id"]
         
-        # Find the user and the new subscription plan
         user = db.query(User).filter(User.email == customer_email).first()
         new_subscription = db.query(Subscription).filter(Subscription.price_id == price_id).first()
 
         if user and new_subscription:
-            # Update the user's subscription
             user.subscription_id = new_subscription.id
             db.commit()
             print(f"User {user.email} successfully subscribed to the {new_subscription.name} plan.")
     
     return {"status": "success"}
-
-# === END STRIPE IMPLEMENTATION ===
 
 @app.websocket("/ws/colosseum-chat")
 async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Depends(get_db)):
@@ -293,7 +285,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
 
         user = get_current_user(token=token, db=db)
         
-        # === SUBSCRIPTION LOGIC: CHECK USAGE LIMIT ===
         user_subscription = user.subscription
         if user_subscription and user_subscription.monthly_limit is not None:
             first_day_of_month = date.today().replace(day=1)
@@ -311,7 +302,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Limit reached")
                 return
         
-        # Log the start of a new conversation
         new_conversation = Conversation(
             user_id=user.id,
             subscription_id=user.subscription.id if user.subscription else None
@@ -329,8 +319,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str, db: Session = Dep
 
         sanitized_user_name = user_name.replace(" ", "_")
 
-        # === AGENT CONFIGS ===
-        # Dynamically create system messages with the user's name and explicit persona instructions
         CHATGPT_SYSTEM = f"""Your name is ChatGPT. You are a helpful AI assistant. You are in a group chat with a user named {user_name} and three other AIs: Claude, Gemini, and Mistral. Refer to yourself in the first person (I, me, my). Do not attempt to pass the turn to another agent. Your response should conclude with your assigned termination phrase. Pay close attention to the entire conversation history. When prompted as a group, you must provide a direct and helpful response to the user's prompt. Your goal is to work with your team to solve the user's request. Conclude with 'TERMINATE' when the task is complete."""
         CLAUDE_SYSTEM = f"""Your name is Claude. You are a helpful AI assistant. You are in a group chat with a user named {user_name} and three other AIs: ChatGPT, Gemini, and Mistral. Refer to yourself in the first person (I, me, my). Do not attempt to pass the turn to another agent. Your response should conclude with your assigned termination phrase. Pay close attention to the entire conversation history. When prompted as a group, you must provide a direct and helpful response to the user's prompt. Your goal is to work with your team to solve the user's request. Conclude with 'Task Completed.' at the end of your response."""
         GEMINI_SYSTEM = f"""Your name is Gemini. You are a helpful AI assistant. You are in a group chat with a user named {user_name} and three other AIs: ChatGPT, Claude, and Mistral. Refer to yourself in the first person (I, me, my). Do not attempt to pass the turn to another agent. Your response should conclude with your assigned termination phrase. Pay close attention to the entire conversation history. When prompted as a group, you must provide a direct and helpful response to the user's prompt. Your goal is to work with your team to solve the user's request. Conclude with 'Task Completed.' at the end of your response."""
