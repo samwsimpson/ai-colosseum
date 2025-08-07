@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
@@ -56,7 +57,7 @@ class GoogleIdToken(BaseModel):
     id_token: str
 
 # Initialize Firestore DB client without explicit credentials
-db = firestore.Client()
+db = firestore.AsyncClient()
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
