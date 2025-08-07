@@ -102,15 +102,15 @@ async def startup_event():
         doc_ref = subscriptions_ref.document(name)
         doc = doc_ref.get()
         if not doc.exists:
-            doc_ref.set(data)
+            await doc_ref.set(data)
             print(f"Created subscription plan: {name}")
 
 @app.get("/api/users/me")
 async def read_users_me(current_user: dict = Depends(get_current_user)):
-    user_doc = db.collection('users').document(current_user['id']).get()
+    user_doc = await db.collection('users').document(current_user['id']).get()
     user_data = user_doc.to_dict()
     
-    subscription_doc = db.collection('subscriptions').document(user_data['subscription_id']).get()
+    subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
     subscription_data = subscription_doc.to_dict()
     
     return {
@@ -121,10 +121,10 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
     
 @app.get("/api/users/me/usage")
 async def get_user_usage(current_user: dict = Depends(get_current_user)):
-    user_doc = db.collection('users').document(current_user['id']).get()
+    user_doc = await db.collection('users').document(current_user['id']).get()
     user_data = user_doc.to_dict()
     
-    subscription_doc = db.collection('subscriptions').document(user_data['subscription_id']).get()
+    subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
     subscription_data = subscription_doc.to_dict()
     
     if subscription_data['monthly_limit'] is None:
@@ -162,10 +162,10 @@ async def google_auth(id_token: GoogleIdToken):
 
         users_ref = db.collection('users')
         user_doc_query = users_ref.where('google_id', '==', google_id).limit(1).stream()
-        user_list = [doc for doc in user_doc_query]
+        user_list = [doc async for doc in user_doc_query]
 
         if not user_list:
-            free_plan_doc = db.collection('subscriptions').document('Free').get()
+            free_plan_doc = await db.collection('subscriptions').document('Free').get()
             
             new_user_ref = users_ref.document()
             user_data = {
@@ -174,7 +174,7 @@ async def google_auth(id_token: GoogleIdToken):
                 'email': idinfo['email'],
                 'subscription_id': free_plan_doc.id,
             }
-            new_user_ref.set(user_data)
+            await new_user_ref.set(user_data)
             user_id = new_user_ref.id
             print(f"New user created: {idinfo['name']} on Free plan.")
         else:
@@ -237,11 +237,11 @@ async def stripe_webhook(request: Request):
         
         users_ref = db.collection('users')
         user_doc_query = users_ref.where('email', '==', customer_email).limit(1).stream()
-        user_docs = [doc for doc in user_doc_query]
+        user_docs = [doc async for doc in user_doc_query]
         
         subscriptions_ref = db.collection('subscriptions')
         new_subscription_doc_query = subscriptions_ref.where('price_id', '==', price_id).limit(1).stream()
-        new_subscription_list = [doc for doc in new_subscription_doc_query]
+        new_subscription_list = [doc async for doc in new_subscription_doc_query]
 
         if user_docs and new_subscription_list:
             user_ref = users_ref.document(user_docs[0].id)
@@ -257,10 +257,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         user = get_current_user(token=token)
         
-        user_doc = db.collection('users').document(user['id']).get()
+        user_doc = await db.collection('users').document(user['id']).get()
         user_data = user_doc.to_dict()
         
-        user_subscription_doc = db.collection('subscriptions').document(user_data['subscription_id']).get()
+        user_subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
         user_subscription_data = user_subscription_doc.to_dict()
 
         if user_subscription_data['monthly_limit'] is not None:
@@ -274,7 +274,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 'timestamp', '>=', first_day_of_month
             )
 
-            conversation_docs = conversation_count_query.stream()
+            conversation_docs = await conversation_count_query.stream()
             conversation_count = len(list(conversation_docs))
             
             if conversation_count >= user_subscription_data['monthly_limit']:
@@ -290,7 +290,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             'timestamp': datetime.utcnow(),
             'subscription_id': user_data['subscription_id'],
         }
-        db.collection('conversations').add(new_conversation_data)
+        await db.collection('conversations').add(new_conversation_data)
 
         initial_config = await websocket.receive_json()
         print("INITIAL CONFIG RECEIVED:", initial_config)
