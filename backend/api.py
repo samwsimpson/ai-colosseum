@@ -59,8 +59,8 @@ class Token(BaseModel):
     user_name: str
     user_id: str
 
-class GoogleIdToken(BaseModel):
-    id_token: str
+class GoogleAccessToken(BaseModel):
+    access_token: str
 
 # Initialize Firestore DB client without explicit credentials
 db = firestore.AsyncClient()
@@ -181,14 +181,16 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Error getting user usage")
 
 @app.post("/api/google-auth", response_model=Token)
-async def google_auth(id_token: GoogleIdToken):
+async def google_auth(token: GoogleAccessToken):
     try:
-        GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-        if not GOOGLE_CLIENT_ID:
-            raise ValueError("Missing Google Client ID")
-
-        idinfo = verify_oauth2_token(id_token.id_token, google_requests.Request(), GOOGLE_CLIENT_ID)
-        google_id = idinfo['sub']
+        async with httpx.AsyncClient() as client:
+            response = await client.get(
+                "https://www.googleapis.com/oauth2/v3/userinfo",
+                headers={"Authorization": f"Bearer {token.access_token}"},
+            )
+            response.raise_for_status()
+            idinfo = response.json()
+            google_id = idinfo['sub']
 
         users_ref = db.collection('users')
         user_doc_query = users_ref.where('google_id', '==', google_id).limit(1).stream()
