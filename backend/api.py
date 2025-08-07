@@ -98,12 +98,21 @@ async def startup_event():
         'Enterprise': {'monthly_limit': None, 'price_id': 'enterprise_price_id_placeholder'},
     }
     
-    for name, data in plans.items():
-        doc_ref = subscriptions_ref.document(name)
-        doc = await doc_ref.get()
-        if not doc.exists:
-            await doc_ref.set(data)
-            print(f"Created subscription plan: {name}")
+    try:
+        for name, data in plans.items():
+            print(f"Checking for subscription plan: {name}")
+            doc_ref = subscriptions_ref.document(name)
+            doc = await doc_ref.get()
+            if not doc.exists:
+                print(f"Plan '{name}' not found. Creating it.")
+                await doc_ref.set(data)
+                print(f"Created subscription plan: {name}")
+            else:
+                print(f"Plan '{name}' already exists.")
+    except Exception as e:
+        print(f"Failed to initialize Firestore collections: {e}")
+        # Re-raise the exception to fail the startup
+        raise
 
 @app.get("/api/users/me")
 async def read_users_me(current_user: dict = Depends(get_current_user)):
