@@ -111,7 +111,6 @@ async def startup_event():
                 print(f"Plan '{name}' already exists.")
     except Exception as e:
         print(f"Failed to initialize Firestore collections: {e}")
-        # Re-raise the exception to fail the startup
         raise
 
 @app.get("/api/users/me")
