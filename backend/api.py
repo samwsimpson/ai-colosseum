@@ -22,6 +22,10 @@ load_dotenv()
 
 app = FastAPI()
 
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
+
 # Re-added CORS middleware for local development
 origins = [
     "http://localhost:3000",
@@ -89,29 +93,33 @@ def create_access_token(data: dict, expires_delta: Union[timedelta, None] = None
 
 @app.on_event("startup")
 async def startup_event():
-    print("Connecting to Firestore...")
-    
-    subscriptions_ref = db.collection('subscriptions')
-    plans = {
-        'Free': {'monthly_limit': 5, 'price_id': 'free_price_id_placeholder'},
-        'Starter': {'monthly_limit': 25, 'price_id': 'starter_price_id_placeholder'},
-        'Pro': {'monthly_limit': 200, 'price_id': 'pro_price_id_placeholder'},
-        'Enterprise': {'monthly_limit': None, 'price_id': 'enterprise_price_id_placeholder'},
-    }
-    
+    print("STARTUP EVENT: Initializing Firestore...")
     try:
+        subscriptions_ref = db.collection('subscriptions')
+        print("STARTUP EVENT: subscriptions_ref created")
+        plans = {
+            'Free': {'monthly_limit': 5, 'price_id': 'free_price_id_placeholder'},
+            'Starter': {'monthly_limit': 25, 'price_id': 'starter_price_id_placeholder'},
+            'Pro': {'monthly_limit': 200, 'price_id': 'pro_price_id_placeholder'},
+            'Enterprise': {'monthly_limit': None, 'price_id': 'enterprise_price_id_placeholder'},
+        }
+        print("STARTUP EVENT: Plans defined")
+
         for name, data in plans.items():
-            print(f"Checking for subscription plan: {name}")
+            print(f"STARTUP EVENT: Checking for subscription plan: {name}")
             doc_ref = subscriptions_ref.document(name)
+            print(f"STARTUP EVENT: doc_ref for {name} created")
             doc = await doc_ref.get()
+            print(f"STARTUP EVENT: doc.exists for {name}: {doc.exists}")
             if not doc.exists:
-                print(f"Plan '{name}' not found. Creating it.")
+                print(f"STARTUP EVENT: Plan '{name}' not found. Creating it.")
                 await doc_ref.set(data)
-                print(f"Created subscription plan: {name}")
+                print(f"STARTUP EVENT: Created subscription plan: {name}")
             else:
-                print(f"Plan '{name}' already exists.")
+                print(f"STARTUP EVENT: Plan '{name}' already exists.")
+        print("STARTUP EVENT: Firestore initialization complete.")
     except Exception as e:
-        print(f"Failed to initialize Firestore collections: {e}")
+        print(f"STARTUP EVENT: Failed to initialize Firestore collections: {e}")
         raise
 
 @app.get("/api/users/me")
