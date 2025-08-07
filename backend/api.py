@@ -136,7 +136,7 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
     return {
         "user_name": user_data['name'],
         "user_id": user_data['id'],
-        "user_plan_name": subscription_data['name']
+        "user_plan_name": subscription_doc.id
     }
     
 @app.get("/api/users/me/usage")
