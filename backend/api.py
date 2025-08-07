@@ -1,4 +1,3 @@
-raise Exception("This is a deliberate error")
 import sys
 print("TOP OF api.py: Script starting...", file=sys.stderr)
 from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request
