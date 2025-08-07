@@ -184,7 +184,7 @@ export default function SubscriptionPage() {
             Select the perfect plan for your needs. Upgrade or contact us for custom solutions.
           </p>
         </div>
-        
+
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-8 max-w-6xl mx-auto mb-16">
             <PlanCard
                 title="Free"
@@ -249,14 +249,12 @@ export default function SubscriptionPage() {
                 monthlyLimit={monthlyLimit}
             />
         </div>
-
         <section className="text-center mb-16">
-            <h2 className="text-3xl md:text-4xl font-bold text-blue-400">Why The AI Colosseum?</h2>
+            <h2 className="text-3xl md:text-4xl font-bold text-blue-400">Why The Colosseum?</h2>
             <p className="mt-4 text-lg text-gray-300 max-w-3xl mx-auto">
-                Unlike a single AI model, The Colosseum orchestrates a team of the world&apos;s most advanced AIs, including <strong>ChatGPT, Claude, Gemini, and Mistral</strong>. They collaborate, critique each other&apos;s work, and combine their unique strengths to deliver more comprehensive, accurate, and creative solutions. This isn&apos;t just about getting an answer—it&apos;s about getting the best answer from a diverse, expert team.
+                Unlike a single AI model, The Colosseum orchestrates a team of the world&apos;s most advanced AIs, including **ChatGPT, Claude, Gemini, and Mistral**. They collaborate, critique each other&apos;s work, and combine their unique strengths to deliver more comprehensive, accurate, and creative solutions. This isn&apos;t just about getting an answer—it&apos;s about getting the best answer from a diverse, expert team.
             </p>
         </section>
-
       </div>
     </div>
   );
