@@ -21,6 +21,7 @@ export default function SignInPage() {
 
     // Handle successful sign-in with Google
     const handleGoogleSuccess = async (tokenResponse: Omit<TokenResponse, 'error' | 'error_description' | 'error_uri'>) => {
+        console.log("Google Sign-In Success. Token Response:", tokenResponse);
         setIsLoading(true);
 
         try {
