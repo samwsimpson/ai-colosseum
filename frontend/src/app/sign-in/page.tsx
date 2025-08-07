@@ -4,7 +4,7 @@
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useUser } from '../../context/UserContext';
-import { useGoogleLogin, TokenResponse } from '@react-oauth/google';
+import { useGoogleLogin } from '@react-oauth/google';
 
 // This component handles the Google Sign-In process.
 export default function SignInPage() {
@@ -20,7 +20,7 @@ export default function SignInPage() {
     }, [userToken, router]);
 
     // Handle successful sign-in with Google
-    const handleGoogleSuccess = async (tokenResponse: Omit<TokenResponse, 'error' | 'error_description' | 'error_uri'>) => {
+    const handleGoogleSuccess = async (tokenResponse) => {
         setIsLoading(true);
 
         try {
