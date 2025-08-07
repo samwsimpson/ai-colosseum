@@ -1,3 +1,4 @@
+import non_existent_module
 import sys
 print("TOP OF api.py: Script starting...", file=sys.stderr)
 from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request
