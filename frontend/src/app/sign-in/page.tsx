@@ -85,6 +85,7 @@ export default function SignInPage() {
                     <GoogleLogin
                         onSuccess={handleGoogleSuccess}
                         onError={() => handleGoogleFailure(new Error("Google sign-in failed."))}
+                        useOneTap
                     />
                 )}
             </div>
