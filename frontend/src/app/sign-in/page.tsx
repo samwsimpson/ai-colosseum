@@ -4,7 +4,7 @@
 import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useUser } from '../../context/UserContext';
-import { useGoogleLogin } from '@react-oauth/google';
+import { useGoogleLogin, CodeResponse } from '@react-oauth/google';
 
 // This component handles the Google Sign-In process.
 export default function SignInPage() {
@@ -20,7 +20,7 @@ export default function SignInPage() {
     }, [userToken, router]);
 
     // Handle successful sign-in with Google
-    const handleGoogleSuccess = async (codeResponse) => {
+    const handleGoogleSuccess = async (codeResponse: Omit<CodeResponse, 'error' | 'error_description' | 'error_uri'>) => {
         setIsLoading(true);
 
         try {
@@ -68,7 +68,9 @@ export default function SignInPage() {
     const login = useGoogleLogin({
         onSuccess: handleGoogleSuccess,
         onError: handleGoogleFailure,
-        flow: 'auth-code', // Use auth-code flow
+        flow: 'auth-code',
+        ux_mode: 'redirect',
+        redirect_uri: typeof window !== 'undefined' ? window.location.origin + '/sign-in' : '',
     });
 
     return (
