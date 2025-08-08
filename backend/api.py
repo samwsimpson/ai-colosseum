@@ -59,8 +59,8 @@ class Token(BaseModel):
     user_name: str
     user_id: str
 
-class GoogleAccessToken(BaseModel):
-    access_token: str
+class GoogleAuthCode(BaseModel):
+    code: str
 
 # Initialize Firestore DB client without explicit credentials
 db = firestore.AsyncClient()
@@ -180,17 +180,32 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
         print(f"USAGE_ENDPOINT: Error getting user usage: {e}")
         raise HTTPException(status_code=500, detail="Error getting user usage")
 
+from google.oauth2.flow import Flow
+
 @app.post("/api/google-auth", response_model=Token)
-async def google_auth(token: GoogleAccessToken):
+async def google_auth(auth_code: GoogleAuthCode):
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                "https://www.googleapis.com/oauth2/v3/userinfo",
-                headers={"Authorization": f"Bearer {token.access_token}"},
-            )
-            response.raise_for_status()
-            idinfo = response.json()
-            google_id = idinfo['sub']
+        client_config = {
+            "web": {
+                "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+                "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"),
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                "redirect_uris": ["postmessage"],
+            }
+        }
+        flow = Flow.from_client_config(
+            client_config,
+            scopes=['https://www.googleapis.com/auth/userinfo.profile', 'https://www.googleapis.com/auth/userinfo.email', 'openid'],
+            redirect_uri='postmessage'
+        )
+
+        flow.fetch_token(code=auth_code.code)
+        credentials = flow.credentials
+
+        idinfo = verify_oauth2_token(credentials.id_token, google_requests.Request(), credentials.client_id)
+        google_id = idinfo['sub']
 
         users_ref = db.collection('users')
         user_doc_query = users_ref.where('google_id', '==', google_id).limit(1).stream()
