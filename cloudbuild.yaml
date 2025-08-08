@@ -8,6 +8,7 @@ steps:
   args: ['push', 'gcr.io/$PROJECT_ID/$REPO_NAME:$COMMIT_SHA']
 
 # 3. Deploy container image to Cloud Run
+# Forcing a new push to make the branch visible.
 - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
   entrypoint: gcloud
   args:
