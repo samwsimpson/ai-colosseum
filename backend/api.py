@@ -53,7 +53,7 @@ class ChatMessage(BaseModel):
     sender: str
     text: str
 
-class Token(BaseModel):
+class GoogleAccessToken(BaseModel):
     access_token: str
     token_type: str
     user_name: str
