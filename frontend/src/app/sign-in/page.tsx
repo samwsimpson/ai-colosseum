@@ -68,7 +68,9 @@ export default function SignInPage() {
     const login = useGoogleLogin({
         onSuccess: handleGoogleSuccess,
         onError: handleGoogleFailure,
-        flow: 'auth-code', // Use auth-code flow
+        flow: 'auth-code',
+        ux_mode: 'redirect',
+        redirect_uri: typeof window !== 'undefined' ? window.location.origin + '/sign-in' : '',
     });
 
     return (
