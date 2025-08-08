@@ -20,7 +20,7 @@ export default function SignInPage() {
     }, [userToken, router]);
 
     // Handle successful sign-in with Google
-    const handleGoogleSuccess = async (tokenResponse) => {
+    const handleGoogleSuccess = async (codeResponse) => {
         setIsLoading(true);
 
         try {
@@ -36,7 +36,7 @@ export default function SignInPage() {
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ access_token: tokenResponse.access_token }),
+                body: JSON.stringify({ code: codeResponse.code }),
             });
 
             if (!res.ok) {
@@ -68,7 +68,7 @@ export default function SignInPage() {
     const login = useGoogleLogin({
         onSuccess: handleGoogleSuccess,
         onError: handleGoogleFailure,
-        flow: 'implicit', // Use implicit flow to get an access token directly
+        flow: 'auth-code', // Use auth-code flow
     });
 
     return (
