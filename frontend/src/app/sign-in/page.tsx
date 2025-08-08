@@ -17,10 +17,20 @@ export default function SignInPage() {
         if (userToken) {
             router.push('/chat'); // Redirect to chat page if already authenticated
         }
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const code = urlParams.get('code');
+
+        if (code) {
+            // We have a code, so we can exchange it for a token.
+            // The `handleGoogleSuccess` function is already set up to do this.
+            // We need to pass it an object with the code.
+            handleGoogleSuccess({ code });
+        }
     }, [userToken, router]);
 
     // Handle successful sign-in with Google
-    const handleGoogleSuccess = async (codeResponse: Omit<CodeResponse, 'error' | 'error_description' | 'error_uri'>) => {
+    const handleGoogleSuccess = async ({ code }: { code: string }) => {
         setIsLoading(true);
 
         try {
@@ -36,7 +46,7 @@ export default function SignInPage() {
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ code: codeResponse.code }),
+                body: JSON.stringify({ code }),
             });
 
             if (!res.ok) {
