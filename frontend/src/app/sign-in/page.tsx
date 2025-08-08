@@ -30,7 +30,7 @@ export default function SignInPage() {
     }, [userToken, router]);
 
     // Handle successful sign-in with Google
-    const handleGoogleSuccess = async (codeResponse: Omit<CodeResponse, 'error' | 'error_description' | 'error_uri'>) => {
+    const handleGoogleSuccess = async ({ code }: { code: string }) => {
         setIsLoading(true);
 
         try {
@@ -46,7 +46,7 @@ export default function SignInPage() {
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ code: codeResponse.code }),
+                body: JSON.stringify({ code }),
             });
 
             if (!res.ok) {
