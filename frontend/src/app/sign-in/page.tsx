@@ -77,7 +77,7 @@ export default function SignInPage() {
     };
 
     const login = useGoogleLogin({
-        onSuccess: handleGoogleSuccess,
+        onSuccess: () => {},
         onError: handleGoogleFailure,
         flow: 'auth-code',
         ux_mode: 'redirect',
