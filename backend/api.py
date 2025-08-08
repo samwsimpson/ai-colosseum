@@ -64,6 +64,7 @@ class Token(BaseModel):
     user_id: str
 
 # Initialize Firestore DB client without explicit credentials
+# Creating a new branch to resolve merge confusion.
 db = firestore.AsyncClient()
 print("FIRESTORE_CLIENT_INITIALIZED: db = firestore.AsyncClient()", file=sys.stderr)
 
