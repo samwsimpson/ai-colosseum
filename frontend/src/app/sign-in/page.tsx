@@ -23,14 +23,15 @@ export default function SignInPage() {
 
         if (code) {
             // We have a code, so we can exchange it for a token.
+            const redirectUri = window.location.origin + '/sign-in';
             // The `handleGoogleSuccess` function is already set up to do this.
-            // We need to pass it an object with the code.
-            handleGoogleSuccess({ code });
+            // We need to pass it an object with the code and the redirect_uri.
+            handleGoogleSuccess({ code, redirect_uri: redirectUri });
         }
     }, [userToken, router]);
 
     // Handle successful sign-in with Google
-    const handleGoogleSuccess = async ({ code }: { code: string }) => {
+    const handleGoogleSuccess = async ({ code, redirect_uri }: { code: string; redirect_uri: string }) => {
         setIsLoading(true);
 
         try {
@@ -46,7 +47,7 @@ export default function SignInPage() {
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ code }),
+                body: JSON.stringify({ code, redirect_uri }),
             });
 
             if (!res.ok) {

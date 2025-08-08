@@ -55,12 +55,13 @@ class ChatMessage(BaseModel):
 
 class GoogleAuthCode(BaseModel):
     code: str
+    redirect_uri: str
+
+class Token(BaseModel):
+    access_token: str
     token_type: str
     user_name: str
     user_id: str
-
-class GoogleAuthCode(BaseModel):
-    code: str
 
 # Initialize Firestore DB client without explicit credentials
 db = firestore.AsyncClient()
@@ -192,13 +193,16 @@ async def google_auth(auth_code: GoogleAuthCode):
                 "auth_uri": "https://accounts.google.com/o/oauth2/auth",
                 "token_uri": "https://oauth2.googleapis.com/token",
                 "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-                "redirect_uris": ["postmessage"],
+                "redirect_uris": [
+                    "https://aicolosseum.app/sign-in",
+                    "http://localhost:3000/sign-in"
+                ],
             }
         }
         flow = Flow.from_client_config(
             client_config,
             scopes=['https://www.googleapis.com/auth/userinfo.profile', 'https://www.googleapis.com/auth/userinfo.email', 'openid'],
-            redirect_uri='postmessage'
+            redirect_uri=auth_code.redirect_uri
         )
 
         flow.fetch_token(code=auth_code.code)
