@@ -10,11 +10,6 @@ COPY requirements.txt .
 # Install the Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# --- DIAGNOSTIC COMMANDS to debug ModuleNotFoundError ---
-RUN echo "--- Installed packages: ---" && pip list
-RUN echo "--- Site-packages contents: ---" && ls -l /usr/local/lib/python3.11/site-packages/
-# --- END DIAGNOSTIC COMMANDS ---
-
 # Copy the rest of the application code
 COPY api.py .
 COPY run.py .

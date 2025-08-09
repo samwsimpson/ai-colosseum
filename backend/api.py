@@ -6,7 +6,7 @@ from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
-import autogen
+import autogen_agentchat as autogen
 import asyncio
 import re
 from typing import List, Dict, Any, Union
