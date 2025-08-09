@@ -6,8 +6,10 @@ from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
-# Correct, specific imports for autogen classes
-from autogen_agentchat import Agent, ConversableAgent, AssistantAgent, UserProxyAgent, GroupChat, GroupChatManager
+# Correct, specific imports for autogen classes, separating core from agentchat
+from autogen_core.agent import Agent
+from autogen_core.conversable_agent import ConversableAgent
+from autogen_agentchat import AssistantAgent, UserProxyAgent, GroupChat, GroupChatManager
 import asyncio
 import re
 from typing import List, Dict, Any, Union
