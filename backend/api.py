@@ -43,6 +43,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# DEBUGGING MIDDLEWARE to log all incoming requests
+@app.middleware("http")
+async def debug_request_middleware(request: Request, call_next):
+    print("--- NEW REQUEST ---", file=sys.stderr, flush=True)
+    print(f"METHOD: {request.method}", file=sys.stderr, flush=True)
+    print(f"URL: {request.url}", file=sys.stderr, flush=True)
+    print(f"HEADERS: {dict(request.headers)}", file=sys.stderr, flush=True)
+
+    body = await request.body()
+    if body:
+        print(f"BODY: {body.decode(errors='ignore')}", file=sys.stderr, flush=True)
+    else:
+        print("BODY: (empty)", file=sys.stderr, flush=True)
+
+    async def receive():
+        return {"type": "http.request", "body": body}
+
+    new_request = Request(request.scope, receive)
+
+    response = await call_next(new_request)
+
+    print(f"--- RESPONSE ---", file=sys.stderr, flush=True)
+    print(f"STATUS_CODE: {response.status_code}", file=sys.stderr, flush=True)
+
+    return response
+
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
@@ -196,6 +222,7 @@ async def google_auth(auth_code: GoogleAuthCode):
                 "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
                 "redirect_uris": [
                     "https://aicolosseum.app/sign-in",
+                    "https://www.aicolosseum.app/sign-in",
                     "http://localhost:3000/sign-in"
                 ],
             }
