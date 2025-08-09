@@ -43,33 +43,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# DEBUGGING MIDDLEWARE to log all incoming requests
-@app.middleware("http")
-async def debug_request_middleware(request: Request, call_next):
-    print("--- NEW REQUEST ---", file=sys.stderr, flush=True)
-    print(f"METHOD: {request.method}", file=sys.stderr, flush=True)
-    print(f"URL: {request.url}", file=sys.stderr, flush=True)
-    print(f"HEADERS: {dict(request.headers)}", file=sys.stderr, flush=True)
-
-    body = await request.body()
-    if body:
-        print(f"BODY: {body.decode(errors='ignore')}", file=sys.stderr, flush=True)
-    else:
-        print("BODY: (empty)", file=sys.stderr, flush=True)
-
-    async def receive():
-        return {"type": "http.request", "body": body}
-
-    new_request = Request(request.scope, receive)
-
-    response = await call_next(new_request)
-
-    print(f"--- RESPONSE ---", file=sys.stderr, flush=True)
-    print(f"STATUS_CODE: {response.status_code}", file=sys.stderr, flush=True)
-
-    return response
-
-
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
@@ -195,6 +168,7 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
         
         count_result = await aggregation_query.count().get()
         monthly_usage = count_result[0][0].value
+
         print(f"USAGE_ENDPOINT: Found {monthly_usage} conversations this month.")
 
         return {
@@ -351,8 +325,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 'timestamp', '>=', first_day_of_month
             )
 
-            conversation_docs = await conversation_count_query.stream()
-            conversation_count = len(list(conversation_docs))
+            conversation_docs = [doc async for doc in conversation_count_query.stream()]
+            conversation_count = len(conversation_docs)
             
             if conversation_count >= user_subscription_data['monthly_limit']:
                 await websocket.send_json({
