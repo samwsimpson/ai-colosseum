@@ -503,6 +503,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         
         class WebSocketUserProxyAgent(UserProxyAgent):
             def __init__(self, *args, message_output_queue: asyncio.Queue, **kwargs):
+                # Pop custom kwargs before calling super()
+                kwargs.pop('message_output_queue', None)
+                kwargs.pop('human_input_mode', None) # Also remove the old one just in case
+
                 super().__init__(*args, **kwargs)
                 self._user_input_queue = asyncio.Queue()
                 self._message_output_queue = message_output_queue
@@ -531,8 +535,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             async def a_inject_user_message(self, message: str):
                 await self._user_input_queue.put(message)
 
-        user_proxy = UserProxyAgent(
+        user_proxy = WebSocketUserProxyAgent(
             name=sanitized_user_name,
+            human_input_mode="NEVER",  # This will be popped by our __init__
             message_output_queue=message_output_queue,
             code_execution_config={"use_docker": False},
             is_termination_msg=lambda x: isinstance(x, dict) and x.get("content", "").endswith("TERMINATE")
