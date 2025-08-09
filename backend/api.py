@@ -505,7 +505,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             def __init__(self, *args, message_output_queue: asyncio.Queue, **kwargs):
                 # Pop custom kwargs before calling super()
                 kwargs.pop('message_output_queue', None)
-                kwargs.pop('human_input_mode', None) # Also remove the old one just in case
+                kwargs.pop('human_input_mode', None)
+                kwargs.pop('code_execution_config', None)
 
                 super().__init__(*args, **kwargs)
                 self._user_input_queue = asyncio.Queue()
