@@ -531,9 +531,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             async def a_inject_user_message(self, message: str):
                 await self._user_input_queue.put(message)
 
-        user_proxy = WebSocketUserProxyAgent(
+        user_proxy = UserProxyAgent(
             name=sanitized_user_name,
-            human_input_mode="NEVER",
             message_output_queue=message_output_queue,
             code_execution_config={"use_docker": False},
             is_termination_msg=lambda x: isinstance(x, dict) and x.get("content", "").endswith("TERMINATE")
