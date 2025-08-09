@@ -6,7 +6,9 @@ from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
-import autogen_agentchat as autogen
+from autogen_agentchat import AssistantAgent, UserProxyAgent, GroupChat, GroupChatManager
+from autogen_agentchat.agent import Agent
+from autogen_agentchat.conversable_agent import ConversableAgent
 import asyncio
 import re
 from typing import List, Dict, Any, Union
@@ -400,7 +402,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "timeout": 90
         }
         
-        class WebSocketAssistantAgent(autogen.AssistantAgent):
+        class WebSocketAssistantAgent(AssistantAgent):
             def __init__(self, *args, message_output_queue: asyncio.Queue, **kwargs):
                 super().__init__(*args, **kwargs)
                 self._message_output_queue = message_output_queue
@@ -412,7 +414,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     "text": ""
                 })
 
-            async def a_generate_reply(self, messages: List[Dict[str, Any]] = None, sender: autogen.ConversableAgent = None, **kwargs) -> Union[str, Dict, None]:
+            async def a_generate_reply(self, messages: List[Dict[str, Any]] = None, sender: ConversableAgent = None, **kwargs) -> Union[str, Dict, None]:
                 await self.a_send_typing_indicator(is_typing=True)
                 try:
                     reply = await super().a_generate_reply(messages=messages, sender=sender, **kwargs)
@@ -431,7 +433,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self.waiting_on_user_to_break_loop = False
                 self.user_name = user_name
 
-            def __call__(self, last_speaker: autogen.Agent, groupchat: autogen.GroupChat) -> autogen.Agent:
+            def __call__(self, last_speaker: Agent, groupchat: GroupChat) -> Agent:
                 last_message = groupchat.messages[-1]
                 last_content = last_message["content"].strip().lower()
                 self.message_history.append((last_speaker.name, last_content))
@@ -495,7 +497,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 return self.agent_by_name[self.user_name]
         
-        class WebSocketUserProxyAgent(autogen.UserProxyAgent):
+        class WebSocketUserProxyAgent(UserProxyAgent):
             def __init__(self, *args, message_output_queue: asyncio.Queue, **kwargs):
                 super().__init__(*args, **kwargs)
                 self._user_input_queue = asyncio.Queue()
@@ -518,7 +520,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 return None
 
-            async def a_generate_reply(self, messages: List[Dict[str, Any]] = None, sender: autogen.ConversableAgent = None, **kwargs) -> Union[str, Dict, None]:
+            async def a_generate_reply(self, messages: List[Dict[str, Any]] = None, sender: ConversableAgent = None, **kwargs) -> Union[str, Dict, None]:
                 new_user_message = await self._user_input_queue.get()
                 return new_user_message
 
@@ -549,7 +551,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         
         selector = CustomSpeakerSelector(agents, user_name=sanitized_user_name)
 
-        groupchat = autogen.GroupChat(
+        groupchat = GroupChat(
             agents=agents,
             messages=[],
             max_round=999999,
@@ -557,7 +559,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             allow_repeat_speaker=True
         )
         
-        manager = autogen.GroupChatManager(
+        manager = GroupChatManager(
             groupchat=groupchat,
             llm_config=False,
             system_message=GROUPCHAT_SYSTEM_MESSAGE
