@@ -9,7 +9,8 @@ COPY requirements.txt .
 
 # Install the Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
-RUN find /usr/local/lib/python3.11/site-packages/google -ls
+RUN pip check
+RUN find /usr/local/lib/python3.11/site-packages/ -name "flow.py" -ls
 
 # Copy the rest of the application code
 COPY api.py .
