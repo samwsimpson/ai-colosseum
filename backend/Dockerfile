@@ -11,11 +11,13 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy the rest of the application code
-COPY . .
+COPY api.py .
+COPY run.py .
+COPY test_anthropic.py .
 
 # Expose port 8080 as required by Google Cloud Run
 EXPOSE 8080
 
-# Command to run the application using Uvicorn
+# Command to run the application using Uvicorn, respecting the PORT env var from Cloud Run
 # The --host 0.0.0.0 part is essential for Cloud Run
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD uvicorn api:app --host 0.0.0.0 --port $PORT
