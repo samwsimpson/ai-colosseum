@@ -10,11 +10,6 @@ COPY requirements.txt .
 # Install the Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# --- RECURSIVE DIAGNOSTIC COMMANDS ---
-RUN echo "--- Recursive listing for autogen_core: ---" && ls -lR /usr/local/lib/python3.11/site-packages/autogen_core
-RUN echo "--- Recursive listing for autogen_agentchat: ---" && ls -lR /usr/local/lib/python3.11/site-packages/autogen_agentchat
-# --- END DIAGNOSTIC COMMANDS ---
-
 # Copy the rest of the application code
 COPY api.py .
 COPY run.py .

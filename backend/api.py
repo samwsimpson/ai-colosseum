@@ -6,10 +6,13 @@ from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
-# Correct, specific imports for autogen classes, separating core from agentchat
-from autogen_core.agent import Agent
-from autogen_core.conversable_agent import ConversableAgent
-from autogen_agentchat import AssistantAgent, UserProxyAgent, GroupChat, GroupChatManager
+# The definitive, correct imports for autogen based on file structure
+from autogen_core._base_agent import BaseAgent as Agent
+from autogen_agentchat.agents._base_chat_agent import BaseChatAgent as ConversableAgent
+from autogen_agentchat.agents._assistant_agent import AssistantAgent
+from autogen_agentchat.agents._user_proxy_agent import UserProxyAgent
+from autogen_agentchat.teams._group_chat._base_group_chat import BaseGroupChat as GroupChat
+from autogen_agentchat.teams._group_chat._base_group_chat_manager import BaseGroupChatManager as GroupChatManager
 import asyncio
 import re
 from typing import List, Dict, Any, Union
