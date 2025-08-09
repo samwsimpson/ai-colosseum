@@ -131,11 +131,12 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
     user_data = user_doc.to_dict()
     
     subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
-    subscription_data = subscription_doc.to_dict()
     
     return {
         "user_name": user_data['name'],
+
         "user_id": user_data['id'],
+
         "user_plan_name": subscription_doc.id
     }
     
@@ -146,7 +147,6 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
         user_doc = await db.collection('users').document(current_user['id']).get()
         user_data = user_doc.to_dict()
         print(f"USAGE_ENDPOINT: User data found for {current_user['id']}.")
-
         subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
         subscription_data = subscription_doc.to_dict()
         print(f"USAGE_ENDPOINT: Subscription data found for {user_data['subscription_id']}.")
@@ -159,6 +159,7 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
             }
 
         first_day_of_month = datetime.today().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
         monthly_usage_query = db.collection('conversations').where(
             'user_id', '==', current_user['id']
         ).where(
@@ -172,6 +173,7 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
         aggregation_query = monthly_usage_query.count()
         count_result = await aggregation_query.get()
         monthly_usage = count_result[0][0].value
+
         print(f"USAGE_ENDPOINT: Found {monthly_usage} conversations this month.")
 
         return {
@@ -212,7 +214,7 @@ async def google_auth(auth_code: GoogleAuthCode):
 
         idinfo = verify_oauth2_token(credentials.id_token, google_requests.Request(), credentials.client_id)
         google_id = idinfo['sub']
-
+        
         users_ref = db.collection('users')
         user_doc_query = users_ref.where('google_id', '==', google_id).limit(1).stream()
         user_list = [doc async for doc in user_doc_query]
@@ -240,6 +242,7 @@ async def google_auth(auth_code: GoogleAuthCode):
     except Exception as e:
         print(f"Google auth failed: {e}")
         raise HTTPException(status_code=401, detail="Google authentication failed")
+
 
 # === STRIPE IMPLEMENTATION ===
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
