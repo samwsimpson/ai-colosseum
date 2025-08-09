@@ -182,7 +182,7 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
         print(f"USAGE_ENDPOINT: Error getting user usage: {e}")
         raise HTTPException(status_code=500, detail="Error getting user usage")
 
-from google.oauth2.flow import Flow
+from google_auth_oauthlib.flow import Flow
 
 @app.post("/api/google-auth", response_model=Token)
 async def google_auth(auth_code: GoogleAuthCode):
