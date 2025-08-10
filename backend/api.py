@@ -1,8 +1,5 @@
-import sys
-print("TOP OF api.py: Script starting...", file=sys.stderr)
 from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
@@ -118,7 +115,7 @@ async def startup_event():
             if not doc.exists:
                 print(f"STARTUP EVENT: Plan '{name}' not found. Creating it.")
                 await doc_ref.set(data)
-                print(f"STARTUP EVENT: Created subscription plan: {name}")
+                print(f"Created subscription plan: {name}")
             else:
                 print(f"STARTUP EVENT: Plan '{name}' already exists.")
         print("STARTUP EVENT: Firestore initialization complete.")
