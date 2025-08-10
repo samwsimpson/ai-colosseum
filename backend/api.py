@@ -408,6 +408,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         
         class WebSocketAssistantAgent(AssistantAgent):
             def __init__(self, *args, message_output_queue: asyncio.Queue, **kwargs):
+                # Pop custom/unknown kwargs before calling the parent constructor
+                kwargs.pop('message_output_queue', None)
+                kwargs.pop('llm_config', None)
+                kwargs.pop('system_message', None)
+
                 super().__init__(*args, **kwargs)
                 self._message_output_queue = message_output_queue
             
