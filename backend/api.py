@@ -362,7 +362,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             name=sanitized_user_name,
             human_input_mode="NEVER",
             message_output_queue=message_output_queue,
-            code_execution_config=False,
+            code_execution_config={"use_docker": False},
         )
 
         agents = [user_proxy]
