@@ -11,3 +11,4 @@ pyparsing
 google-api-python-client
 anthropic
 mistralai
+openai==1.98.0
