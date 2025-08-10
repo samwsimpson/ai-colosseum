@@ -14,6 +14,7 @@ from google.auth.transport import requests as google_requests
 from google.oauth2.id_token import verify_oauth2_token
 import stripe
 from google.cloud import firestore
+from fastapi.security import OAuth2PasswordBearer # This import was likely missing or misplaced
 
 print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 2.0 - FIRESTORE) <<")
 
