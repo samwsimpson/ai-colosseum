@@ -1,14 +1,13 @@
 fastapi
 uvicorn[standard]
 python-dotenv
-pyautogen
+autogen==0.9.7
 python-jose[cryptography]
-google-cloud-firestore
 google-auth-oauthlib
+google-cloud-firestore
 stripe
 httpx
 pyparsing
-google-cloud-aiplatform
 google-api-python-client
 anthropic
 mistralai
