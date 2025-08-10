@@ -407,13 +407,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         }
         
         class WebSocketAssistantAgent(AssistantAgent):
-            def __init__(self, *args, message_output_queue: asyncio.Queue, **kwargs):
-                # Pop custom/unknown kwargs before calling the parent constructor
-                kwargs.pop('message_output_queue', None)
-                kwargs.pop('llm_config', None)
-                kwargs.pop('system_message', None)
-
-                super().__init__(*args, **kwargs)
+            def __init__(self, name: str, model_client, system_message: str, message_output_queue: asyncio.Queue):
+                # Call the parent constructor with the arguments it expects
+                super().__init__(name=name, model_client=model_client, system_message=system_message)
                 self._message_output_queue = message_output_queue
             
             async def a_send_typing_indicator(self, is_typing: bool):
@@ -551,10 +547,40 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         )
         
         agents = [user_proxy]
-        agents.append(WebSocketAssistantAgent("ChatGPT", llm_config=chatgpt_llm_config, system_message=CHATGPT_SYSTEM, message_output_queue=message_output_queue))
-        agents.append(WebSocketAssistantAgent("Claude", llm_config=claude_llm_config, system_message=CLAUDE_SYSTEM, message_output_queue=message_output_queue))
-        agents.append(WebSocketAssistantAgent("Gemini", llm_config=gemini_llm_config, system_message=GEMINI_SYSTEM, message_output_queue=message_output_queue))
-        agents.append(WebSocketAssistantAgent("Mistral", llm_config=mistral_llm_config, system_message=MISTRAL_SYSTEM, message_output_queue=message_output_queue))
+        from autogen_core.models import ModelClient
+
+        agents.append(
+            WebSocketAssistantAgent(
+                "ChatGPT",
+                model_client=ModelClient(config_list=chatgpt_llm_config["config_list"]),
+                system_message=CHATGPT_SYSTEM,
+                message_output_queue=message_output_queue
+            )
+        )
+        agents.append(
+            WebSocketAssistantAgent(
+                "Claude",
+                model_client=ModelClient(config_list=claude_llm_config["config_list"]),
+                system_message=CLAUDE_SYSTEM,
+                message_output_queue=message_output_queue
+            )
+        )
+        agents.append(
+            WebSocketAssistantAgent(
+                "Gemini",
+                model_client=ModelClient(config_list=gemini_llm_config["config_list"]),
+                system_message=GEMINI_SYSTEM,
+                message_output_queue=message_output_queue
+            )
+        )
+        agents.append(
+            WebSocketAssistantAgent(
+                "Mistral",
+                model_client=ModelClient(config_list=mistral_llm_config["config_list"]),
+                system_message=MISTRAL_SYSTEM,
+                message_output_queue=message_output_queue
+            )
+        )
 
 
         print("AGENTS IN GROUPCHAT:")
