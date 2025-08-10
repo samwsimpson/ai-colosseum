@@ -260,9 +260,16 @@ async def stripe_webhook(request: Request):
     
     return {"status": "success"}
 
+import logging
+
 @app.websocket("/ws/colosseum-chat")
 async def websocket_endpoint(websocket: WebSocket, token: str):
     try:
+        # --- Enable full DEBUG logging for autogen ---
+        logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
+        logging.getLogger("autogen").setLevel(logging.DEBUG)
+        print("WEBSOCKET: Set autogen logger to DEBUG level.")
+
         await websocket.accept()
         print("WEBSOCKET: Connection accepted.")
         user = await get_current_user(token=token)
