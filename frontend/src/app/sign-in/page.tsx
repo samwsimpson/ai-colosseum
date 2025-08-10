@@ -1,116 +1,102 @@
-// src/app/sign-in/page.tsx
 'use client';
 
-import React, { useEffect, useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useState, FormEvent, useRef, useEffect, useCallback } from 'react';
+import React from 'react';
 import { useUser } from '../../context/UserContext';
-import { useGoogleLogin, CodeResponse } from '@react-oauth/google';
+import { usePathname, useRouter, useSearchParams } from 'next/navigation';
+import { useGoogleLogin } from '@react-oauth/google';
 
-// This component handles the Google Sign-In process.
+interface Message {
+    sender: string;
+    model: string;
+    text: string;
+}
+
+interface TypingState {
+    [key: string]: boolean;
+}
+
 export default function SignInPage() {
-    const { userToken, setUserToken, setUserName } = useUser();
+    const { userName, userToken, handleLogout, handleLogin } = useUser();
     const router = useRouter();
-    const [isLoading, setIsLoading] = useState(false);
+    const pathname = usePathname();
+    const searchParams = useSearchParams();
 
-    // Effect to check if the user is already logged in
+    // This useEffect is for handling the OAuth callback
     useEffect(() => {
-        if (userToken) {
-            router.push('/chat'); // Redirect to chat page if already authenticated
+        const code = searchParams.get('code');
+        const redirect_uri = window.location.origin + pathname;
+        
+        if (code && !userToken) {
+            handleGoogleSuccess({ code, redirect_uri });
         }
+    }, [searchParams, userToken, pathname, handleGoogleSuccess]);
+    
+    // Unconditional scroll to the last message
+    useEffect(() => {
+      // This part seems out of place for a sign-in page, assuming it was from a previous file.
+      // I am removing it to avoid confusion.
+    }, []);
 
-        const urlParams = new URLSearchParams(window.location.search);
-        const code = urlParams.get('code');
-
-        if (code) {
-            // We have a code, so we can exchange it for a token.
-            const redirectUri = window.location.origin + '/sign-in';
-            // The `handleGoogleSuccess` function is already set up to do this.
-            // We need to pass it an object with the code and the redirect_uri.
-            handleGoogleSuccess({ code, redirect_uri: redirectUri });
-        }
-    }, [userToken, router]);
-
-    // Handle successful sign-in with Google
-    const handleGoogleSuccess = async ({ code, redirect_uri }: { code: string; redirect_uri: string }) => {
-        setIsLoading(true);
-
+    const handleGoogleSuccess = useCallback(async (tokenResponse) => {
         try {
-            const backendUrl = process.env.NEXT_PUBLIC_WS_URL;
-            if (!backendUrl) {
-                console.error("NEXT_PUBLIC_WS_URL environment variable is not set.");
-                setIsLoading(false);
-                return;
-            }
-            
-            const res = await fetch(`${backendUrl}/api/google-auth`, {
+            const backendUrl = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
+            const response = await fetch(`${backendUrl}/api/google-auth`, {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                 },
-                body: JSON.stringify({ code, redirect_uri }),
+                body: JSON.stringify({
+                    code: tokenResponse.code,
+                    redirect_uri: tokenResponse.redirect_uri
+                }),
             });
-
-            if (!res.ok) {
-                const errorData = await res.json();
-                console.error("Backend error response:", errorData);
-                throw new Error('Google authentication failed on backend.');
+            
+            if (!response.ok) {
+                const errorData = await response.json();
+                throw new Error(`Google authentication failed on backend. Details: ${JSON.stringify(errorData)}`);
             }
-
-            const data = await res.json();
-            localStorage.setItem('userToken', data.access_token);
-            localStorage.setItem('userName', data.user_name);
-            setUserToken(data.access_token);
-            setUserName(data.user_name);
-            // On successful auth, redirect to chat
+            
+            const tokenData = await response.json();
+            handleLogin(tokenData);
             router.push('/chat');
 
         } catch (error) {
             console.error('Sign-in failed:', error);
-            setIsLoading(false);
         }
-    };
-
-    // Handle failed sign-in with Google
-    const handleGoogleFailure = () => {
-        console.error('Google sign-in failed.');
-        setIsLoading(false);
-    };
+    }, [handleLogin, router]);
 
     const login = useGoogleLogin({
-        onSuccess: () => {},
-        onError: handleGoogleFailure,
+        onSuccess: handleGoogleSuccess,
         flow: 'auth-code',
-        ux_mode: 'redirect',
-        redirect_uri: typeof window !== 'undefined' ? window.location.origin + '/sign-in' : '',
+        redirect_uri: `${window.location.origin}/sign-in`,
+        scope: 'https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email openid',
     });
-
+    
+    // ... rest of the component
+    
     return (
-        <div className="flex flex-col items-center justify-center h-screen bg-gray-950 text-white">
-            <div className="text-center p-8 bg-gray-900 rounded-2xl shadow-xl max-w-md w-full">
-                <h1 className="text-4xl font-extrabold mb-4 text-white">Welcome to The AI Colosseum</h1>
-                <p className="text-lg text-gray-400 mb-8">
-                    Sign in to start a conversation with your AI team.
+        // ... rest of the JSX
+        <div className="flex flex-col min-h-screen bg-gray-950 text-white font-sans antialiased items-center justify-center p-6">
+            <main className="flex flex-col items-center justify-center space-y-8 text-center p-8 bg-gray-900 rounded-3xl shadow-2xl max-w-lg w-full">
+                <h1 className="text-4xl font-extrabold text-white">Sign In</h1>
+                <p className="text-lg text-gray-400">
+                    Join The Colosseum to orchestrate a team of powerful AIs.
                 </p>
-                {isLoading ? (
-                    <div className="flex justify-center items-center h-12">
-                        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-500"></div>
-                    </div>
-                ) : (
-                    <button
-                        onClick={() => login()}
-                        className="flex items-center justify-center bg-white text-gray-700 font-semibold py-2 px-4 rounded-lg shadow-md hover:bg-gray-100 transition-colors"
-                    >
-                        <svg className="w-6 h-6 mr-2" viewBox="0 0 48 48">
-                            <path fill="#4285F4" d="M24 9.5c3.97 0 7.21 1.44 9.86 3.87l-4.4 4.4c-.98-.94-2.5-2.05-5.46-2.05-4.17 0-7.85 2.87-9.13 6.73H1.45v-4.6C4.32 12.94 10.45 9.5 24 9.5z"/>
-                            <path fill="#34A853" d="M46.5 24.5c0-1.56-.14-3.06-.4-4.5H24v8.5h12.8c-.55 2.7-2.17 5.03-4.64 6.6v5.5h7.1c4.16-3.83 6.54-9.57 6.54-16.1z"/>
-                            <path fill="#FBBC05" d="M14.87 28.18c-.48-1.44-.77-3-.77-4.68s.29-3.24.77-4.68v-5.5H7.77C6.17 16.3 5.5 19.95 5.5 24s.67 7.7 2.27 11.18l7.1-5.5z"/>
-                            <path fill="#EA4335" d="M24 48c6.48 0 12.02-2.13 16.03-5.79l-7.1-5.5c-2.13 1.44-4.87 2.29-8.93 2.29-5.83 0-10.8-3.5-12.55-8.26H1.45v5.5C4.32 42.62 10.45 48 24 48z"/>
-                            <path fill="none" d="M0 0h48v48H0z"/>
-                        </svg>
-                        Sign in with Google
-                    </button>
-                )}
-            </div>
+                <button
+                    onClick={() => login()}
+                    className="flex items-center justify-center w-full px-6 py-3 border border-transparent text-base font-semibold rounded-xl text-gray-900 bg-white hover:bg-gray-200 transition-colors duration-200 shadow-md focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500"
+                >
+                    <svg className="w-5 h-5 mr-2" viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M43.611 20.082H42V20H24v8h11.303c-1.619 6.757-7.237 10.158-11.303 10.158-6.663 0-12.194-5.49-12.194-12.247s5.531-12.247 12.194-12.247c3.155 0 5.865 1.498 7.93 3.655l5.518-5.253C34.453 6.945 29.742 4 24 4 12.51 4 3.013 13.513 3.013 24s9.497 20 20.987 20c11.006 0 20.198-8.293 20.198-19.882 0-1.393-.204-2.812-.497-4.136z" fill="#FFC107" />
+                        <path d="M43.611 20.082L42 20H24v8h11.303a11.968 11.968 0 01-4.908 6.938c-2.45 1.944-5.787 3.062-9.423 3.062-6.663 0-12.194-5.49-12.194-12.247s5.531-12.247 12.194-12.247c3.155 0 5.865 1.498 7.93 3.655l5.518-5.253C34.453 6.945 29.742 4 24 4 12.51 4 3.013 13.513 3.013 24s9.497 20 20.987 20c11.006 0 20.198-8.293 20.198-19.882 0-1.393-.204-2.812-.497-4.136z" fill="#4285F4" />
+                        <path d="M12.194 36.153S10.255 36.143 8.36 35.808c-1.895-.335-3.69-1.296-5.111-2.717l4.474-3.468C7.755 30.56 9.615 31.42 12.194 31.42c2.579 0 4.439-1.27 6.302-3.415l4.316 3.993-5.518 5.253z" fill="#FBBC05" />
+                        <path d="M24 20.082a11.968 11.968 0 01-4.908 6.938c-2.45 1.944-5.787 3.062-9.423 3.062s-6.973-1.118-9.423-3.062a11.968 11.968 0 01-4.908-6.938L3.013 24c0 10.487 9.497 20 20.987 20s20.987-9.513 20.987-20H24z" fill="#EA4335" />
+                    </svg>
+                    Sign in with Google
+                </button>
+            </main>
         </div>
     );
 }
+
