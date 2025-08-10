@@ -264,7 +264,9 @@ async def stripe_webhook(request: Request):
 async def websocket_endpoint(websocket: WebSocket, token: str):
     try:
         await websocket.accept()
+        print("WEBSOCKET: Connection accepted.")
         user = await get_current_user(token=token)
+        print(f"WEBSOCKET: User '{user['name']}' authenticated.")
         
         # Subscription check
         user_subscription_doc = await db.collection('subscriptions').document(user['subscription_id']).get()
@@ -293,6 +295,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         })
 
         initial_config = await websocket.receive_json()
+        print(f"WEBSOCKET: Received initial config: {initial_config}")
         message_output_queue = asyncio.Queue()
         user_name = initial_config.get('user_name', 'User')
         sanitized_user_name = user_name.replace(" ", "_")
@@ -369,6 +372,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         selector = CustomSpeakerSelector(agents, user_name=sanitized_user_name)
         groupchat = autogen.GroupChat(agents=agents, messages=[], max_round=50, speaker_selection_method=selector)
         manager = autogen.GroupChatManager(groupchat=groupchat, llm_config=False, system_message=GROUPCHAT_SYSTEM_MESSAGE)
+        print("WEBSOCKET: Autogen manager created. Initiating chat...")
 
         # ... (rest of websocket logic from old file)
 
