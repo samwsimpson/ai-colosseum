@@ -1,8 +1,5 @@
-import sys
-print("TOP OF api.py: Script starting...", file=sys.stderr)
 from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
@@ -43,7 +40,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
@@ -133,55 +129,44 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
     user_data = user_doc.to_dict()
     
     subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
+    subscription_data = subscription_doc.to_dict()
     
     return {
         "user_name": user_data['name'],
         "user_id": user_data['id'],
-        "user_plan_name": subscription_doc.id
+        "user_plan_name": subscription_data['name']
     }
     
 @app.get("/api/users/me/usage")
 async def get_user_usage(current_user: dict = Depends(get_current_user)):
-    print(f"USAGE_ENDPOINT: User {current_user['id']} requested usage.")
-    try:
-        user_doc = await db.collection('users').document(current_user['id']).get()
-        user_data = user_doc.to_dict()
-        print(f"USAGE_ENDPOINT: User data found for {current_user['id']}.")
-        
-        subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
-        subscription_data = subscription_doc.to_dict()
-        print(f"USAGE_ENDPOINT: Subscription data found for {user_data['subscription_id']}.")
-        
-        if subscription_data['monthly_limit'] is None:
-            print("USAGE_ENDPOINT: User has unlimited plan. Returning 0 usage.")
-            return {
-                "monthly_usage": 0,
-                "monthly_limit": None
-            }
-
-        first_day_of_month = datetime.today().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-        
-        # Correctly count documents in an aggregation query
-        aggregation_query = db.collection('conversations').where(
-            'user_id', '==', current_user['id']
-        ).where(
-            'timestamp', '>=', first_day_of_month
-        ).where(
-            'subscription_id', '==', user_data['subscription_id']
-        )
-        
-        count_result = await aggregation_query.count().get()
-        monthly_usage = count_result[0][0].value
-
-        print(f"USAGE_ENDPOINT: Found {monthly_usage} conversations this month.")
-
+    user_doc = await db.collection('users').document(current_user['id']).get()
+    user_data = user_doc.to_dict()
+    
+    subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
+    subscription_data = subscription_doc.to_dict()
+    
+    if subscription_data['monthly_limit'] is None:
         return {
-            "monthly_usage": monthly_usage,
-            "monthly_limit": subscription_data['monthly_limit']
+            "monthly_usage": 0,
+            "monthly_limit": None
         }
-    except Exception as e:
-        print(f"USAGE_ENDPOINT: Error getting user usage: {e}")
-        raise HTTPException(status_code=500, detail="Error getting user usage")
+
+    first_day_of_month = datetime.today().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    monthly_usage_query = db.collection('conversations').where(
+        'user_id', '==', current_user['id']
+    ).where(
+        'subscription_id', '==', user_data['subscription_id']
+    ).where(
+        'timestamp', '>=', first_day_of_month
+    )
+    
+    monthly_usage_docs = await monthly_usage_query.stream()
+    monthly_usage = len(list(monthly_usage_docs))
+
+    return {
+        "monthly_usage": monthly_usage,
+        "monthly_limit": subscription_data['monthly_limit']
+    }
 
 @app.post("/api/google-auth", response_model=Token)
 async def google_auth(auth_code: GoogleAuthCode):
