@@ -325,8 +325,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 'timestamp', '>=', first_day_of_month
             )
 
-            conversation_docs = [doc async for doc in conversation_count_query.stream()]
-            conversation_count = len(conversation_docs)
+            conversation_docs = await conversation_count_query.stream()
+            conversation_count = len(list(conversation_docs))
             
             if conversation_count >= user_subscription_data['monthly_limit']:
                 await websocket.send_json({
@@ -348,15 +348,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         message_output_queue = asyncio.Queue()
         user_name = initial_config.get('user_name', 'User')
         sanitized_user_name = user_name.replace(" ", "_")
-
-        CHATGPT_SYSTEM = f"""Your name is ChatGPT. You are a helpful AI assistant. You are in a group chat with a user named {user_name} and three other AIs: Claude, Gemini, and Mistral. Refer to yourself in the first person (I, me, my). Do not attempt to pass the turn to another agent. Your response should conclude with your assigned termination phrase. Pay close attention to the entire conversation history. When prompted as a group, you must provide a direct and helpful response to the user's prompt. Your goal is to work with your team to solve the user's request. Conclude with 'TERMINATE' when the task is complete."""
-        CLAUDE_SYSTEM = f"""Your name is Claude. You are a helpful AI assistant. You are in a group chat with a user named {user_name} and three other AIs: ChatGPT, Gemini, and Mistral. Refer to yourself in the first person (I, me, my). Do not attempt to pass the turn to another agent. Your response should conclude with your assigned termination phrase. Pay close attention to the entire conversation history. When prompted as a group, you must provide a direct and helpful response to the user's prompt. Your goal is to work with your team to solve the user's request. Conclude with 'Task Completed.' at the end of your response."""
-        GEMINI_SYSTEM = f"""Your name is Gemini. You are a helpful AI assistant. You are in a group chat with a user named {user_name} and three other AIs: ChatGPT, Claude, and Mistral. Refer to yourself in the first person (I, me, my). Do not attempt to pass the turn to another agent. Your response should conclude with your assigned termination phrase. Pay close attention to the entire conversation history. When prompted as a group, you must provide a direct and helpful response to the user's prompt. Your goal is to work with your team to solve the user's request. Conclude with 'Task Completed.' at the end of your response."""
-        MISTRAL_SYSTEM = f"""Your name is Mistral. You are a helpful AI assistant. You are in a group chat with a user named {user_name}, and three other AIs: ChatGPT, Claude, and Gemini. Refer to yourself in the first person (I, me, my). Do not attempt to pass the turn to another agent. Your response should conclude with your assigned termination phrase. Pay close attention to the entire conversation history. When prompted as a group, you must provide a direct and helpful response to the user's prompt. Your goal is to work with your team to solve the user's request. Conclude with 'Task Completed.' at the end of your response."""
-        GROUPCHAT_SYSTEM_MESSAGE = f"""
-        You are the GroupChatManager. You are in a chat with a user named {user_name}, a ChatGPT assistant, a Claude assistant, a Gemini assistant, and a Mistral assistant.
-        The available agents are ['User', 'ChatGPT', 'Claude', 'Gemini', 'Mistral']. Your goal is to manage the conversation and select the next speaker.
-        """
 
         chatgpt_llm_config = {
             "config_list": [{
