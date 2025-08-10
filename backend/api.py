@@ -1,5 +1,8 @@
+import sys
+print("TOP OF api.py: Script starting...", file=sys.stderr)
 from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
@@ -14,13 +17,17 @@ from google.auth.transport import requests as google_requests
 from google.oauth2.id_token import verify_oauth2_token
 import stripe
 from google.cloud import firestore
-from fastapi.security import OAuth2PasswordBearer # This import was likely missing or misplaced
+from google_auth_oauthlib.flow import Flow
 
 print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 2.0 - FIRESTORE) <<")
 
 load_dotenv()
 
 app = FastAPI()
+
+@app.get("/health")
+async def health_check():
+    return {"status": "ok"}
 
 # Re-added CORS middleware for local development
 origins = [
@@ -37,7 +44,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
@@ -47,17 +53,19 @@ class ChatMessage(BaseModel):
     sender: str
     text: str
 
+class GoogleAuthCode(BaseModel):
+    code: str
+    redirect_uri: str
+
 class Token(BaseModel):
     access_token: str
     token_type: str
     user_name: str
     user_id: str
 
-class GoogleIdToken(BaseModel):
-    id_token: str
-
 # Initialize Firestore DB client without explicit credentials
 db = firestore.AsyncClient()
+print("FIRESTORE_CLIENT_INITIALIZED: db = firestore.AsyncClient()", file=sys.stderr)
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
@@ -89,29 +97,33 @@ def create_access_token(data: dict, expires_delta: Union[timedelta, None] = None
 
 @app.on_event("startup")
 async def startup_event():
-    print("Connecting to Firestore...")
-    
-    subscriptions_ref = db.collection('subscriptions')
-    plans = {
-        'Free': {'monthly_limit': 5, 'price_id': 'free_price_id_placeholder'},
-        'Starter': {'monthly_limit': 25, 'price_id': 'starter_price_id_placeholder'},
-        'Pro': {'monthly_limit': 200, 'price_id': 'pro_price_id_placeholder'},
-        'Enterprise': {'monthly_limit': None, 'price_id': 'enterprise_price_id_placeholder'},
-    }
-    
+    print("STARTUP EVENT: Initializing Firestore...")
     try:
+        subscriptions_ref = db.collection('subscriptions')
+        print("STARTUP EVENT: subscriptions_ref created")
+        plans = {
+            'Free': {'monthly_limit': 5, 'price_id': 'free_price_id_placeholder'},
+            'Starter': {'monthly_limit': 25, 'price_id': 'starter_price_id_placeholder'},
+            'Pro': {'monthly_limit': 200, 'price_id': 'pro_price_id_placeholder'},
+            'Enterprise': {'monthly_limit': None, 'price_id': 'enterprise_price_id_placeholder'},
+        }
+        print("STARTUP EVENT: Plans defined")
+        
         for name, data in plans.items():
-            print(f"Checking for subscription plan: {name}")
+            print(f"STARTUP EVENT: Checking for subscription plan: {name}")
             doc_ref = subscriptions_ref.document(name)
+            print(f"STARTUP EVENT: doc_ref for {name} created")
             doc = await doc_ref.get()
+            print(f"STARTUP EVENT: doc.exists for {name}: {doc.exists}")
             if not doc.exists:
-                print(f"Plan '{name}' not found. Creating it.")
+                print(f"STARTUP EVENT: Plan '{name}' not found. Creating it.")
                 await doc_ref.set(data)
-                print(f"Created subscription plan: {name}")
+                print(f"STARTUP EVENT: Created subscription plan: {name}")
             else:
-                print(f"Plan '{name}' already exists.")
+                print(f"STARTUP EVENT: Plan '{name}' already exists.")
+        print("STARTUP EVENT: Firestore initialization complete.")
     except Exception as e:
-        print(f"Failed to initialize Firestore collections: {e}")
+        print(f"STARTUP EVENT: Failed to initialize Firestore collections: {e}")
         raise
 
 @app.get("/api/users/me")
@@ -120,55 +132,85 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
     user_data = user_doc.to_dict()
     
     subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
-    subscription_data = subscription_doc.to_dict()
     
     return {
         "user_name": user_data['name'],
-        "user_id": user_data['id'],
-        "user_plan_name": subscription_data['name']
+        "user_id": current_user['id'],
+        "user_plan_name": subscription_doc.id
     }
     
 @app.get("/api/users/me/usage")
 async def get_user_usage(current_user: dict = Depends(get_current_user)):
-    user_doc = await db.collection('users').document(current_user['id']).get()
-    user_data = user_doc.to_dict()
-    
-    subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
-    subscription_data = subscription_doc.to_dict()
-    
-    if subscription_data['monthly_limit'] is None:
+    print(f"USAGE_ENDPOINT: User {current_user['id']} requested usage.")
+    try:
+        user_doc = await db.collection('users').document(current_user['id']).get()
+        user_data = user_doc.to_dict()
+        print(f"USAGE_ENDPOINT: User data found for {current_user['id']}.")
+        
+        subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
+        subscription_data = subscription_doc.to_dict()
+        print(f"USAGE_ENDPOINT: Subscription data found for {user_data['subscription_id']}.")
+        
+        if subscription_data['monthly_limit'] is None:
+            print("USAGE_ENDPOINT: User has unlimited plan. Returning 0 usage.")
+            return {
+                "monthly_usage": 0,
+                "monthly_limit": None
+            }
+
+        first_day_of_month = datetime.today().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        
+        # Correctly count documents in an aggregation query
+        aggregation_query = db.collection('conversations').where(
+            'user_id', '==', current_user['id']
+        ).where(
+            'timestamp', '>=', first_day_of_month
+        ).where(
+            'subscription_id', '==', user_data['subscription_id']
+        )
+        
+        count_result = await aggregation_query.count().get()
+        monthly_usage = count_result[0][0].value
+
+        print(f"USAGE_ENDPOINT: Found {monthly_usage} conversations this month.")
+
         return {
-            "monthly_usage": 0,
-            "monthly_limit": None
+            "monthly_usage": monthly_usage,
+            "monthly_limit": subscription_data['monthly_limit']
         }
-
-    first_day_of_month = datetime.today().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-    monthly_usage_query = db.collection('conversations').where(
-        'user_id', '==', current_user['id']
-    ).where(
-        'subscription_id', '==', user_data['subscription_id']
-    ).where(
-        'timestamp', '>=', first_day_of_month
-    )
-    
-    monthly_usage_docs = await monthly_usage_query.stream()
-    monthly_usage = len(list(monthly_usage_docs))
-
-    return {
-        "monthly_usage": monthly_usage,
-        "monthly_limit": subscription_data['monthly_limit']
-    }
+    except Exception as e:
+        print(f"USAGE_ENDPOINT: Error getting user usage: {e}")
+        raise HTTPException(status_code=500, detail="Error getting user usage")
 
 @app.post("/api/google-auth", response_model=Token)
-async def google_auth(id_token: GoogleIdToken):
+async def google_auth(auth_code: GoogleAuthCode):
     try:
-        GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
-        if not GOOGLE_CLIENT_ID:
-            raise ValueError("Missing Google Client ID")
+        client_config = {
+            "web": {
+                "client_id": os.getenv("GOOGLE_CLIENT_ID"),
+                "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"),
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+                "redirect_uris": [
+                    "https://aicolosseum.app/sign-in",
+                    "https://www.aicolosseum.app/sign-in",
+                    "http://localhost:3000/sign-in"
+                ],
+            }
+        }
+        flow = Flow.from_client_config(
+            client_config,
+            scopes=['https://www.googleapis.com/auth/userinfo.profile', 'https://www.googleapis.com/auth/userinfo.email', 'openid'],
+            redirect_uri=auth_code.redirect_uri
+        )
 
-        idinfo = verify_oauth2_token(id_token.id_token, google_requests.Request(), GOOGLE_CLIENT_ID)
+        flow.fetch_token(code=auth_code.code)
+        credentials = flow.credentials
+        
+        idinfo = verify_oauth2_token(credentials.id_token, google_requests.Request(), credentials.client_id)
         google_id = idinfo['sub']
-
+        
         users_ref = db.collection('users')
         user_doc_query = users_ref.where('google_id', '==', google_id).limit(1).stream()
         user_list = [doc async for doc in user_doc_query]
