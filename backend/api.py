@@ -1,5 +1,8 @@
+import sys
+print("TOP OF api.py: Script starting...", file=sys.stderr)
 from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
@@ -40,6 +43,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
@@ -191,7 +195,7 @@ async def google_auth(auth_code: GoogleAuthCode):
             redirect_uri=auth_code.redirect_uri
         )
 
-        flow.fetch_token(code=auth_code.code)
+        await flow.fetch_token(code=auth_code.code)
         credentials = flow.credentials
         
         idinfo = verify_oauth2_token(credentials.id_token, google_requests.Request(), credentials.client_id)
