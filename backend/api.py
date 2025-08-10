@@ -206,7 +206,7 @@ async def google_auth(auth_code: GoogleAuthCode):
             redirect_uri=auth_code.redirect_uri
         )
 
-        await flow.fetch_token(code=auth_code.code)
+        flow.fetch_token(code=auth_code.code)
         credentials = flow.credentials
         
         idinfo = verify_oauth2_token(credentials.id_token, google_requests.Request(), credentials.client_id)
