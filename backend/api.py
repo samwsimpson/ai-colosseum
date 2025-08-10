@@ -265,11 +265,6 @@ import logging
 @app.websocket("/ws/colosseum-chat")
 async def websocket_endpoint(websocket: WebSocket, token: str):
     try:
-        # --- Enable full DEBUG logging for autogen ---
-        logging.basicConfig(stream=sys.stdout, level=logging.DEBUG)
-        logging.getLogger("autogen").setLevel(logging.DEBUG)
-        print("WEBSOCKET: Set autogen logger to DEBUG level.")
-
         await websocket.accept()
         print("WEBSOCKET: Connection accepted.")
         user = await get_current_user(token=token)
@@ -370,6 +365,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             human_input_mode="NEVER",
             message_output_queue=message_output_queue,
             code_execution_config={"use_docker": False},
+            is_termination_msg=lambda x: isinstance(x, dict) and x.get("content", "").endswith("TERMINATE")
         )
 
         agents = [user_proxy]
