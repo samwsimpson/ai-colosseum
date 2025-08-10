@@ -6,23 +6,15 @@ import { useUser } from '../../context/UserContext';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { useGoogleLogin } from '@react-oauth/google';
 
-interface Message {
-    sender: string;
-    model: string;
-    text: string;
-}
-
-interface TypingState {
-    [key: string]: boolean;
-}
-
+// This component handles the Google Sign-In process.
 export default function SignInPage() {
-    const { userName, userToken, handleLogout, handleLogin } = useUser();
+    const { userToken, handleLogin } = useUser();
     const router = useRouter();
     const pathname = usePathname();
     const searchParams = useSearchParams();
+    const [isLoading, setIsLoading] = useState(false);
 
-    // This useEffect is for handling the OAuth callback
+    // This useEffect handles the OAuth callback from Google
     useEffect(() => {
         const code = searchParams.get('code');
         const redirect_uri = window.location.origin + pathname;
@@ -31,14 +23,10 @@ export default function SignInPage() {
             handleGoogleSuccess({ code, redirect_uri });
         }
     }, [searchParams, userToken, pathname, handleGoogleSuccess]);
-    
-    // Unconditional scroll to the last message
-    useEffect(() => {
-      // This part seems out of place for a sign-in page, assuming it was from a previous file.
-      // I am removing it to avoid confusion.
-    }, []);
 
+    // This function sends the authorization code to the backend
     const handleGoogleSuccess = useCallback(async (tokenResponse) => {
+        setIsLoading(true);
         try {
             const backendUrl = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
             const response = await fetch(`${backendUrl}/api/google-auth`, {
@@ -63,20 +51,36 @@ export default function SignInPage() {
 
         } catch (error) {
             console.error('Sign-in failed:', error);
+            setIsLoading(false);
         }
     }, [handleLogin, router]);
 
+    const handleGoogleFailure = () => {
+        console.error('Google sign-in failed.');
+        setIsLoading(false);
+    };
+
     const login = useGoogleLogin({
         onSuccess: handleGoogleSuccess,
+        onError: handleGoogleFailure,
         flow: 'auth-code',
-        redirect_uri: `${window.location.origin}/sign-in`,
-        scope: 'https://www.googleapis.com/auth/userinfo.profile https://www.googleapis.com/auth/userinfo.email openid',
+        ux_mode: 'redirect',
+        redirect_uri: typeof window !== 'undefined' ? window.location.origin + '/sign-in' : '',
     });
     
-    // ... rest of the component
+    // Redirect if user is already logged in
+    useEffect(() => {
+        if (userToken) {
+            router.push('/chat');
+        }
+    }, [userToken, router]);
     
+    // Don't render the sign-in button if we are redirecting or already logged in
+    if (userToken || isLoading) {
+      return null;
+    }
+
     return (
-        // ... rest of the JSX
         <div className="flex flex-col min-h-screen bg-gray-950 text-white font-sans antialiased items-center justify-center p-6">
             <main className="flex flex-col items-center justify-center space-y-8 text-center p-8 bg-gray-900 rounded-3xl shadow-2xl max-w-lg w-full">
                 <h1 className="text-4xl font-extrabold text-white">Sign In</h1>
@@ -99,3 +103,4 @@ export default function SignInPage() {
         </div>
     );
 }
+
