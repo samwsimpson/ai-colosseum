@@ -607,12 +607,25 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         conversation_task = asyncio.create_task(user_proxy.a_initiate_chat(manager, message=initial_config['message']))
         input_handler_task = asyncio.create_task(user_input_handler_task(websocket, user_proxy))
 
+        # Optional keepalive ping to avoid idle WS disconnects
+        async def keepalive_task(ws: WebSocket):
+            try:
+                while True:
+                    await asyncio.sleep(20)
+                    await ws.send_json({"sender": "System", "type": "ping"})
+            except Exception:
+                # Ends when ws is closed/cancelled
+                pass
+
+        ka_task = asyncio.create_task(keepalive_task(websocket))
+
         try:
-            done, pending = await asyncio.wait([consumer_task, conversation_task, input_handler_task], return_when=asyncio.FIRST_COMPLETED)
+            # Keep WS alive until client disconnects
+            await input_handler_task
         finally:
-            for task in pending:
+            for task in (conversation_task, consumer_task, ka_task):
                 task.cancel()
-            await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.gather(conversation_task, consumer_task, ka_task, return_exceptions=True)
 
     except WebSocketDisconnect:
         print("WebSocket closed")
