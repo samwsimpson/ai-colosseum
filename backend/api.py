@@ -1,4 +1,5 @@
 import sys
+import traceback
 print("TOP OF api.py: Script starting...", file=sys.stderr)
 from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -572,7 +573,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
     except WebSocketDisconnect:
         print("WebSocket closed")
     except Exception as e:
-        print(f"General exception: {e}")
+        tb = traceback.format_exc()
+        print(f"General exception: {e}\n{tb}")  # <-- full stack trace to logs
         try:
             await websocket.send_json({"sender": "System", "text": f"Error: {e}"})
         except WebSocketDisconnect:
