@@ -22,7 +22,12 @@ from google_auth_oauthlib.flow import Flow
 
 print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 2.0 - FIRESTORE) <<")
 load_dotenv()
+SECRET_KEY = os.getenv("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("SECRET_KEY env var is required")
 
+ALGORITHM = "HS256"
+ACCESS_TOKEN_EXPIRE_MINUTES = 30
 # ==== System prompts (define once, before websocket handler) ====
 
 def _env(name: str, default: str) -> str:
@@ -81,11 +86,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-SECRET_KEY = os.getenv("SECRET_KEY")
-ALGORITHM = "HS256"
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/google-auth")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/google-auth")
 
 class ChatMessage(BaseModel):
     sender: str
@@ -311,20 +312,38 @@ async def stripe_webhook(request: Request):
         event = stripe.Webhook.construct_event(
             payload, sig_header, stripe_webhook_secret
         )
-    except ValueError as e:
+    except ValueError:
+        # Invalid payload
         raise HTTPException(status_code=400, detail="Invalid payload")
-    except stripe.error.SignatureVerificationError as e:
+    except stripe.error.SignatureVerificationError:
+        # Invalid signature
         raise HTTPException(status_code=400, detail="Invalid signature")
 
+    # ← IMPORTANT: this must be OUTSIDE the except blocks
     if event["type"] == "checkout.session.completed":
-        session = event["data"]["object"]
-        customer_email = session["customer_email"]
-        price_id = session["line_items"]["data"][0]["price"]["id"]
-        
+        sess_obj = event["data"]["object"]
+        customer_email = sess_obj.get("customer_email")
+
+        # Re-retrieve with expand to access line_items safely
+        session = stripe.checkout.Session.retrieve(
+            sess_obj["id"],
+            expand=["line_items"]
+        )
+
+        price_id = None
+        try:
+            price_id = session.line_items.data[0].price.id
+        except Exception:
+            # Optional: fall back to metadata if you set it during checkout
+            price_id = (session.get("metadata") or {}).get("price_id")
+
+        if not (customer_email and price_id):
+            return {"status": "ignored", "reason": "missing email or price_id"}
+
         users_ref = db.collection('users')
         user_doc_query = users_ref.where('email', '==', customer_email).limit(1).stream()
         user_docs = [doc async for doc in user_doc_query]
-        
+
         subscriptions_ref = db.collection('subscriptions')
         new_subscription_doc_query = subscriptions_ref.where('price_id', '==', price_id).limit(1).stream()
         new_subscription_list = [doc async for doc in new_subscription_doc_query]
@@ -333,9 +352,8 @@ async def stripe_webhook(request: Request):
             user_ref = users_ref.document(user_docs[0].id)
             await user_ref.update({'subscription_id': new_subscription_list[0].id})
             print(f"User {customer_email} successfully subscribed to the {new_subscription_list[0].id} plan.")
-    
-    return {"status": "success"}
 
+    return {"status": "success"}
 @app.websocket("/ws/colosseum-chat")
 async def websocket_endpoint(websocket: WebSocket, token: str):
     try:
@@ -381,7 +399,22 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         initial_config = await websocket.receive_json()
         print("INITIAL CONFIG RECEIVED:", initial_config)
+        # Bounded queue to avoid blocking if the browser is slow
         message_output_queue = asyncio.Queue(maxsize=100)
+
+        def safe_enqueue(payload: dict):
+            """Best-effort enqueue without blocking; drop oldest if full."""
+            try:
+                message_output_queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                try:
+                    _ = message_output_queue.get_nowait()  # drop oldest
+                except Exception:
+                    pass
+                try:
+                    message_output_queue.put_nowait(payload)
+                except Exception:
+                    pass
         user_name = initial_config.get('user_name', 'User')
         sanitized_user_name = user_name.replace(" ", "_")
 
@@ -615,7 +648,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "'you guys', or similar, each agent should respond ONCE, concisely.\n"
             "5) If you are not the addressed agent, but the user is clearly speaking to another agent, hold your reply "
             "unless explicitly invited.\n"
-            "6) Use the user’s name (Sam) when appropriate.\n"
+            "6) Use the user’s name when appropriate.\n"
             "Examples of addressing:\n"
             "- 'Claude, what do you think?' → Claude responds first.\n"
             "- 'ChatGPT and Gemini, please answer.' → ChatGPT then Gemini respond once each.\n"
@@ -708,7 +741,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         break
 
         consumer_task = asyncio.create_task(message_consumer_task(message_output_queue, websocket))
-        conversation_task = asyncio.create_task(user_proxy.a_initiate_chat(manager, message=initial_config['message']))
+        conversation_task = asyncio.create_task(
+            user_proxy.a_initiate_chat(manager, message=initial_config.get('message', 'Hello!'))
+        )
         input_handler_task = asyncio.create_task(user_input_handler_task(websocket, user_proxy))
 
         # Optional keepalive ping to avoid idle WS disconnects

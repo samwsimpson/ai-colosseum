@@ -16,7 +16,16 @@ interface Message {
 interface TypingState {
     [key: string]: boolean;
 }
+type AgentName = 'ChatGPT' | 'Claude' | 'Gemini' | 'Mistral';
 
+interface ServerMessage {
+  sender?: string;
+  text?: string;
+  typing?: boolean;
+  type?: 'ping' | 'pong' | string;
+}
+
+type HBWebSocket = WebSocket & { _heartbeatInterval?: number };
 export default function ChatPage() {
     const { userName, userToken } = useUser();
     const router = useRouter();
@@ -128,7 +137,7 @@ export default function ChatPage() {
                 }
             }, 20000); // send ping every 20 seconds
             // store so we can clear on close
-            (currentWs as any)._heartbeatInterval = heartbeatInterval;
+            (currentWs as HBWebSocket)._heartbeatInterval = heartbeatInterval;
             // --- END HEARTBEAT ---
 
             const initialPayload = {
@@ -140,39 +149,28 @@ export default function ChatPage() {
 
         currentWs.onmessage = (event: MessageEvent<string>) => {
             try {
-                const raw = JSON.parse(event.data) as unknown;
+                const parsed: unknown = JSON.parse(event.data);
 
-                // Narrow unknown to the shape we expect
-                if (typeof raw !== 'object' || raw === null) {
-                addMessageToChat({ sender: 'System', text: `Unexpected message: ${String(raw)}` });
-                return;
-                }
+                const msg = parsed as ServerMessage;
 
-                const msg = raw as { sender?: string; typing?: boolean; text?: string; type?: string };
-
-                // ignore server pings
-                if (msg.type === 'ping') return;
-
-                if (typeof msg.typing === 'boolean' && typeof msg.sender === 'string') {
-                    setIsTyping(prev => ({
-                        ...prev,
-                        [msg.sender!]: msg.typing!,
-                    }));
+                // reply to server pings (skip showing them)
+                if (msg.type === 'ping') {
+                    if (currentWs.readyState === WebSocket.OPEN) {
+                        currentWs.send(JSON.stringify({ type: 'pong' }));
+                    }
                     return;
                 }
 
-                if (typeof msg.text === 'string') {
-                    addMessageToChat({ sender: msg.sender ?? 'System', text: msg.text });
-                    return;
+                if (typeof msg.typing === 'boolean' && msg.sender) {
+                    setIsTyping(prev => ({ ...prev, [msg.sender]: msg.typing }));
+                } else if (msg.text && msg.sender) {
+                    addMessageToChat({ sender: msg.sender, text: msg.text });
                 }
-
-                // Fallback if shape doesn’t match
-                addMessageToChat({ sender: 'System', text: `Unhandled message: ${event.data}` });
-            } catch (error) {
-                console.error('Failed to parse message:', error);
+            } catch (err: unknown) {
+                console.error('Failed to parse message:', err);
                 addMessageToChat({ sender: 'System', text: `Error: ${event.data}` });
             }
-        }
+        };
                 
         currentWs.onclose = () => {
         console.log('WebSocket connection closed.');
@@ -180,25 +178,23 @@ export default function ChatPage() {
         setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
 
         // clear heartbeat if we set one
-        const hb = (currentWs as any)._heartbeatInterval as number | undefined;
-        if (hb) clearInterval(hb);
+        const hb = (currentWs as HBWebSocket)._heartbeatInterval;
+        if (hb) window.clearInterval(hb);
 
         // mark ref as closed and trigger reconnect
         ws.current = null;
         setTimeout(() => setWsReconnectNonce(n => n + 1), 1000); // retry in 1s
         };
         
-        currentWs.onerror = (ev: Event) => {
-            console.error('WebSocket error:', ev);
+        currentWs.onerror = (event: Event) => {
+            console.error('WebSocket error:', event);
             setIsWsOpen(false);
-            // Force a close so onclose runs and triggers reconnect
-            try { currentWs.close(); } catch {}
         };
 
         // Cleanup function for the useEffect hook
         return () => {
-            const hb = (currentWs as any)._heartbeatInterval as number | undefined;
-            if (hb) clearInterval(hb);
+            const hb = (currentWs as HBWebSocket)._heartbeatInterval;
+            if (hb) window.clearInterval(hb);
 
             if (currentWs && (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING)) {
                 currentWs.close();
