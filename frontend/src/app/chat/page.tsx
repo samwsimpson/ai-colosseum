@@ -1,6 +1,7 @@
 'use client';
 
-import { useState, FormEvent, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, FormEvent, useRef, useEffect, useCallback } from 'react';
+
 import React from 'react';
 import { useUser } from '../../context/UserContext';
 import { usePathname, useRouter } from 'next/navigation';
@@ -17,7 +18,7 @@ interface TypingState {
 }
 
 export default function ChatPage() {
-    const { userName, userToken, handleLogout } = useUser();
+    const { userName, userToken } = useUser();
     const router = useRouter();
     const pathname = usePathname();
 
@@ -137,28 +138,41 @@ export default function ChatPage() {
             currentWs.send(JSON.stringify(initialPayload));
         };
 
-        currentWs.onmessage = (event) => {
-        try {
-            const message = JSON.parse(event.data);
+        currentWs.onmessage = (event: MessageEvent<string>) => {
+            try {
+                const raw = JSON.parse(event.data) as unknown;
 
-            // reply to server pings
-            if (message?.type === "ping") {
-            if (currentWs.readyState === WebSocket.OPEN) {
-                currentWs.send(JSON.stringify({ type: "pong" }));
-            }
-            return; // don't show pings in the chat
-            }
+                // Narrow unknown to the shape we expect
+                if (typeof raw !== 'object' || raw === null) {
+                addMessageToChat({ sender: 'System', text: `Unexpected message: ${String(raw)}` });
+                return;
+                }
 
-            if (typeof message.typing === 'boolean') {
-            setIsTyping(prev => ({ ...prev, [message.sender]: message.typing }));
-            } else if (message.text) {
-            addMessageToChat(message);
+                const msg = raw as { sender?: string; typing?: boolean; text?: string; type?: string };
+
+                // ignore server pings
+                if (msg.type === 'ping') return;
+
+                if (typeof msg.typing === 'boolean' && typeof msg.sender === 'string') {
+                    setIsTyping(prev => ({
+                        ...prev,
+                        [msg.sender!]: msg.typing!,
+                    }));
+                    return;
+                }
+
+                if (typeof msg.text === 'string') {
+                    addMessageToChat({ sender: msg.sender ?? 'System', text: msg.text });
+                    return;
+                }
+
+                // Fallback if shape doesn’t match
+                addMessageToChat({ sender: 'System', text: `Unhandled message: ${event.data}` });
+            } catch (error) {
+                console.error('Failed to parse message:', error);
+                addMessageToChat({ sender: 'System', text: `Error: ${event.data}` });
             }
-        } catch (error) {
-            console.error("Failed to parse message:", error);
-            addMessageToChat({ sender: "System", text: `Error: ${event.data}` });
         }
-        };
                 
         currentWs.onclose = () => {
         console.log('WebSocket connection closed.');
@@ -174,11 +188,10 @@ export default function ChatPage() {
         setTimeout(() => setWsReconnectNonce(n => n + 1), 1000); // retry in 1s
         };
         
-        currentWs.onerror = (error) => {
-            console.error('WebSocket error:', error);
+        currentWs.onerror = (ev: Event) => {
+            console.error('WebSocket error:', ev);
             setIsWsOpen(false);
-
-            // Force a clean cycle so onclose fires and we reconnect
+            // Force a close so onclose runs and triggers reconnect
             try { currentWs.close(); } catch {}
         };
 
