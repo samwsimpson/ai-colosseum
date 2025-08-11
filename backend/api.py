@@ -132,16 +132,16 @@ async def startup_event():
 async def read_users_me(current_user: dict = Depends(get_current_user)):
     user_doc = await db.collection('users').document(current_user['id']).get()
     if not user_doc.exists:
-    raise HTTPException(status_code=404, detail="User not found")
+        raise HTTPException(status_code=404, detail="User not found")
 
-    user_data = user_doc.to_dict() or {}    
-    
+    user_data = user_doc.to_dict() or {}
+
     subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
     subscription_data = subscription_doc.to_dict()
-    
+
     return {
         "user_name": user_data['name'],
-        "user_id": user_doc.id,
+        "user_id": user_doc.id,              # use doc id, not a field
         "user_plan_name": subscription_doc.id
     }
     
