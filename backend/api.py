@@ -713,6 +713,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             speaker_selection_method=selector,
             allow_repeat_speaker=True
         )
+
         
         manager = autogen.GroupChatManager(
             groupchat=groupchat,
@@ -742,17 +743,31 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     data = await ws.receive_json()
 
                     # --- heartbeat handling ---
-                    if isinstance(data, dict) and data.get("type") == "ping":
-                        # reply and ignore
-                        await ws.send_json({"type": "pong"})
-                        continue
-                    if isinstance(data, dict) and data.get("type") == "pong":
-                        # (optional) ignore if client sends a pong
-                        continue
+                    if isinstance(data, dict):
+                        t = data.get("type")
+                        if t == "ping":
+                            # reply and ignore
+                            try:
+                                await ws.send_json({"type": "pong"})
+                            except Exception:
+                                pass
+                            continue
+                        if t == "pong":
+                            # ignore client pongs
+                            continue
                     # --- end heartbeat handling ---
 
-                    user_message = data['message']  # safe now
-                    await proxy.a_inject_user_message(user_message)
+                    # Normal chat payloads only: dict with a non-empty string "message"
+                    if isinstance(data, dict):
+                        msg = data.get("message")
+                        if isinstance(msg, str) and msg.strip():
+                            await proxy.a_inject_user_message(msg)
+                        else:
+                            # Ignore anything that isn't a chat message
+                            print(f"Ignoring non-chat payload: {data!r}")
+                    else:
+                        # Ignore non-dict payloads
+                        print(f"Ignoring non-dict payload: {data!r}")
 
                 except WebSocketDisconnect:
                     break

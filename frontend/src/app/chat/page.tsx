@@ -1,8 +1,6 @@
 'use client';
 
 import { useState, FormEvent, useRef, useEffect, useCallback } from 'react';
-
-import React from 'react';
 import { useUser } from '../../context/UserContext';
 import { usePathname, useRouter } from 'next/navigation';
 
@@ -24,8 +22,6 @@ interface ServerMessage {
   type?: 'ping' | 'pong' | string;
 }
 
-type IntervalHandle = ReturnType<typeof window.setInterval>;
-type TimeoutHandle = ReturnType<typeof window.setTimeout>;
 type HBWebSocket = WebSocket & {
   _heartbeatInterval?: number | null;
   _lastPongAt?: number;
@@ -173,11 +169,14 @@ export default function ChatPage() {
                     return;
                 }
 
-                if (typeof msg.typing === 'boolean' && typeof msg.sender === 'string') {
-                    const senderKey = msg.sender as string; // now guaranteed string
-                    setIsTyping(prev => ({ ...prev, [senderKey]: msg.typing }));
-                } else if (typeof msg.text === 'string' && typeof msg.sender === 'string') {
-                    addMessageToChat({ sender: msg.sender, text: msg.text });
+                if (typeof msg.sender === 'string' && typeof msg.typing === 'boolean') {
+                setIsTyping(prev => {
+                    const next: TypingState = { ...prev };
+                    next[msg.sender] = msg.typing; // boolean, not undefined
+                    return next;
+                });
+                } else if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
+                addMessageToChat({ sender: msg.sender, text: msg.text });
                 }
             } catch (err: unknown) {
                 console.error('Failed to parse message:', err);
