@@ -11,9 +11,8 @@ import autogen
 import asyncio
 import re
 from typing import List, Dict, Any, Union
-import httpx
 from jose import JWTError, jwt
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta
 from google.auth.transport import requests as google_requests
 from google.oauth2.id_token import verify_oauth2_token
 import stripe
@@ -86,7 +85,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/google-auth")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/google-auth")
 
 class ChatMessage(BaseModel):
     sender: str
@@ -356,26 +355,9 @@ async def stripe_webhook(request: Request):
     return {"status": "success"}
 @app.websocket("/ws/colosseum-chat")
 async def websocket_endpoint(websocket: WebSocket, token: str):
-    initial_config = await websocket.receive_json()
-    print("INITIAL CONFIG RECEIVED:", initial_config)
-    message_output_queue = asyncio.Queue(maxsize=100)
-    # ...safe_enqueue / queue_send...
-    user_name = initial_config.get('user_name', 'User')
-    sanitized_user_name = user_name.replace(" ", "_")
-    agent_names = ["ChatGPT", "Claude", "Gemini", "Mistral"]
 
-    def make_agent_system(name: str) -> str:
-        base = {
-            "ChatGPT":  CHATGPT_SYSTEM,
-            "Claude":   CLAUDE_SYSTEM,
-            "Gemini":   GEMINI_SYSTEM,
-            "Mistral":  MISTRAL_SYSTEM,
-        }.get(name, "You are an assistant.")
-        return (
-            f"{base}\n\n"
-            f"Your name is {name}. Participants: {sanitized_user_name} (user), "
-            f"{', '.join(agent_names)} (AIs). {roster_text}"
-        )
+    
+
     try:
         await websocket.accept()
 
@@ -437,6 +419,43 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     pass
         user_name = initial_config.get('user_name', 'User')
         sanitized_user_name = user_name.replace(" ", "_")
+        agent_names = ["ChatGPT", "Claude", "Gemini", "Mistral"]
+
+        roster_text = (
+            "SYSTEM: Multi-agent room context\n"
+            f"- USER: {user_name} (your messages appear as '{sanitized_user_name}')\n"
+            f"- AGENTS PRESENT: {', '.join(agent_names)}\n\n"
+            "Conversation rules for all agents:\n"
+            "1) You are in a shared room with ALL listed agents. Treat their messages as visible context.\n"
+            "2) Always prefix any references with the speaker name you are responding to when helpful, e.g.,\n"
+            "   'ChatGPT → Claude:' or 'Claude → User:' if addressing someone directly.\n"
+            "3) If the user addresses someone by name at the START of their message (e.g., 'Claude,' or 'ChatGPT:'), "
+            "that named agent should respond first.\n"
+            "4) If the user says 'you all', 'everyone', 'all agents', 'both of you', 'each of you', 'all of you', "
+            "'you guys', or similar, each agent should respond ONCE, concisely.\n"
+            "5) If you are not the addressed agent, but the user is clearly speaking to another agent, hold your reply "
+            "unless explicitly invited.\n"
+            "6) Use the user’s name when appropriate.\n"
+            "Examples of addressing:\n"
+            "- 'Claude, what do you think?' → Claude responds first.\n"
+            "- 'ChatGPT and Gemini, please answer.' → ChatGPT then Gemini respond once each.\n"
+            "- 'You all: one sentence each.' → Each listed agent replies once.\n"
+            "- 'Claude do you see ChatGPT’s message?' → Claude responds; others hold.\n"
+        )
+
+        def make_agent_system(name: str) -> str:
+            base = {
+                "ChatGPT":  CHATGPT_SYSTEM,
+                "Claude":   CLAUDE_SYSTEM,
+                "Gemini":   GEMINI_SYSTEM,
+                "Mistral":  MISTRAL_SYSTEM,
+            }.get(name, "You are an assistant.")
+            return (
+                f"{base}\n\n"
+                f"Your name is {name}. Participants: {sanitized_user_name} (user), "
+                f"{', '.join(agent_names)} (AIs). {roster_text}"
+            )
+
 
         async def queue_send(queue: asyncio.Queue, payload):
             """Non-blocking put: if the queue is full, drop the oldest and enqueue the new payload."""
@@ -653,29 +672,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         agents.append(WebSocketAssistantAgent("Mistral", llm_config=mistral_llm_config, system_message=make_agent_system("Mistral"), message_output_queue=message_output_queue))
 
 
-                # --- Roster & rules so every model knows who's here and who "you all" means ---
+        # --- Roster & rules so every model knows who's here and who "you all" means ---
         agent_names = [a.name for a in agents if a.name != sanitized_user_name]
-        roster_text = (
-            "SYSTEM: Multi-agent room context\n"
-            f"- USER: {user_name} (your messages appear as '{sanitized_user_name}')\n"
-            f"- AGENTS PRESENT: {', '.join(agent_names)}\n\n"
-            "Conversation rules for all agents:\n"
-            "1) You are in a shared room with ALL listed agents. Treat their messages as visible context.\n"
-            "2) Always prefix any references with the speaker name you are responding to when helpful, e.g.,\n"
-            "   'ChatGPT → Claude:' or 'Claude → User:' if addressing someone directly.\n"
-            "3) If the user addresses someone by name at the START of their message (e.g., 'Claude,' or 'ChatGPT:'), "
-            "that named agent should respond first.\n"
-            "4) If the user says 'you all', 'everyone', 'all agents', 'both of you', 'each of you', 'all of you', "
-            "'you guys', or similar, each agent should respond ONCE, concisely.\n"
-            "5) If you are not the addressed agent, but the user is clearly speaking to another agent, hold your reply "
-            "unless explicitly invited.\n"
-            "6) Use the user’s name when appropriate.\n"
-            "Examples of addressing:\n"
-            "- 'Claude, what do you think?' → Claude responds first.\n"
-            "- 'ChatGPT and Gemini, please answer.' → ChatGPT then Gemini respond once each.\n"
-            "- 'You all: one sentence each.' → Each listed agent replies once.\n"
-            "- 'Claude do you see ChatGPT’s message?' → Claude responds; others hold.\n"
-        )
+
 
         # Add roster/rules to each assistant's system prompt
         for a in agents:
@@ -742,32 +741,22 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 try:
                     data = await ws.receive_json()
 
-                    # --- heartbeat handling ---
+                    # Heartbeat: reply to ping, ignore pong
                     if isinstance(data, dict):
-                        t = data.get("type")
-                        if t == "ping":
-                            # reply and ignore
-                            try:
-                                await ws.send_json({"type": "pong"})
-                            except Exception:
-                                pass
+                        msg_type = data.get("type")
+                        if msg_type == "ping":
+                            await ws.send_json({"type": "pong"})
                             continue
-                        if t == "pong":
-                            # ignore client pongs
+                        if msg_type == "pong":
                             continue
-                    # --- end heartbeat handling ---
 
-                    # Normal chat payloads only: dict with a non-empty string "message"
-                    if isinstance(data, dict):
-                        msg = data.get("message")
-                        if isinstance(msg, str) and msg.strip():
-                            await proxy.a_inject_user_message(msg)
-                        else:
-                            # Ignore anything that isn't a chat message
-                            print(f"Ignoring non-chat payload: {data!r}")
-                    else:
-                        # Ignore non-dict payloads
-                        print(f"Ignoring non-dict payload: {data!r}")
+                        # Normal user message
+                        if "message" in data and isinstance(data["message"], str):
+                            await proxy.a_inject_user_message(data["message"])
+                            continue
+
+                    # If we get here, payload was not what we expect; ignore quietly.
+                    continue
 
                 except WebSocketDisconnect:
                     break
@@ -777,6 +766,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         await ws.send_json({"sender": "System", "text": f"Error: {e}"})
                     except WebSocketDisconnect:
                         break
+
 
         consumer_task = asyncio.create_task(message_consumer_task(message_output_queue, websocket))
         conversation_task = asyncio.create_task(

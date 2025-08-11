@@ -115,13 +115,24 @@ export default function ChatPage() {
 
         // Only create a new WebSocket if one does not exist or is already closed
         if (!ws.current || ws.current.readyState === WebSocket.CLOSED) {
-            const rawBase = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
-            // remove scheme + trailing slash cleanly
-            const normalizedBase = rawBase.replace(/^https?:\/\//, '').replace(/\/+$/, '');
-            const wsProtocol = rawBase.startsWith('https://') ? 'wss://' : 'ws://';
-            const wsUrl = `${wsProtocol}${normalizedBase}/ws/colosseum-chat?token=${userToken}`;
+            // Build the URL safely with the URL API
+            const base = process.env.NEXT_PUBLIC_WS_URL ?? 'http://localhost:8000';
+            let u: URL;
+            try {
+                u = new URL(base); // e.g. https://api.aicolosseum.app
+            } catch {
+                // Fallback in case the env var is malformed
+                u = new URL('http://localhost:8000');
+            }
 
-            console.log('[WS] dialing:', wsUrl); // <— SEE EXACT URL
+            // Switch scheme to ws/wss, set path and token
+            u.protocol = (u.protocol === 'https:') ? 'wss:' : 'ws:';
+            u.pathname = '/ws/colosseum-chat';
+            u.search = `?token=${encodeURIComponent(userToken)}`;
+
+            const wsUrl = u.toString();
+            console.log('[WS] dialing:', wsUrl);
+
             const socket = new WebSocket(wsUrl);
             ws.current = socket;
             setIsWsOpen(false);
@@ -194,19 +205,22 @@ export default function ChatPage() {
             }
         };
                 
-        currentWs.onclose = (evt: CloseEvent) => {
-            console.log('WebSocket closed.', 'code=', evt.code, 'reason=', evt.reason, 'wasClean=', evt.wasClean);
+        currentWs.onclose = (evt) => {
+            console.log('WebSocket closed. code=', evt.code, 'reason=', evt.reason, 'wasClean=', evt.wasClean);
             setIsWsOpen(false);
             setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
 
-            // clear heartbeat if we set one
+            // clear heartbeat if present
             const hb = (currentWs as HBWebSocket)._heartbeatInterval;
-            if (typeof hb === 'number') window.clearInterval(hb);
+            if (hb) window.clearInterval(hb);
 
-            // mark ref as closed and trigger reconnect
-            ws.current = null;
-            setTimeout(() => setWsReconnectNonce(n => n + 1), 1000); // retry in 1s
+            // avoid reconnect loop if server closed for policy/limit
+            if (evt.code !== 1008) {
+                ws.current = null;
+                setTimeout(() => setWsReconnectNonce(n => n + 1), 1000);
+            }
         };
+
         
         currentWs.onerror = (event: Event) => {
             console.error('WebSocket error:', event);
