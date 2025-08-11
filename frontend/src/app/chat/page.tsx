@@ -24,12 +24,12 @@ interface ServerMessage {
   type?: 'ping' | 'pong' | string;
 }
 
-type IntervalHandle = ReturnType<typeof setInterval>;
-type TimeoutHandle = ReturnType<typeof setTimeout>;
+type IntervalHandle = ReturnType<typeof window.setInterval>;
+type TimeoutHandle = ReturnType<typeof window.setTimeout>;
 type HBWebSocket = WebSocket & {
-  _heartbeatInterval?: IntervalHandle | null;
+  _heartbeatInterval?: number | null;
   _lastPongAt?: number;
-  _pingWatchdog?: TimeoutHandle | null; // (only if you added a ping timeout)
+  _pingWatchdog?: number | null;
 };
 export default function ChatPage() {
     const { userName, userToken } = useUser();
