@@ -138,7 +138,7 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
     return {
         "user_name": user_data['name'],
         "user_id": user_data['id'],
-        "user_plan_name": subscription_data['name']
+        "user_plan_name": subscription_doc.id
     }
     
 @app.get("/api/users/me/usage")
@@ -164,8 +164,7 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
         'timestamp', '>=', first_day_of_month
     )
     
-    monthly_usage_docs = await monthly_usage_query.stream()
-    monthly_usage = len(list(monthly_usage_docs))
+    monthly_usage = sum(1 async for _ in monthly_usage_query.stream())
 
     return {
         "monthly_usage": monthly_usage,
@@ -316,8 +315,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 'timestamp', '>=', first_day_of_month
             )
 
-            conversation_docs = await conversation_count_query.stream()
-            conversation_count = len(list(conversation_docs))
+            conversation_count = sum(1 async for _ in conversation_count_query.stream())
             
             if conversation_count >= user_subscription_data['monthly_limit']:
                 await websocket.send_json({
