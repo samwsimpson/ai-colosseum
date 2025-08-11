@@ -195,7 +195,9 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
             "monthly_limit": None
         }
 
-    first_day_of_month = datetime.today().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    # in /api/users/me/usage and in the WS handler where you count conversations
+    first_day_of_month = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
     monthly_usage_query = db.collection('conversations').where(
         'user_id', '==', current_user['id']
     ).where(
@@ -348,7 +350,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         user_subscription_data = user_subscription_doc.to_dict()
 
         if user_subscription_data['monthly_limit'] is not None:
-            first_day_of_month = datetime.today().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            first_day_of_month = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             
             conversation_count_query = db.collection('conversations').where(
                 'user_id', '==', user['id']
@@ -379,9 +381,24 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         initial_config = await websocket.receive_json()
         print("INITIAL CONFIG RECEIVED:", initial_config)
-        message_output_queue = asyncio.Queue()
+        message_output_queue = asyncio.Queue(maxsize=100)
         user_name = initial_config.get('user_name', 'User')
         sanitized_user_name = user_name.replace(" ", "_")
+
+        async def queue_send(queue: asyncio.Queue, payload):
+            """Non-blocking put: if the queue is full, drop the oldest and enqueue the new payload."""
+            try:
+                queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                try:
+                    _ = queue.get_nowait()  # drop oldest
+                except Exception:
+                    pass
+                try:
+                    queue.put_nowait(payload)
+                except Exception:
+                    pass
+
 
         chatgpt_llm_config = {
             "config_list": [{
@@ -429,7 +446,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self._message_output_queue = message_output_queue
             
             async def a_send_typing_indicator(self, is_typing: bool):
-                await self._message_output_queue.put({
+                await queue_send(self._message_output_queue, {
                     "sender": self.name,
                     "typing": is_typing,
                     "text": ""
@@ -476,10 +493,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     self.waiting_on_user_to_break_loop = True
 
                     asyncio.create_task(
-                        self.agent_by_name[self.user_name]._message_output_queue.put({
-                            "sender": "System",
-                            "text": "⚠️ Loop detected. Waiting for your input to continue the conversation..."
-                        })
+                        queue_send(
+                            self.agent_by_name[self.user_name]._message_output_queue,
+                            {"sender": "System", "text": "⚠️ Loop detected. Waiting for your input to continue the conversation..."}
+                        )
                     )
                     return self.agent_by_name[self.user_name]
                 
@@ -537,7 +554,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 cleaned = re.sub(r'(TERMINATE|Task Completed\.)[\s\S]*', '', content).strip()
                 
                 if cleaned:
-                    await self._message_output_queue.put({"sender": sender_name, "text": cleaned})
+                    await queue_send(self._message_output_queue, {"sender": sender_name, "text": cleaned})
 
                 return None
 
@@ -589,7 +606,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         async def message_consumer_task(queue: asyncio.Queue, ws: WebSocket):
             while True:
                 msg = await queue.get()
-                await ws.send_json(msg)
+                try:
+                    await ws.send_json(msg)
+                except WebSocketDisconnect as e:
+                    print(f"message_consumer_task: WebSocketDisconnect while sending (code={getattr(e, 'code', 'unknown')}).")
+                    break
+                except RuntimeError as e:
+                    # Happens if the socket is closing/closed or event loop issues.
+                    print(f"message_consumer_task runtime error: {e}")
+                    break
+                except Exception as e:
+                    print(f"message_consumer_task unexpected send error: {e}")
+                    break
 
         async def user_input_handler_task(ws: WebSocket, proxy: WebSocketUserProxyAgent):
             while True:
@@ -597,11 +625,16 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     data = await ws.receive_json()
                     user_message = data['message']
                     await proxy.a_inject_user_message(user_message)
-                except WebSocketDisconnect:
+                except WebSocketDisconnect as e:
+                    print(f"user_input_handler_task: client disconnected (code={getattr(e, 'code', 'unknown')}).")
                     break
                 except Exception as e:
                     print(f"Error handling user input: {e}")
-                    await ws.send_json({"sender": "System", "text": f"Error: {e}"})
+                    try:
+                        await ws.send_json({"sender": "System", "text": f"Error: {e}"})
+                    except Exception:
+                        pass
+                    break
 
         consumer_task = asyncio.create_task(message_consumer_task(message_output_queue, websocket))
         conversation_task = asyncio.create_task(user_proxy.a_initiate_chat(manager, message=initial_config['message']))
@@ -611,11 +644,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         async def keepalive_task(ws: WebSocket):
             try:
                 while True:
-                    await asyncio.sleep(20)
+                    await asyncio.sleep(10)
                     await ws.send_json({"sender": "System", "type": "ping"})
-            except Exception:
-                # Ends when ws is closed/cancelled
-                pass
+            except WebSocketDisconnect as e:
+                print(f"keepalive_task: client disconnected (code={getattr(e, 'code', 'unknown')})")
+            except Exception as e:
+                print(f"keepalive_task error: {e}")
 
         ka_task = asyncio.create_task(keepalive_task(websocket))
 
