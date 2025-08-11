@@ -555,6 +555,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 return addressees
 
             def __call__(self, last_speaker: autogen.Agent, groupchat: autogen.GroupChat) -> autogen.Agent:
+                # Guard: if no meaningful history, start with ChatGPT by default
+                if not groupchat.messages:
+                    return self.agent_by_name.get("ChatGPT", self.agent_by_name[self.user_name])  
                 last_msg = groupchat.messages[-1]
                 content = (last_msg.get("content") or "").strip()
                 low = content.lower()
@@ -621,20 +624,37 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self._message_output_queue = message_output_queue
 
             async def a_receive(self, message, sender, request_reply: bool = True, silent: bool = False):
-                # Trust the actual agent's name so messages show up as ChatGPT/Claude/Gemini/Mistral (not chat_manager)
+                # Normalize to string content
                 if isinstance(message, dict):
                     content = message.get("content", "")
-                    sender_name = sender.name if sender else self.name
                 elif isinstance(message, str):
                     content = message
-                    sender_name = sender.name if sender else self.name
                 else:
                     return None
 
-                import re
+                # Prefer the actual assistant sender over the manager
+                sender_name = None
+                if sender is not None and getattr(sender, "name", None):
+                    sender_name = sender.name
+                    if sender_name.lower() in ("chat_manager", "groupchat_manager"):
+                        sender_name = None
+
+                # Fallback to a name inside the message dict (some backends set this)
+                if sender_name is None and isinstance(message, dict):
+                    candidate = message.get("name") or message.get("sender")
+                    if candidate and str(candidate).strip():
+                        sender_name = str(candidate).strip()
+
+                # Final fallback
+                if sender_name is None:
+                    sender_name = "System"
+
+                # Strip any trailing termination hints Autogen sometimes includes
                 cleaned = re.sub(r'(TERMINATE|Task Completed\.)[\s\S]*', '', content).strip()
+
                 if cleaned:
                     await self._message_output_queue.put({"sender": sender_name, "text": cleaned})
+
                 return None
 
             async def a_generate_reply(self, messages=None, sender=None, **kwargs):
@@ -735,11 +755,25 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         ka_task = asyncio.create_task(keepalive_task(websocket))
 
         try:
-            await input_handler_task
+            await asyncio.gather(
+                conversation_task,
+                input_handler_task,
+                consumer_task,
+                ka_task,
+            )
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"WebSocket tasks error: {e}\n{tb}")
+            try:
+                await websocket.send_json({"sender": "System", "text": f"Error: {e}"})
+            except Exception:
+                pass
         finally:
-            for task in (conversation_task, consumer_task, ka_task):
-                task.cancel()
-            await asyncio.gather(conversation_task, consumer_task, ka_task, return_exceptions=True)
+            for t in (conversation_task, input_handler_task, consumer_task, ka_task):
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(conversation_task, input_handler_task, consumer_task, ka_task, return_exceptions=True)
+
 
     except WebSocketDisconnect:
         print("WebSocket closed")
