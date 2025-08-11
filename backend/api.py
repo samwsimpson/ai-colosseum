@@ -355,35 +355,30 @@ async def stripe_webhook(request: Request):
     return {"status": "success"}
 @app.websocket("/ws/colosseum-chat")
 async def websocket_endpoint(websocket: WebSocket, token: str):
-
-    
-
     try:
         await websocket.accept()
 
+        # ---- auth & monthly limit ----
         user = await get_current_user(token=token)
-        
+
         user_doc = await db.collection('users').document(user['id']).get()
         user_data = user_doc.to_dict()
-        
+
         user_subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
         user_subscription_data = user_subscription_doc.to_dict()
 
         if user_subscription_data['monthly_limit'] is not None:
             first_day_of_month = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            
-            conversation_count_query = db.collection('conversations').where(
-                'user_id', '==', user['id']
-            ).where(
-                'subscription_id', '==', user_data['subscription_id']
-            ).where(
-                'timestamp', '>=', first_day_of_month
+            conversation_count_query = (
+                db.collection('conversations')
+                .where('user_id', '==', user['id'])
+                .where('subscription_id', '==', user_data['subscription_id'])
+                .where('timestamp', '>=', first_day_of_month)
             )
-
             conversation_count = 0
             async for _ in conversation_count_query.stream():
                 conversation_count += 1
-            
+
             if conversation_count >= user_subscription_data['monthly_limit']:
                 await websocket.send_json({
                     "sender": "System",
@@ -391,21 +386,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 })
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Limit reached")
                 return
-        
-        new_conversation_data = {
+
+        await db.collection('conversations').add({
             'user_id': user['id'],
             'timestamp': datetime.utcnow(),
             'subscription_id': user_data['subscription_id'],
-        }
-        await db.collection('conversations').add(new_conversation_data)
+        })
 
+        # ---- init from client ----
         initial_config = await websocket.receive_json()
-        print("INITIAL CONFIG RECEIVED:", initial_config)
-        # Bounded queue to avoid blocking if the browser is slow
-        message_output_queue = asyncio.Queue(maxsize=100)
+        message_output_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
 
-        def safe_enqueue(payload: dict):
-            """Best-effort enqueue without blocking; drop oldest if full."""
+        def queue_send_nowait(payload: dict):
             try:
                 message_output_queue.put_nowait(payload)
             except asyncio.QueueFull:
@@ -417,61 +409,44 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     message_output_queue.put_nowait(payload)
                 except Exception:
                     pass
-        user_name = initial_config.get('user_name', 'User')
-        sanitized_user_name = user_name.replace(" ", "_")
+
+        user_name = initial_config.get('user_name', 'User') or 'User'
+        user_display_name = user_name.replace('_', ' ').strip()  # show “Sam Simpson”, never underscores
+
+        # Keep this list in one place
         agent_names = ["ChatGPT", "Claude", "Gemini", "Mistral"]
 
         roster_text = (
             "SYSTEM: Multi-agent room context\n"
-            f"- USER: {user_name} (your messages appear as '{sanitized_user_name}')\n"
+            f"- USER: {user_display_name}\n"
             f"- AGENTS PRESENT: {', '.join(agent_names)}\n\n"
             "Conversation rules for all agents:\n"
             "1) You are in a shared room with ALL listed agents. Treat their messages as visible context.\n"
-            "2) Always prefix any references with the speaker name you are responding to when helpful, e.g.,\n"
-            "   'ChatGPT → Claude:' or 'Claude → User:' if addressing someone directly.\n"
-            "3) If the user addresses someone by name at the START of their message (e.g., 'Claude,' or 'ChatGPT:'), "
+            "2) If the user addresses someone by name at the START of their message (e.g., 'Claude,' or 'ChatGPT:'), "
             "that named agent should respond first.\n"
-            "4) If the user says 'you all', 'everyone', 'all agents', 'both of you', 'each of you', 'all of you', "
-            "'you guys', or similar, each agent should respond ONCE, concisely.\n"
-            "5) If you are not the addressed agent, but the user is clearly speaking to another agent, hold your reply "
-            "unless explicitly invited.\n"
-            "6) Use the user’s name when appropriate.\n"
-            "Examples of addressing:\n"
-            "- 'Claude, what do you think?' → Claude responds first.\n"
-            "- 'ChatGPT and Gemini, please answer.' → ChatGPT then Gemini respond once each.\n"
-            "- 'You all: one sentence each.' → Each listed agent replies once.\n"
-            "- 'Claude do you see ChatGPT’s message?' → Claude responds; others hold.\n"
+            "3) If the user says 'you all', 'everyone', 'all agents', 'both of you', 'each of you', or similar, "
+            "each agent should respond ONCE, concisely.\n"
+            "4) If one assistant clearly addresses another assistant, let the addressee reply next.\n"
+            "5) Mentions are NOT the same as addresses. Referencing an agent by name does not require that agent to reply.\n"
+            "6) If the user does not name anyone, the last assistant who spoke should reply.\n"
+            "7) When addressing another assistant directly, start with their name (e.g., 'Claude, ...'). "
+            "When addressing the user, use natural language (e.g., 'Sam, ...'), not arrows or labels.\n"
         )
 
         def make_agent_system(name: str) -> str:
             base = {
-                "ChatGPT":  CHATGPT_SYSTEM,
-                "Claude":   CLAUDE_SYSTEM,
-                "Gemini":   GEMINI_SYSTEM,
-                "Mistral":  MISTRAL_SYSTEM,
+                "ChatGPT": CHATGPT_SYSTEM,
+                "Claude": CLAUDE_SYSTEM,
+                "Gemini": GEMINI_SYSTEM,
+                "Mistral": MISTRAL_SYSTEM,
             }.get(name, "You are an assistant.")
             return (
                 f"{base}\n\n"
-                f"Your name is {name}. Participants: {sanitized_user_name} (user), "
-                f"{', '.join(agent_names)} (AIs). {roster_text}"
+                f"Your name is {name}. Participants: {user_display_name} (user), {', '.join(agent_names)} (AIs).\n"
+                f"{roster_text}"
             )
 
-
-        async def queue_send(queue: asyncio.Queue, payload):
-            """Non-blocking put: if the queue is full, drop the oldest and enqueue the new payload."""
-            try:
-                queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                try:
-                    _ = queue.get_nowait()  # drop oldest
-                except Exception:
-                    pass
-                try:
-                    queue.put_nowait(payload)
-                except Exception:
-                    pass
-
-
+        # ---- model configs ----
         chatgpt_llm_config = {
             "config_list": [{
                 "model": "gpt-4o",
@@ -481,7 +456,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "temperature": 0.5,
             "timeout": 90
         }
-
         claude_llm_config = {
             "config_list": [{
                 "model": "claude-3-5-sonnet-20240620",
@@ -491,7 +465,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "temperature": 0.7,
             "timeout": 90
         }
-        
         gemini_llm_config = {
             "config_list": [{
                 "model": "gemini-1.5-pro",
@@ -501,7 +474,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "temperature": 0.7,
             "timeout": 90
         }
-        
         mistral_llm_config = {
             "config_list": [{
                 "model": "mistral-large-latest",
@@ -511,122 +483,137 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "temperature": 0.7,
             "timeout": 90
         }
-        
+
+        # ---- agent classes ----
         class WebSocketAssistantAgent(autogen.AssistantAgent):
             def __init__(self, *args, message_output_queue: asyncio.Queue, **kwargs):
                 super().__init__(*args, **kwargs)
                 self._message_output_queue = message_output_queue
-            
-            async def a_send_typing_indicator(self, is_typing: bool):
-                await queue_send(self._message_output_queue, {
-                    "sender": self.name,
-                    "typing": is_typing,
-                    "text": ""
-                })
 
-            async def a_generate_reply(self, messages: List[Dict[str, Any]] = None, sender: autogen.ConversableAgent = None, **kwargs) -> Union[str, Dict, None]:
-                await self.a_send_typing_indicator(is_typing=True)
+            async def a_send_typing_indicator(self, is_typing: bool):
+                queue_send_nowait({"sender": self.name, "typing": is_typing, "text": ""})
+
+            async def a_generate_reply(self, messages=None, sender=None, **kwargs):
+                await self.a_send_typing_indicator(True)
                 try:
-                    reply = await super().a_generate_reply(messages=messages, sender=sender, **kwargs)
+                    return await super().a_generate_reply(messages=messages, sender=sender, **kwargs)
                 finally:
-                    await self.a_send_typing_indicator(is_typing=False)
-                
-                return reply
+                    await self.a_send_typing_indicator(False)
 
         class CustomSpeakerSelector:
+            """
+            - If an assistant directly addresses another assistant by name, the addressee replies next.
+            - If the user replies without naming someone, route to the last assistant who spoke.
+            - Mentions that are not direct addresses do not trigger a reply.
+            - If the user says 'everyone'/'all of you', enable a one-pass multi-agent reply (each assistant once).
+            - Basic loop detection hands control back to the user.
+            """
             def __init__(self, agents, user_name):
-                self.assistant_agents = [agent for agent in agents if agent.name not in [user_name, "System"]]
-                self.multi_agent_reply_state = {"is_active": False, "agents_to_reply": []}
-                self.agent_by_name = {agent.name: agent for agent in agents}
-                self.message_history = []
-                self.loop_detected = False
-                self.waiting_on_user_to_break_loop = False
+                self.assistant_agents = [a for a in agents if a.name not in [user_name, "System"]]
+                self.assistant_names = [a.name for a in self.assistant_agents]
+                self.agent_by_name = {a.name: a for a in agents}
                 self.user_name = user_name
 
+                self.message_history = []      # (speaker, content_lower)
+                self.previous_assistant = None # last assistant who actually spoke
+                self.waiting_on_user_to_break_loop = False
+                self.multi = {"active": False, "queue": []}
+
+            def _broadcast_requested(self, text: str) -> bool:
+                low = text.lower()
+                return any(k in low for k in [
+                    "everyone", "all of you", "both of you", "each of you",
+                    "all agents", "all ais", "you all", "@all"
+                ])
+
+            def _direct_addressees(self, text: str):
+                import re
+                low = text.lower()
+                addressees = []
+
+                # At-start vocative: "Claude,", "Gemini:", "@Mistral —"
+                for name in self.assistant_names:
+                    nl = name.lower()
+                    if re.search(rf'^\s*@?{re.escape(nl)}\b\s*[:,\-—]?', low):
+                        addressees.append(name)
+
+                # Handoff patterns anywhere
+                for name in self.assistant_names:
+                    nl = name.lower()
+                    if re.search(rf'(?:over\s+to|hand\s+to|pass(?:\s+it)?\s+to)\s+{re.escape(nl)}\b', low):
+                        if name not in addressees:
+                            addressees.append(name)
+
+                # Requesty vocatives near start
+                req = r'(?:would you|can you|please|your (?:thoughts|take)|mind|could you)'
+                for name in self.assistant_names:
+                    nl = name.lower()
+                    if re.search(rf'^\s*@?{re.escape(nl)}\b.*\b{req}\b', low):
+                        if name not in addressees:
+                            addressees.append(name)
+
+                return addressees
+
             def __call__(self, last_speaker: autogen.Agent, groupchat: autogen.GroupChat) -> autogen.Agent:
-                last_message = groupchat.messages[-1]
-                last_content = last_message["content"].strip().lower()
-                self.message_history.append((last_speaker.name, last_content))
+                last_msg = groupchat.messages[-1]
+                content = (last_msg.get("content") or "").strip()
+                low = content.lower()
+
+                # Loop detection
+                self.message_history.append((last_speaker.name, low))
                 self.message_history = self.message_history[-10:]
 
                 if self.waiting_on_user_to_break_loop:
                     if last_speaker.name == self.user_name:
                         self.waiting_on_user_to_break_loop = False
-                        self.loop_detected = False
                     return self.agent_by_name[self.user_name]
 
                 if (
-                    len(self.message_history) >= 4 and
-                    self.message_history[-1] == self.message_history[-3] and
-                    self.message_history[-2] == self.message_history[-4]
+                    len(self.message_history) >= 4
+                    and self.message_history[-1] == self.message_history[-3]
+                    and self.message_history[-2] == self.message_history[-4]
                 ):
-                    print("⚠️ Loop detected. Returning to User.")
-                    self.loop_detected = True
                     self.waiting_on_user_to_break_loop = True
-
-                    asyncio.create_task(
-                        queue_send(
-                            self.agent_by_name[self.user_name]._message_output_queue,
-                            {"sender": "System", "text": "⚠️ Loop detected. Waiting for your input to continue the conversation..."}
-                        )
-                    )
+                    queue_send_nowait({"sender": "System", "text": "⚠️ Loop detected. Waiting for your input to continue..."})
                     return self.agent_by_name[self.user_name]
-                
-                if last_speaker.name in [a.name for a in self.assistant_agents]:
-                    for agent in self.assistant_agents:
-                        if f"{agent.name.lower()}, would you like" in last_content or f"{agent.name.lower()} would you like" in last_content:
-                            print(f"Detected turn pass from {last_speaker.name} to {agent.name}.")
-                            self.multi_agent_reply_state["is_active"] = False
-                            return self.agent_by_name[agent.name]
 
+                # Assistant spoke last
+                if last_speaker.name in self.assistant_names:
+                    self.previous_assistant = self.agent_by_name[last_speaker.name]
+
+                    # If they handed off, let the addressee speak
+                    addressees = self._direct_addressees(content)
+                    if addressees:
+                        return self.agent_by_name[addressees[0]]
+
+                    # Continue one-pass broadcast
+                    if self.multi["active"]:
+                        if self.multi["queue"]:
+                            return self.agent_by_name[self.multi["queue"].pop(0)]
+                        self.multi["active"] = False
+                        return self.agent_by_name[self.user_name]
+
+                    # Otherwise hand back to user
+                    return self.agent_by_name[self.user_name]
+
+                # User spoke last
                 if last_speaker.name == self.user_name:
-                    # Detect explicit addressing by name at start: e.g., "Claude, ...", "ChatGPT:", "Gemini - ..."
-                    addressed = None
-                    for agent in self.assistant_agents:
-                        if re.match(rf"^\s*{re.escape(agent.name)}[\s,:-]", last_content, re.IGNORECASE):
-                            addressed = agent.name
-                            break
+                    if self._broadcast_requested(content):
+                        self.multi["active"] = True
+                        self.multi["queue"] = [a.name for a in self.assistant_agents]
+                        return self.agent_by_name[self.multi["queue"].pop(0)]
 
-                    multi_agent_keywords = [
-                        "everyone", "all of you", "both of you", "each of you",
-                        "all agents", "all ais", "all models", "you all", "you guys",
-                        "all bots", "the group"
-                    ]
+                    addressees = self._direct_addressees(content)
+                    if addressees:
+                        return self.agent_by_name[addressees[0]]
 
-                    # If explicitly addressed, route to that agent
-                    if addressed:
-                        self.multi_agent_reply_state["is_active"] = False
-                        return self.agent_by_name[addressed]
+                    if self.previous_assistant is not None:
+                        return self.previous_assistant
 
-                    # If multi-agent broadcast, fan out to all agents (once each)
-                    if any(word in last_content for word in multi_agent_keywords):
-                        self.multi_agent_reply_state["is_active"] = True
-                        self.multi_agent_reply_state["agents_to_reply"] = [agent.name for agent in self.assistant_agents]
-                        return self.agent_by_name[self.multi_agent_reply_state["agents_to_reply"].pop(0)]
-
-                    # Name mentioned anywhere (not necessarily at start) → prefer that agent
-                    for agent in self.assistant_agents:
-                        if agent.name.lower() in last_content:
-                            self.multi_agent_reply_state["is_active"] = False
-                            return self.agent_by_name[agent.name]
-
-                    # Default
-                    self.multi_agent_reply_state["is_active"] = False
-                    return self.agent_by_name.get("ChatGPT", self.agent_by_name[self.user_name])
-
-
-                elif last_speaker.name in [a.name for a in self.assistant_agents]:
-                    if self.multi_agent_reply_state["is_active"]:
-                        if self.multi_agent_reply_state["agents_to_reply"]:
-                            return self.agent_by_name[self.multi_agent_reply_state["agents_to_reply"].pop(0)]
-                        else:
-                            self.multi_agent_reply_state["is_active"] = False
-                            return self.agent_by_name[self.user_name]
-                    
-                    return self.agent_by_name[self.user_name]
+                    return self.assistant_agents[0] if self.assistant_agents else self.agent_by_name[self.user_name]
 
                 return self.agent_by_name[self.user_name]
-        
+
         class WebSocketUserProxyAgent(autogen.UserProxyAgent):
             def __init__(self, *args, message_output_queue: asyncio.Queue, **kwargs):
                 super().__init__(*args, **kwargs)
@@ -634,76 +621,42 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self._message_output_queue = message_output_queue
 
             async def a_receive(self, message, sender, request_reply: bool = True, silent: bool = False):
-                # 1) Always use the actual agent object's name, not message["name"]
-                sender_name = sender.name if sender else self.name
-
-                # 2) Normalize content out of dict or str
+                # Trust the actual agent's name so messages show up as ChatGPT/Claude/Gemini/Mistral (not chat_manager)
                 if isinstance(message, dict):
                     content = message.get("content", "")
+                    sender_name = sender.name if sender else self.name
                 elif isinstance(message, str):
                     content = message
+                    sender_name = sender.name if sender else self.name
                 else:
                     return None
 
-                # 3) Clean up routing prefixes like "Sam_Simpson → Claude: ..."
-                #    and model self-labels like "Claude: ..." if present.
                 import re
-                cleaned = content
-                cleaned = re.sub(r'^\s*[^:\n]+ → [^:\n]+:\s*', '', cleaned)   # drop "A → B: " prefix
-                cleaned = re.sub(r'^\s*[A-Za-z0-9_]+:\s+', '', cleaned)       # drop "Claude: " style labels
-                cleaned = re.sub(r'(TERMINATE|Task Completed\.)[\s\S]*', '', cleaned).strip()
-
+                cleaned = re.sub(r'(TERMINATE|Task Completed\.)[\s\S]*', '', content).strip()
                 if cleaned:
                     await self._message_output_queue.put({"sender": sender_name, "text": cleaned})
-
                 return None
 
-            async def a_generate_reply(self, messages: List[Dict[str, Any]] = None, sender: autogen.ConversableAgent = None, **kwargs) -> Union[str, Dict, None]:
-                new_user_message = await self._user_input_queue.get()
-                return new_user_message
+            async def a_generate_reply(self, messages=None, sender=None, **kwargs):
+                return await self._user_input_queue.get()
 
             async def a_inject_user_message(self, message: str):
                 await self._user_input_queue.put(message)
 
-
+        # ---- build roster ----
         user_proxy = WebSocketUserProxyAgent(
-            name=sanitized_user_name,
+            name=user_display_name,
             human_input_mode="NEVER",
             message_output_queue=message_output_queue,
             code_execution_config={"use_docker": False},
             is_termination_msg=lambda x: isinstance(x, dict) and x.get("content", "").endswith("TERMINATE")
         )
-        
+
         agents = [user_proxy]
         agents.append(WebSocketAssistantAgent("ChatGPT", llm_config=chatgpt_llm_config, system_message=make_agent_system("ChatGPT"), message_output_queue=message_output_queue))
         agents.append(WebSocketAssistantAgent("Claude",  llm_config=claude_llm_config,  system_message=make_agent_system("Claude"),  message_output_queue=message_output_queue))
         agents.append(WebSocketAssistantAgent("Gemini",  llm_config=gemini_llm_config,  system_message=make_agent_system("Gemini"),  message_output_queue=message_output_queue))
         agents.append(WebSocketAssistantAgent("Mistral", llm_config=mistral_llm_config, system_message=make_agent_system("Mistral"), message_output_queue=message_output_queue))
-
-
-        # --- Roster & rules so every model knows who's here and who "you all" means ---
-        agent_names = [a.name for a in agents if a.name != sanitized_user_name]
-
-
-        # Add roster/rules to each assistant's system prompt
-        for a in agents:
-            if isinstance(a, WebSocketAssistantAgent):
-                try:
-                    a.system_message = f"{a.system_message}\n\n{roster_text}"
-                except Exception:
-                    # Fallback: some autogen versions keep it under ._system_message
-                    if hasattr(a, "_system_message"):
-                        a._system_message = f"{getattr(a, '_system_message', '')}\n\n{roster_text}"
-
-
-        # Also seed the group chat history with a system message containing the roster/rules.
-        initial_messages = [{
-            "role": "system",
-            "name": "System",
-            "content": roster_text
-        }]
-
-
 
         print("AGENTS IN GROUPCHAT:")
         for a in agents:
@@ -711,79 +664,64 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         if len(agents) < 2:
             await websocket.send_json({"sender": "System", "text": "No AIs available for your subscription."})
             return
-        
-        selector = CustomSpeakerSelector(agents, user_name=sanitized_user_name)
+
+        selector = CustomSpeakerSelector(agents, user_name=user_display_name)
 
         groupchat = autogen.GroupChat(
             agents=agents,
-            messages=initial_messages,  # seed with roster/rules
+            messages=[{"role": "system", "name": "System", "content": roster_text}],
             max_round=999999,
             speaker_selection_method=selector,
             allow_repeat_speaker=True
         )
 
-        
         manager = autogen.GroupChatManager(
             groupchat=groupchat,
             llm_config=False,
             system_message=GROUPCHAT_SYSTEM_MESSAGE
         )
-        
+
+        # ---- tasks ----
         async def message_consumer_task(queue: asyncio.Queue, ws: WebSocket):
             while True:
                 msg = await queue.get()
                 try:
                     await ws.send_json(msg)
                 except WebSocketDisconnect as e:
-                    print(f"message_consumer_task: WebSocketDisconnect while sending (code={getattr(e, 'code', 'unknown')}).")
-                    break
-                except RuntimeError as e:
-                    # Happens if the socket is closing/closed or event loop issues.
-                    print(f"message_consumer_task runtime error: {e}")
+                    print(f"message_consumer_task: client disconnected (code={getattr(e, 'code', 'unknown')})")
                     break
                 except Exception as e:
-                    print(f"message_consumer_task unexpected send error: {e}")
+                    print(f"message_consumer_task error: {e}")
                     break
-        
+
         async def user_input_handler_task(ws: WebSocket, proxy: WebSocketUserProxyAgent):
             while True:
                 try:
                     data = await ws.receive_json()
-
-                    # Heartbeat: reply to ping, ignore pong
                     if isinstance(data, dict):
-                        msg_type = data.get("type")
-                        if msg_type == "ping":
+                        t = data.get("type")
+                        if t == "ping":
                             await ws.send_json({"type": "pong"})
                             continue
-                        if msg_type == "pong":
+                        if t == "pong":
                             continue
-
-                        # Normal user message
                         if "message" in data and isinstance(data["message"], str):
                             await proxy.a_inject_user_message(data["message"])
                             continue
-
-                    # If we get here, payload was not what we expect; ignore quietly.
-                    continue
-
+                    # ignore unexpected payloads
                 except WebSocketDisconnect:
                     break
                 except Exception as e:
-                    print(f"Error handling user input: {e}")
+                    print(f"user_input_handler_task error: {e}")
                     try:
                         await ws.send_json({"sender": "System", "text": f"Error: {e}"})
                     except WebSocketDisconnect:
                         break
 
-
         consumer_task = asyncio.create_task(message_consumer_task(message_output_queue, websocket))
-        conversation_task = asyncio.create_task(
-            user_proxy.a_initiate_chat(manager, message=initial_config.get('message', 'Hello!'))
-        )
+        conversation_task = asyncio.create_task(user_proxy.a_initiate_chat(manager, message=initial_config.get('message', 'Hello!')))
         input_handler_task = asyncio.create_task(user_input_handler_task(websocket, user_proxy))
 
-        # Optional keepalive ping to avoid idle WS disconnects
         async def keepalive_task(ws: WebSocket):
             try:
                 while True:
@@ -797,7 +735,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         ka_task = asyncio.create_task(keepalive_task(websocket))
 
         try:
-            # Keep WS alive until client disconnects
             await input_handler_task
         finally:
             for task in (conversation_task, consumer_task, ka_task):
@@ -808,7 +745,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         print("WebSocket closed")
     except Exception as e:
         tb = traceback.format_exc()
-        print(f"General exception: {e}\n{tb}")  # <-- full stack trace to logs
+        print(f"General exception: {e}\n{tb}")
         try:
             await websocket.send_json({"sender": "System", "text": f"Error: {e}"})
         except WebSocketDisconnect:
