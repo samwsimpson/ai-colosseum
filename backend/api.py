@@ -21,8 +21,44 @@ from google.cloud import firestore
 from google_auth_oauthlib.flow import Flow
 
 print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 2.0 - FIRESTORE) <<")
-
 load_dotenv()
+
+# ==== System prompts (define once, before websocket handler) ====
+
+def _env(name: str, default: str) -> str:
+    # Use env var if present; otherwise fallback to a sane default
+    val = os.getenv(name)
+    return val if (val is not None and val.strip() != "") else default
+
+CHATGPT_SYSTEM = _env(
+    "CHATGPT_SYSTEM",
+    "You are ChatGPT. Be concise, accurate, and helpful. When unsure, ask for clarification."
+)
+
+CLAUDE_SYSTEM = _env(
+    "CLAUDE_SYSTEM",
+    "You are Claude. Provide careful reasoning and clear explanations. Avoid hallucinations."
+)
+
+GEMINI_SYSTEM = _env(
+    "GEMINI_SYSTEM",
+    "You are Gemini. Answer succinctly, cite assumptions, and highlight uncertainties."
+)
+
+MISTRAL_SYSTEM = _env(
+    "MISTRAL_SYSTEM",
+    "You are Mistral. Give practical, straightforward answers with minimal fluff."
+)
+
+GROUPCHAT_SYSTEM_MESSAGE = _env(
+    "GROUPCHAT_SYSTEM_MESSAGE",
+    (
+        "You are the group chat coordinator. Keep discussion focused, prevent loops, and ensure each agent only speaks "
+        "when it adds value. If agents repeat themselves or stall, hand control back to the user."
+    )
+)
+# ==== end system prompts ====
+
 
 app = FastAPI()
 
