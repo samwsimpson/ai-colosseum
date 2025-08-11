@@ -170,14 +170,21 @@ export default function ChatPage() {
                 }
 
                 if (typeof msg.sender === 'string' && typeof msg.typing === 'boolean') {
-                setIsTyping(prev => {
-                    const next: TypingState = { ...prev };
-                    next[msg.sender] = msg.typing; // boolean, not undefined
-                    return next;
-                });
-                } else if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
-                addMessageToChat({ sender: msg.sender, text: msg.text });
+                    const senderKey: string = msg.sender;
+                    const isTypingVal: boolean = msg.typing;
+
+                    setIsTyping((prev: TypingState): TypingState => {
+                        const next: TypingState = { ...prev };
+                        next[senderKey] = isTypingVal;
+                        return next;
+                    });
+                    return;
                 }
+
+                if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
+                    addMessageToChat({ sender: msg.sender, text: msg.text });
+                }
+
             } catch (err: unknown) {
                 console.error('Failed to parse message:', err);
                 addMessageToChat({ sender: 'System', text: `Error: ${event.data}` });
