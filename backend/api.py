@@ -131,14 +131,17 @@ async def startup_event():
 @app.get("/api/users/me")
 async def read_users_me(current_user: dict = Depends(get_current_user)):
     user_doc = await db.collection('users').document(current_user['id']).get()
-    user_data = user_doc.to_dict()
+    if not user_doc.exists:
+    raise HTTPException(status_code=404, detail="User not found")
+
+    user_data = user_doc.to_dict() or {}    
     
     subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
     subscription_data = subscription_doc.to_dict()
     
     return {
         "user_name": user_data['name'],
-        "user_id": user_data['id'],
+        "user_id": user_doc.id,
         "user_plan_name": subscription_doc.id
     }
     
@@ -165,7 +168,10 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
         'timestamp', '>=', first_day_of_month
     )
     
-    monthly_usage = sum(1 async for _ in monthly_usage_query.stream())
+    monthly_usage = 0
+    async for _ in monthly_usage_query.stream():
+        monthly_usage += 1
+
 
     return {
         "monthly_usage": monthly_usage,
@@ -316,7 +322,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 'timestamp', '>=', first_day_of_month
             )
 
-            conversation_count = sum(1 async for _ in conversation_count_query.stream())
+            conversation_count = 0
+            async for _ in conversation_count_query.stream():
+                conversation_count += 1
             
             if conversation_count >= user_subscription_data['monthly_limit']:
                 await websocket.send_json({
