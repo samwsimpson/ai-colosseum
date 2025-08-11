@@ -627,11 +627,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         for a in agents:
             if isinstance(a, WebSocketAssistantAgent):
                 try:
-                    a.system_message = f\"{a.system_message}\\n\\n{roster_text}\"
+                    a.system_message = f"{a.system_message}\n\n{roster_text}"
                 except Exception:
                     # Fallback: some autogen versions keep it under ._system_message
-                    if hasattr(a, \"_system_message\"):
-                        a._system_message = f\"{getattr(a, '_system_message', '')}\\n\\n{roster_text}\"
+                    if hasattr(a, "_system_message"):
+                        a._system_message = f"{getattr(a, '_system_message', '')}\n\n{roster_text}"
+
 
         # Also seed the group chat history with a system message containing the roster/rules.
         initial_messages = [{
@@ -681,23 +682,30 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 except Exception as e:
                     print(f"message_consumer_task unexpected send error: {e}")
                     break
-
+        
         async def user_input_handler_task(ws: WebSocket, proxy: WebSocketUserProxyAgent):
             while True:
                 try:
                     data = await ws.receive_json()
-                    user_message = data['message']
+
+                    # Ignore client heartbeat pings
+                    if isinstance(data, dict) and data.get("type") in ("ping", "pong"):
+                        continue
+
+                    user_message = data.get("message")
+                    if not user_message:
+                        continue
+
                     await proxy.a_inject_user_message(user_message)
-                except WebSocketDisconnect as e:
-                    print(f"user_input_handler_task: client disconnected (code={getattr(e, 'code', 'unknown')}).")
+
+                except WebSocketDisconnect:
                     break
                 except Exception as e:
                     print(f"Error handling user input: {e}")
                     try:
                         await ws.send_json({"sender": "System", "text": f"Error: {e}"})
-                    except Exception:
-                        pass
-                    break
+                    except WebSocketDisconnect:
+                        break
 
         consumer_task = asyncio.create_task(message_consumer_task(message_output_queue, websocket))
         conversation_task = asyncio.create_task(user_proxy.a_initiate_chat(manager, message=initial_config['message']))
@@ -707,7 +715,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         async def keepalive_task(ws: WebSocket):
             try:
                 while True:
-                    await asyncio.sleep(10)
+                    await asyncio.sleep(20)
                     await ws.send_json({"sender": "System", "type": "ping"})
             except WebSocketDisconnect as e:
                 print(f"keepalive_task: client disconnected (code={getattr(e, 'code', 'unknown')})")

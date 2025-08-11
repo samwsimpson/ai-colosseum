@@ -24,6 +24,7 @@ export default function ChatPage() {
     const [message, setMessage] = useState<string>('');
     const [chatHistory, setChatHistory] = useState<Message[]>([]);
     const [isWsOpen, setIsWsOpen] = useState<boolean>(false);
+    const [wsReconnectNonce, setWsReconnectNonce] = useState(0);
     // New state to track which agents are typing
     const [isTyping, setIsTyping] = useState<TypingState>({
         ChatGPT: false,
@@ -118,6 +119,17 @@ export default function ChatPage() {
         currentWs.onopen = () => {
             console.log('WebSocket connection opened.');
             setIsWsOpen(true);
+
+            // --- HEARTBEAT to keep connection alive ---
+            const heartbeatInterval = setInterval(() => {
+                if (currentWs.readyState === WebSocket.OPEN) {
+            currentWs.send(JSON.stringify({ type: "ping" }));
+                }
+            }, 20000); // send ping every 20 seconds
+            // store so we can clear on close
+            (currentWs as any)._heartbeatInterval = heartbeatInterval;
+            // --- END HEARTBEAT ---
+
             const initialPayload = {
                 message: "Hello!",
                 user_name: userName 
@@ -126,45 +138,60 @@ export default function ChatPage() {
         };
 
         currentWs.onmessage = (event) => {
-            try {
-                const message = JSON.parse(event.data);
-                
-                if (typeof message.typing === 'boolean') {
-                    console.log(`${message.sender} is typing: ${message.typing}`);
-                    setIsTyping(prev => ({
-                        ...prev,
-                        [message.sender]: message.typing,
-                    }));
-                } 
-                else if (message.text) {
-                    addMessageToChat(message);
-                }
-            } catch (error) {
-                console.error("Failed to parse message:", error);
-                addMessageToChat({ sender: "System", text: `Error: ${event.data}` });
-            }
-        };
+        try {
+            const message = JSON.parse(event.data);
 
+            // reply to server pings
+            if (message?.type === "ping") {
+            if (currentWs.readyState === WebSocket.OPEN) {
+                currentWs.send(JSON.stringify({ type: "pong" }));
+            }
+            return; // don't show pings in the chat
+            }
+
+            if (typeof message.typing === 'boolean') {
+            setIsTyping(prev => ({ ...prev, [message.sender]: message.typing }));
+            } else if (message.text) {
+            addMessageToChat(message);
+            }
+        } catch (error) {
+            console.error("Failed to parse message:", error);
+            addMessageToChat({ sender: "System", text: `Error: ${event.data}` });
+        }
+        };
+                
         currentWs.onclose = () => {
-            console.log('WebSocket connection closed.');
-            setIsWsOpen(false);
-            setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+        console.log('WebSocket connection closed.');
+        setIsWsOpen(false);
+        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+
+        // clear heartbeat if we set one
+        const hb = (currentWs as any)._heartbeatInterval as number | undefined;
+        if (hb) clearInterval(hb);
+
+        // mark ref as closed and trigger reconnect
+        ws.current = null;
+        setTimeout(() => setWsReconnectNonce(n => n + 1), 1000); // retry in 1s
         };
         
         currentWs.onerror = (error) => {
             console.error('WebSocket error:', error);
             setIsWsOpen(false);
+
+            // Force a clean cycle so onclose fires and we reconnect
+            try { currentWs.close(); } catch {}
         };
 
         // Cleanup function for the useEffect hook
         return () => {
-            // Close the socket only if it's the one we just opened and it's still open
-            if (currentWs && currentWs.readyState === WebSocket.OPEN) {
-                console.log('Component unmounting, closing WebSocket.');
+            const hb = (currentWs as any)._heartbeatInterval as number | undefined;
+            if (hb) clearInterval(hb);
+
+            if (currentWs && (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING)) {
                 currentWs.close();
             }
         };
-    }, [userToken, userName, addMessageToChat]);
+    }, [userToken, userName, addMessageToChat, wsReconnectNonce]);
 
     if (!userToken) {
         return null;
