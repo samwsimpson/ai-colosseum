@@ -508,20 +508,40 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             return self.agent_by_name[agent.name]
 
                 if last_speaker.name == self.user_name:
-                    multi_agent_keywords = ["everyone", "all of you", "both of you", "each of you", "all agents", "all AIs", "you all"]
+                    # Detect explicit addressing by name at start: e.g., "Claude, ...", "ChatGPT:", "Gemini - ..."
+                    addressed = None
+                    for agent in self.assistant_agents:
+                        if re.match(rf"^\s*{re.escape(agent.name)}[\s,:-]", last_content, re.IGNORECASE):
+                            addressed = agent.name
+                            break
+
+                    multi_agent_keywords = [
+                        "everyone", "all of you", "both of you", "each of you",
+                        "all agents", "all ais", "all models", "you all", "you guys",
+                        "all bots", "the group"
+                    ]
+
+                    # If explicitly addressed, route to that agent
+                    if addressed:
+                        self.multi_agent_reply_state["is_active"] = False
+                        return self.agent_by_name[addressed]
+
+                    # If multi-agent broadcast, fan out to all agents (once each)
                     if any(word in last_content for word in multi_agent_keywords):
-                        print("User message contains multi-agent keywords. Activating multi-agent reply state.")
                         self.multi_agent_reply_state["is_active"] = True
                         self.multi_agent_reply_state["agents_to_reply"] = [agent.name for agent in self.assistant_agents]
                         return self.agent_by_name[self.multi_agent_reply_state["agents_to_reply"].pop(0)]
 
+                    # Name mentioned anywhere (not necessarily at start) → prefer that agent
                     for agent in self.assistant_agents:
                         if agent.name.lower() in last_content:
                             self.multi_agent_reply_state["is_active"] = False
                             return self.agent_by_name[agent.name]
 
+                    # Default
                     self.multi_agent_reply_state["is_active"] = False
                     return self.agent_by_name.get("ChatGPT", self.agent_by_name[self.user_name])
+
 
                 elif last_speaker.name in [a.name for a in self.assistant_agents]:
                     if self.multi_agent_reply_state["is_active"]:
@@ -579,6 +599,48 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         agents.append(WebSocketAssistantAgent("Gemini", llm_config=gemini_llm_config, system_message=GEMINI_SYSTEM, message_output_queue=message_output_queue))
         agents.append(WebSocketAssistantAgent("Mistral", llm_config=mistral_llm_config, system_message=MISTRAL_SYSTEM, message_output_queue=message_output_queue))
 
+                # --- Roster & rules so every model knows who's here and who "you all" means ---
+        agent_names = [a.name for a in agents if a.name != sanitized_user_name]
+        roster_text = (
+            "SYSTEM: Multi-agent room context\n"
+            f"- USER: {user_name} (your messages appear as '{sanitized_user_name}')\n"
+            f"- AGENTS PRESENT: {', '.join(agent_names)}\n\n"
+            "Conversation rules for all agents:\n"
+            "1) You are in a shared room with ALL listed agents. Treat their messages as visible context.\n"
+            "2) Always prefix any references with the speaker name you are responding to when helpful, e.g.,\n"
+            "   'ChatGPT → Claude:' or 'Claude → User:' if addressing someone directly.\n"
+            "3) If the user addresses someone by name at the START of their message (e.g., 'Claude,' or 'ChatGPT:'), "
+            "that named agent should respond first.\n"
+            "4) If the user says 'you all', 'everyone', 'all agents', 'both of you', 'each of you', 'all of you', "
+            "'you guys', or similar, each agent should respond ONCE, concisely.\n"
+            "5) If you are not the addressed agent, but the user is clearly speaking to another agent, hold your reply "
+            "unless explicitly invited.\n"
+            "6) Use the user’s name (Sam) when appropriate.\n"
+            "Examples of addressing:\n"
+            "- 'Claude, what do you think?' → Claude responds first.\n"
+            "- 'ChatGPT and Gemini, please answer.' → ChatGPT then Gemini respond once each.\n"
+            "- 'You all: one sentence each.' → Each listed agent replies once.\n"
+            "- 'Claude do you see ChatGPT’s message?' → Claude responds; others hold.\n"
+        )
+
+        # Add roster/rules to each assistant's system prompt
+        for a in agents:
+            if isinstance(a, WebSocketAssistantAgent):
+                try:
+                    a.system_message = f\"{a.system_message}\\n\\n{roster_text}\"
+                except Exception:
+                    # Fallback: some autogen versions keep it under ._system_message
+                    if hasattr(a, \"_system_message\"):
+                        a._system_message = f\"{getattr(a, '_system_message', '')}\\n\\n{roster_text}\"
+
+        # Also seed the group chat history with a system message containing the roster/rules.
+        initial_messages = [{
+            "role": "system",
+            "name": "System",
+            "content": roster_text
+        }]
+
+
 
         print("AGENTS IN GROUPCHAT:")
         for a in agents:
@@ -591,11 +653,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         groupchat = autogen.GroupChat(
             agents=agents,
-            messages=[],
+            messages=initial_messages,  # seed with roster/rules
             max_round=999999,
             speaker_selection_method=selector,
             allow_repeat_speaker=True
         )
+
         
         manager = autogen.GroupChatManager(
             groupchat=groupchat,
