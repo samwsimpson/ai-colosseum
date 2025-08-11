@@ -410,8 +410,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 except Exception:
                     pass
 
-        user_name = initial_config.get('user_name', 'User') or 'User'
-        user_display_name = user_name.replace('_', ' ').strip()  # show “Sam Simpson”, never underscores
+        raw_user_name = (initial_config.get('user_name') or 'User').strip()
+        safe_user_name = re.sub(r'[^A-Za-z0-9_-]', '_', raw_user_name) or 'User'  # <-- no spaces/specials for the LLM API
+        user_display_name = raw_user_name.replace('_', ' ').strip()               # <-- pretty name for your UI
+
+        # Map internal -> pretty sender names for the frontend
+        display_name_map = {
+            "ChatGPT": "ChatGPT",
+            "Claude": "Claude",
+            "Gemini": "Gemini",
+            "Mistral": "Mistral",
+            safe_user_name: user_display_name,
+        }
 
         # Keep this list in one place
         agent_names = ["ChatGPT", "Claude", "Gemini", "Mistral"]
@@ -653,7 +663,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 cleaned = re.sub(r'(TERMINATE|Task Completed\.)[\s\S]*', '', content).strip()
 
                 if cleaned:
-                    await self._message_output_queue.put({"sender": sender_name, "text": cleaned})
+                    pretty_sender = display_name_map.get(sender_name, sender_name)
+                    await self._message_output_queue.put({"sender": pretty_sender, "text": cleaned})
 
                 return None
 
@@ -665,7 +676,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         # ---- build roster ----
         user_proxy = WebSocketUserProxyAgent(
-            name=user_display_name,
+            name=safe_user_name,  # <-- use the safe internal name
             human_input_mode="NEVER",
             message_output_queue=message_output_queue,
             code_execution_config={"use_docker": False},
@@ -685,7 +696,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             await websocket.send_json({"sender": "System", "text": "No AIs available for your subscription."})
             return
 
-        selector = CustomSpeakerSelector(agents, user_name=user_display_name)
+        selector = CustomSpeakerSelector(agents, user_name=safe_user_name)
 
         groupchat = autogen.GroupChat(
             agents=agents,
