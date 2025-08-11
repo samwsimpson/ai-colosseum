@@ -173,9 +173,10 @@ export default function ChatPage() {
                     return;
                 }
 
-                if (typeof msg.typing === 'boolean' && msg.sender) {
-                    setIsTyping(prev => ({ ...prev, [msg.sender]: msg.typing }));
-                } else if (msg.text && msg.sender) {
+                if (typeof msg.typing === 'boolean' && typeof msg.sender === 'string') {
+                    const senderKey = msg.sender as string; // now guaranteed string
+                    setIsTyping(prev => ({ ...prev, [senderKey]: msg.typing }));
+                } else if (typeof msg.text === 'string' && typeof msg.sender === 'string') {
                     addMessageToChat({ sender: msg.sender, text: msg.text });
                 }
             } catch (err: unknown) {
