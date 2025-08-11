@@ -634,19 +634,27 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self._message_output_queue = message_output_queue
 
             async def a_receive(self, message, sender, request_reply: bool = True, silent: bool = False):
+                # 1) Always use the actual agent object's name, not message["name"]
+                sender_name = sender.name if sender else self.name
+
+                # 2) Normalize content out of dict or str
                 if isinstance(message, dict):
                     content = message.get("content", "")
-                    sender_name = message.get("name", sender.name if sender else self.name)
                 elif isinstance(message, str):
                     content = message
-                    sender_name = sender.name if sender else self.name
                 else:
                     return None
-                
-                cleaned = re.sub(r'(TERMINATE|Task Completed\.)[\s\S]*', '', content).strip()
-                
+
+                # 3) Clean up routing prefixes like "Sam_Simpson → Claude: ..."
+                #    and model self-labels like "Claude: ..." if present.
+                import re
+                cleaned = content
+                cleaned = re.sub(r'^\s*[^:\n]+ → [^:\n]+:\s*', '', cleaned)   # drop "A → B: " prefix
+                cleaned = re.sub(r'^\s*[A-Za-z0-9_]+:\s+', '', cleaned)       # drop "Claude: " style labels
+                cleaned = re.sub(r'(TERMINATE|Task Completed\.)[\s\S]*', '', cleaned).strip()
+
                 if cleaned:
-                    await queue_send(self._message_output_queue, {"sender": sender_name, "text": cleaned})
+                    await self._message_output_queue.put({"sender": sender_name, "text": cleaned})
 
                 return None
 
@@ -656,6 +664,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
             async def a_inject_user_message(self, message: str):
                 await self._user_input_queue.put(message)
+
 
         user_proxy = WebSocketUserProxyAgent(
             name=sanitized_user_name,
