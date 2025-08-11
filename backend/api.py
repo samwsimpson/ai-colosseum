@@ -356,6 +356,26 @@ async def stripe_webhook(request: Request):
     return {"status": "success"}
 @app.websocket("/ws/colosseum-chat")
 async def websocket_endpoint(websocket: WebSocket, token: str):
+    initial_config = await websocket.receive_json()
+    print("INITIAL CONFIG RECEIVED:", initial_config)
+    message_output_queue = asyncio.Queue(maxsize=100)
+    # ...safe_enqueue / queue_send...
+    user_name = initial_config.get('user_name', 'User')
+    sanitized_user_name = user_name.replace(" ", "_")
+    agent_names = ["ChatGPT", "Claude", "Gemini", "Mistral"]
+
+    def make_agent_system(name: str) -> str:
+        base = {
+            "ChatGPT":  CHATGPT_SYSTEM,
+            "Claude":   CLAUDE_SYSTEM,
+            "Gemini":   GEMINI_SYSTEM,
+            "Mistral":  MISTRAL_SYSTEM,
+        }.get(name, "You are an assistant.")
+        return (
+            f"{base}\n\n"
+            f"Your name is {name}. Participants: {sanitized_user_name} (user), "
+            f"{', '.join(agent_names)} (AIs). {roster_text}"
+        )
     try:
         await websocket.accept()
 
@@ -627,10 +647,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         )
         
         agents = [user_proxy]
-        agents.append(WebSocketAssistantAgent("ChatGPT", llm_config=chatgpt_llm_config, system_message=CHATGPT_SYSTEM, message_output_queue=message_output_queue))
-        agents.append(WebSocketAssistantAgent("Claude", llm_config=claude_llm_config, system_message=CLAUDE_SYSTEM, message_output_queue=message_output_queue))
-        agents.append(WebSocketAssistantAgent("Gemini", llm_config=gemini_llm_config, system_message=GEMINI_SYSTEM, message_output_queue=message_output_queue))
-        agents.append(WebSocketAssistantAgent("Mistral", llm_config=mistral_llm_config, system_message=MISTRAL_SYSTEM, message_output_queue=message_output_queue))
+        agents.append(WebSocketAssistantAgent("ChatGPT", llm_config=chatgpt_llm_config, system_message=make_agent_system("ChatGPT"), message_output_queue=message_output_queue))
+        agents.append(WebSocketAssistantAgent("Claude",  llm_config=claude_llm_config,  system_message=make_agent_system("Claude"),  message_output_queue=message_output_queue))
+        agents.append(WebSocketAssistantAgent("Gemini",  llm_config=gemini_llm_config,  system_message=make_agent_system("Gemini"),  message_output_queue=message_output_queue))
+        agents.append(WebSocketAssistantAgent("Mistral", llm_config=mistral_llm_config, system_message=make_agent_system("Mistral"), message_output_queue=message_output_queue))
+
 
                 # --- Roster & rules so every model knows who's here and who "you all" means ---
         agent_names = [a.name for a in agents if a.name != sanitized_user_name]
@@ -692,7 +713,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             speaker_selection_method=selector,
             allow_repeat_speaker=True
         )
-
         
         manager = autogen.GroupChatManager(
             groupchat=groupchat,
@@ -721,14 +741,17 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 try:
                     data = await ws.receive_json()
 
-                    # Ignore client heartbeat pings
-                    if isinstance(data, dict) and data.get("type") in ("ping", "pong"):
+                    # --- heartbeat handling ---
+                    if isinstance(data, dict) and data.get("type") == "ping":
+                        # reply and ignore
+                        await ws.send_json({"type": "pong"})
                         continue
-
-                    user_message = data.get("message")
-                    if not user_message:
+                    if isinstance(data, dict) and data.get("type") == "pong":
+                        # (optional) ignore if client sends a pong
                         continue
+                    # --- end heartbeat handling ---
 
+                    user_message = data['message']  # safe now
                     await proxy.a_inject_user_message(user_message)
 
                 except WebSocketDisconnect:

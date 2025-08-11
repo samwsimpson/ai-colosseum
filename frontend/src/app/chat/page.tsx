@@ -16,7 +16,6 @@ interface Message {
 interface TypingState {
     [key: string]: boolean;
 }
-type AgentName = 'ChatGPT' | 'Claude' | 'Gemini' | 'Mistral';
 
 interface ServerMessage {
   sender?: string;
@@ -25,7 +24,13 @@ interface ServerMessage {
   type?: 'ping' | 'pong' | string;
 }
 
-type HBWebSocket = WebSocket & { _heartbeatInterval?: number };
+type IntervalHandle = ReturnType<typeof setInterval>;
+type TimeoutHandle = ReturnType<typeof setTimeout>;
+type HBWebSocket = WebSocket & {
+  _heartbeatInterval?: IntervalHandle | null;
+  _lastPongAt?: number;
+  _pingWatchdog?: TimeoutHandle | null; // (only if you added a ping timeout)
+};
 export default function ChatPage() {
     const { userName, userToken } = useUser();
     const router = useRouter();
@@ -131,11 +136,13 @@ export default function ChatPage() {
             setIsWsOpen(true);
 
             // --- HEARTBEAT to keep connection alive ---
-            const heartbeatInterval = setInterval(() => {
-                if (currentWs.readyState === WebSocket.OPEN) {
-            currentWs.send(JSON.stringify({ type: "ping" }));
+            const heartbeatInterval = window.setInterval(() => {
+                if ((currentWs as HBWebSocket)._lastPongAt && Date.now() - (currentWs as HBWebSocket)._lastPongAt! > 60000) {
+                    currentWs.close();
+                    return;
                 }
-            }, 20000); // send ping every 20 seconds
+                currentWs.send(JSON.stringify({ sender: "System", type: "ping" }));
+            }, 20000);
             // store so we can clear on close
             (currentWs as HBWebSocket)._heartbeatInterval = heartbeatInterval;
             // --- END HEARTBEAT ---
@@ -152,6 +159,11 @@ export default function ChatPage() {
                 const parsed: unknown = JSON.parse(event.data);
 
                 const msg = parsed as ServerMessage;
+                
+                if (msg.type === 'pong') {
+                    (currentWs as HBWebSocket)._lastPongAt = Date.now();
+                    return; // swallow
+                }
 
                 // reply to server pings (skip showing them)
                 if (msg.type === 'ping') {
