@@ -115,13 +115,16 @@ export default function ChatPage() {
 
         // Only create a new WebSocket if one does not exist or is already closed
         if (!ws.current || ws.current.readyState === WebSocket.CLOSED) {
-            const backendUrl = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
-            const wsProtocol = backendUrl.startsWith('https://') ? 'wss://' : 'ws://';
-            const wsUrl = `${wsProtocol}${backendUrl.replace(/^https?:\/\//, '')}/ws/colosseum-chat?token=${userToken}`;
-            
+            const rawBase = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
+            // remove scheme + trailing slash cleanly
+            const normalizedBase = rawBase.replace(/^https?:\/\//, '').replace(/\/+$/, '');
+            const wsProtocol = rawBase.startsWith('https://') ? 'wss://' : 'ws://';
+            const wsUrl = `${wsProtocol}${normalizedBase}/ws/colosseum-chat?token=${userToken}`;
+
+            console.log('[WS] dialing:', wsUrl); // <— SEE EXACT URL
             const socket = new WebSocket(wsUrl);
             ws.current = socket;
-            setIsWsOpen(false); // Set to false while connecting
+            setIsWsOpen(false);
         }
         
         // Create a stable local reference to the current WebSocket instance
@@ -191,18 +194,18 @@ export default function ChatPage() {
             }
         };
                 
-        currentWs.onclose = () => {
-        console.log('WebSocket connection closed.');
-        setIsWsOpen(false);
-        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+        currentWs.onclose = (evt: CloseEvent) => {
+            console.log('WebSocket closed.', 'code=', evt.code, 'reason=', evt.reason, 'wasClean=', evt.wasClean);
+            setIsWsOpen(false);
+            setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
 
-        // clear heartbeat if we set one
-        const hb = (currentWs as HBWebSocket)._heartbeatInterval;
-        if (hb) window.clearInterval(hb);
+            // clear heartbeat if we set one
+            const hb = (currentWs as HBWebSocket)._heartbeatInterval;
+            if (typeof hb === 'number') window.clearInterval(hb);
 
-        // mark ref as closed and trigger reconnect
-        ws.current = null;
-        setTimeout(() => setWsReconnectNonce(n => n + 1), 1000); // retry in 1s
+            // mark ref as closed and trigger reconnect
+            ws.current = null;
+            setTimeout(() => setWsReconnectNonce(n => n + 1), 1000); // retry in 1s
         };
         
         currentWs.onerror = (event: Event) => {
