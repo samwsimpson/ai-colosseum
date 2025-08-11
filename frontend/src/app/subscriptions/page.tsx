@@ -85,7 +85,7 @@ const PlanCard: React.FC<PlanCardProps> = ({
   return (
     <div className={`relative flex flex-col p-6 rounded-3xl shadow-xl transition-all duration-300 ease-in-out transform hover:scale-105 ${isEnterprise ? 'bg-blue-600 text-white' : 'bg-gray-800 text-white'}`}>
       {isCurrentPlan && (
-        <span className="absolute top-0 right-0 mt-4 mr-4 bg-green-500 text-white text-xs font-semibold px-3 py-1 rounded-full uppercase">
+        <span className="absolute top-0 right-0 mt-4 mr-4 bg-green-500 text-gray-900 text-xs font-semibold px-3 py-1 rounded-full uppercase">
           Current Plan
         </span>
       )}
@@ -184,7 +184,7 @@ export default function SubscriptionPage() {
             Select the perfect plan for your needs. Upgrade or contact us for custom solutions.
           </p>
         </div>
-
+        
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-2 gap-8 max-w-6xl mx-auto mb-16">
             <PlanCard
                 title="Free"
@@ -195,7 +195,7 @@ export default function SubscriptionPage() {
                     "Limited to 5 conversations/month",
                     "Community support"
                 ]}
-                buttonText="Current Plan"
+                buttonText={currentPlanName === 'Free' ? "Current Plan" : "Get Started"}
                 isCurrentPlan={currentPlanName === 'Free'}
                 conversationsUsed={conversationsUsed}
                 monthlyLimit={monthlyLimit}
@@ -209,7 +209,7 @@ export default function SubscriptionPage() {
                     "Up to 25 conversations/month",
                     "Community support"
                 ]}
-                buttonText="Get Started"
+                buttonText={currentPlanName === 'Starter' ? "Current Plan" : "Get Started"}
                 isCurrentPlan={currentPlanName === 'Starter'}
                 priceId={STRIPE_PRICE_IDS.starter}
                 conversationsUsed={conversationsUsed}
@@ -225,7 +225,7 @@ export default function SubscriptionPage() {
                     "Advanced API integrations",
                     "Team collaboration tools"
                 ]}
-                buttonText="Upgrade"
+                buttonText={currentPlanName === 'Pro' ? "Current Plan" : "Upgrade"}
                 isCurrentPlan={currentPlanName === 'Pro'}
                 priceId={STRIPE_PRICE_IDS.pro}
                 conversationsUsed={conversationsUsed}
@@ -249,12 +249,14 @@ export default function SubscriptionPage() {
                 monthlyLimit={monthlyLimit}
             />
         </div>
+
         <section className="text-center mb-16">
-            <h2 className="text-3xl md:text-4xl font-bold text-blue-400">Why The Colosseum?</h2>
+            <h2 className="text-3xl md:text-4xl font-bold text-blue-400">Why The AI Colosseum?</h2>
             <p className="mt-4 text-lg text-gray-300 max-w-3xl mx-auto">
-                Unlike a single AI model, The Colosseum orchestrates a team of the world&apos;s most advanced AIs, including **ChatGPT, Claude, Gemini, and Mistral**. They collaborate, critique each other&apos;s work, and combine their unique strengths to deliver more comprehensive, accurate, and creative solutions. This isn&apos;t just about getting an answer—it&apos;s about getting the best answer from a diverse, expert team.
+                Unlike a single AI model, The Colosseum orchestrates a team of the world&apos;s most advanced AIs, including <strong>ChatGPT, Claude, Gemini, and Mistral</strong>. They collaborate, critique each other&apos;s work, and combine their unique strengths to deliver more comprehensive, accurate, and creative solutions. This isn&apos;t just about getting an answer—it&apos;s about getting the best answer from a diverse, expert team.
             </p>
         </section>
+
       </div>
     </div>
   );
