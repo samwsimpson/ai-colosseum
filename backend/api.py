@@ -432,15 +432,17 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             f"- AGENTS PRESENT: {', '.join(agent_names)}\n\n"
             "Conversation rules for all agents:\n"
             "1) You are in a shared room with ALL listed agents. Treat their messages as visible context.\n"
-            "2) If the user addresses someone by name at the START of their message (e.g., 'Claude,' or 'ChatGPT:'), "
+            "2) If the user addresses someone by name at the START of their message (e.g., 'Claude,', 'hey Gemini', '@mistral' or 'ChatGPT:'), "
             "that named agent should respond first.\n"
             "3) If the user says 'you all', 'everyone', 'all agents', 'both of you', 'each of you', or similar, "
             "each agent should respond ONCE, concisely.\n"
             "4) If one assistant clearly addresses another assistant, let the addressee reply next.\n"
-            "5) Mentions are NOT the same as addresses. Referencing an agent by name does not require that agent to reply.\n"
-            "6) If the user does not name anyone, the last assistant who spoke should reply.\n"
+            "5) Mentioning an assistant’s name does NOT always mean addressing them (it might be a reference). Prefer direct-address cues (leading name, "@", or “to <name>”).\n"
+            "6) If the user replies without naming anyone, assume they’re talking to the last assistant who spoke.\n"
             "7) When addressing another assistant directly, start with their name (e.g., 'Claude, ...'). "
             "When addressing the user, use natural language (e.g., 'Sam, ...'), not arrows or labels.\n"
+            "8) Do not lecture about roles/identities unless the user asks. No meta: don not write lines like 'Sam → Claude:' or 'Claude → chat_manager:'.\n"
+            "9) Keep replies helpful and concise. If greeted (e.g., 'Hi everyone'), reply with a short greeting and one clarifying question to move forward.\n"
         )
 
         def make_agent_system(name: str) -> str:
@@ -634,42 +636,49 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self._message_output_queue = message_output_queue
 
             async def a_receive(self, message, sender, request_reply: bool = True, silent: bool = False):
-                # Normalize to string content
+                # Normalize incoming
                 if isinstance(message, dict):
                     content = message.get("content", "")
+                    incoming_name = message.get("name") or message.get("sender")
                 elif isinstance(message, str):
                     content = message
+                    incoming_name = None
                 else:
                     return None
 
-                # Prefer the actual assistant sender over the manager
-                sender_name = None
-                if sender is not None and getattr(sender, "name", None):
-                    sender_name = sender.name
-                    if sender_name.lower() in ("chat_manager", "groupchat_manager"):
-                        sender_name = None
-
-                # Fallback to a name inside the message dict (some backends set this)
-                if sender_name is None and isinstance(message, dict):
-                    candidate = message.get("name") or message.get("sender")
-                    if candidate and str(candidate).strip():
-                        sender_name = str(candidate).strip()
-
-                # Final fallback
-                if sender_name is None:
-                    sender_name = "System"
-
-                # Strip any trailing termination hints Autogen sometimes includes
                 cleaned = re.sub(r'(TERMINATE|Task Completed\.)[\s\S]*', '', content).strip()
 
+                # Choose a display name that hides the manager
+                sender_name = None
+                if sender is not None and getattr(sender, "name", None):
+                    if sender.name.lower() not in ("chat_manager", "groupchat_manager"):
+                        sender_name = sender.name
+                if sender_name is None and incoming_name:
+                    sender_name = str(incoming_name).strip()
+                if not sender_name:
+                    sender_name = "System"
+
+                # Push to the frontend
                 if cleaned:
-                    pretty_sender = display_name_map.get(sender_name, sender_name)
-                    await self._message_output_queue.put({"sender": pretty_sender, "text": cleaned})
+                    await self._message_output_queue.put({"sender": sender_name, "text": cleaned})
 
-                return None
+                # IMPORTANT: also persist this message in Autogen's conversation history
+                # so other agents see it as context on their next turn.
+                if isinstance(message, dict):
+                    msg_for_history = {**message, "content": cleaned}
+                else:
+                    msg_for_history = cleaned
 
-            async def a_generate_reply(self, messages=None, sender=None, **kwargs):
-                return await self._user_input_queue.get()
+                return await super().a_receive(
+                    msg_for_history,
+                    sender,
+                    request_reply=False,  # don't trigger a reply; just record it
+                    silent=True           # don't echo anything extra
+                )
+
+            async def a_generate_reply(self, messages: List[Dict[str, Any]] = None, sender: autogen.ConversableAgent = None, **kwargs) -> Union[str, Dict, None]:
+                new_user_message = await self._user_input_queue.get()
+                return new_user_message
 
             async def a_inject_user_message(self, message: str):
                 await self._user_input_queue.put(message)
