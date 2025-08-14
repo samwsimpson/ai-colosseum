@@ -63,11 +63,6 @@ async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
   return res;
 }
 
-const authHeaders = (token: string) => ({
-  'Content-Type': 'application/json',
-  'Authorization': `Bearer ${token}`,
-});
-
 function parseJwtExpMs(token: string | null): number {
   if (!token) return 0;
   try {
@@ -285,12 +280,14 @@ export default function ChatPage() {
     // Rename the selected conversation
     const handleRenameConversation = async (id: string) => {
         if (!userToken) return;
-        const current = conversations.find(c => c.id === id);
+
+        const current = conversations.find((c) => c.id === id);
         const proposed = window.prompt('Rename conversation to:', current?.title ?? '');
         if (!proposed || !proposed.trim()) return;
 
         const res = await apiFetch(`${API_BASE}/api/conversations/${id}`, {
-            method: 'PATCH',            
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ title: proposed.trim() }),
         });
         if (!res.ok) {
@@ -327,12 +324,15 @@ export default function ChatPage() {
     // don’t try to connect without a token
     if (!userToken) {
         if (ws.current) {
-        try { ws.current.close(); } catch {}
+            try { ws.current.close(); } catch {}
         }
         ws.current = null;
         setIsWsOpen(false);
         return;
     }
+    // try to top up access token if it's close to expiring (non-blocking)
+    refreshTokenIfNeeded();
+
 
     // Build the URL safely
     const base = process.env.NEXT_PUBLIC_WS_URL ?? 'http://localhost:8000';
@@ -387,7 +387,7 @@ export default function ChatPage() {
 
         // typing
         if (typeof msg.sender === 'string' && typeof msg.typing === 'boolean') {
-        setIsTyping(prev => ({ ...prev, [msg.sender!]: msg.typing! }));
+        setIsTyping(prev => ({ ...prev, [msg.sender]: msg.typing }));
         return;
         }
 
