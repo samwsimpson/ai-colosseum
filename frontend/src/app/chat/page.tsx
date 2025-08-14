@@ -22,6 +22,7 @@ interface ServerMessage {
   // include conversation id messages
   type?: 'ping' | 'pong' | 'conversation_id' | string;
   id?: string; // used when type === 'conversation_id'
+  summary?: string;       // when type === 'context_summary'
 }
 
 type HBWebSocket = WebSocket & {
@@ -37,6 +38,11 @@ export default function ChatPage() {
     const [message, setMessage] = useState<string>('');
     const [chatHistory, setChatHistory] = useState<Message[]>([]);
     const [isWsOpen, setIsWsOpen] = useState<boolean>(false);
+    // Shows a one-time banner when a past-session summary exists
+    const [loadedSummary, setLoadedSummary] = useState<string | null>(null);
+    // Toggle to reveal/hide the text of the summary
+    const [showSummary, setShowSummary] = useState(false);
+
     const [wsReconnectNonce, setWsReconnectNonce] = useState(0);
     const [conversationId, setConversationId] = useState<string | null>(null);
 
@@ -181,6 +187,8 @@ export default function ChatPage() {
         currentWs.onopen = () => {
             console.log('WebSocket connection opened.');
             setIsWsOpen(true);
+            setLoadedSummary(null);
+            setShowSummary(false);
 
             // --- HEARTBEAT to keep connection alive ---
             const heartbeatInterval = window.setInterval(() => {
@@ -203,49 +211,54 @@ export default function ChatPage() {
 
         };
 
-        currentWs.onmessage = (event: MessageEvent<string>) => {
+        currentWs.onmessage = (event: MessageEvent) => {
+            let msg: ServerMessage;
             try {
-                const parsed: unknown = JSON.parse(event.data);
-                const msg = parsed as ServerMessage;
+                msg = JSON.parse(event.data);
+            } catch (e) {
+                console.warn('[WS] non-JSON message:', event.data);
+                return;
+            }
 
-                // NEW: accept the conversation id the server assigns
-                if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
+            // --- Handle system/meta messages FIRST ---
+
+            // Conversation id announced by the server
+            if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
                 setConversationId(msg.id);
                 return;
-                }
+            }
 
-                if (msg.type === 'pong') {
-                (currentWs as HBWebSocket)._lastPongAt = Date.now();
-                return; // swallow
-                }
-
-                // reply to server pings (skip showing them)
-                if (msg.type === 'ping') {
-                if (currentWs.readyState === WebSocket.OPEN) {
-                    currentWs.send(JSON.stringify({ type: 'pong' }));
-                }
+            // NEW: running summary sent once on connect (for your banner)
+            if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
+                setLoadedSummary(msg.summary);   // <- make sure you have `const [loadedSummary, setLoadedSummary] = useState<string | null>(null);`
                 return;
-                }
+            }
 
-                if (typeof msg.sender === 'string' && typeof msg.typing === 'boolean') {
+            // Ignore pings/pongs in the UI
+            if (msg.type === 'ping' || msg.type === 'pong') {
+                return;
+            }
+
+            // --- Then handle typing updates ---
+            if (typeof msg.sender === 'string' && typeof msg.typing === 'boolean') {
                 const senderKey: string = msg.sender;
                 const isTypingVal: boolean = msg.typing;
-
-                setIsTyping((prev: TypingState): TypingState => {
-                    const next: TypingState = { ...prev };
-                    next[senderKey] = isTypingVal;
-                    return next;
+                setIsTyping((prev) => {
+                const next = { ...prev };
+                next[senderKey] = isTypingVal;
+                return next;
                 });
                 return;
-                }
-
-                if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
-                addMessageToChat({ sender: msg.sender, text: msg.text });
-                }
-            } catch (err: unknown) {
-                console.error('Failed to parse message:', err);
-                addMessageToChat({ sender: 'System', text: `Error: ${event.data}` });
             }
+
+            // --- Finally, normal chat messages ---
+            if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
+                addMessageToChat({ sender: msg.sender, text: msg.text });
+                return;
+            }
+
+            // Fallback: unrecognized message
+            console.debug('[WS] unhandled message:', msg);
         };
 
                 
@@ -289,18 +302,19 @@ export default function ChatPage() {
     const handleResetConversation = () => {
         try { localStorage.removeItem('conversationId'); } catch {}
         setConversationId(null);
+        setLoadedSummary(null);          // <- add this line
+        setShowSummary(false);           // <- and this line
         setChatHistory([]);
         setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
 
-        // Close current socket to force a clean handshake + new conversation on reopen
         if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
             ws.current.close(1000, 'user-reset');
         }
         ws.current = null;
 
-        // nudge the reconnect effect
         setTimeout(() => setWsReconnectNonce(n => n + 1), 50);
     };
+
 
 
     return (
@@ -397,6 +411,27 @@ export default function ChatPage() {
                 onSubmit={handleSubmit}
                 className="fixed bottom-0 left-0 right-0 z-10 bg-gray-900 border-t border-gray-800 p-4 md:p-6 shadow-lg"
             >
+            {loadedSummary && (
+                <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                    <div className="flex items-start justify-between gap-3">
+                    <div>
+                        <strong>Context loaded</strong> — this chat includes knowledge from earlier sessions.
+                    </div>
+                    <button
+                        className="shrink-0 underline"
+                        onClick={() => setShowSummary(s => !s)}
+                    >
+                        {showSummary ? "Hide" : "Show"} summary
+                    </button>
+                    </div>
+                    {showSummary && (
+                    <div className="mt-2 whitespace-pre-wrap">
+                        {loadedSummary}
+                    </div>
+                    )}
+                </div>
+            )}
+
                 <div className="flex gap-4 max-w-4xl mx-auto">
                     <input
                         type="text"

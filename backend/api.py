@@ -12,12 +12,18 @@ import asyncio
 import re
 from typing import List, Dict, Any, Union
 from jose import JWTError, jwt
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from google.auth.transport import requests as google_requests
 from google.oauth2.id_token import verify_oauth2_token
+from google.cloud.firestore_v1 import Increment
+from google.cloud import firestore  # for Query.DESCENDING
 import stripe
-from google.cloud import firestore
 from google_auth_oauthlib.flow import Flow
+from openai import AsyncOpenAI
+
+OPENAI_SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 2.0 - FIRESTORE) <<")
 load_dotenv()
@@ -36,22 +42,35 @@ def _env(name: str, default: str) -> str:
 
 CHATGPT_SYSTEM = _env(
     "CHATGPT_SYSTEM",
-    "You are ChatGPT. Be concise, accurate, and helpful. When unsure, ask for clarification."
+    "You are ChatGPT. Be concise, accurate, and helpful. When unsure, ask for clarification.\n\n"
+    "Memory: This conversation is persistent across sessions. When the user references earlier sessions, "
+    "rely on the 'Conversation summary' system message that may be provided at the start. "
+    "If critical details seem missing, ask the user if you'd like to retrieve details from earlier turns."
+
 )
 
 CLAUDE_SYSTEM = _env(
     "CLAUDE_SYSTEM",
-    "You are Claude. Provide careful reasoning and clear explanations. Avoid hallucinations."
+    "You are Claude. Provide careful reasoning and clear explanations. Avoid hallucinations.\n\n"
+    "Memory: This conversation is persistent across sessions. When the user references earlier sessions, "
+    "rely on the 'Conversation summary' system message that may be provided at the start. "
+    "If critical details seem missing, ask the user if you'd like to retrieve details from earlier turns."    
 )
 
 GEMINI_SYSTEM = _env(
     "GEMINI_SYSTEM",
-    "You are Gemini. Answer succinctly, cite assumptions, and highlight uncertainties."
+    "You are Gemini. Answer succinctly, cite assumptions, and highlight uncertainties.\n\n"
+    "Memory: This conversation is persistent across sessions. When the user references earlier sessions, "
+    "rely on the 'Conversation summary' system message that may be provided at the start. "
+    "If critical details seem missing, ask the user if you'd like to retrieve details from earlier turns."    
 )
 
 MISTRAL_SYSTEM = _env(
     "MISTRAL_SYSTEM",
-    "You are Mistral. Give practical, straightforward answers with minimal fluff."
+    "You are Mistral. Give practical, straightforward answers with minimal fluff.\n\n"
+    "Memory: This conversation is persistent across sessions. When the user references earlier sessions, "
+    "rely on the 'Conversation summary' system message that may be provided at the start. "
+    "If critical details seem missing, ask the user if you'd like to retrieve details from earlier turns."    
 )
 
 GROUPCHAT_SYSTEM_MESSAGE = _env(
@@ -129,7 +148,7 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
 
 def create_access_token(data: dict, expires_delta: Union[timedelta, None] = None):
     to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=15))
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
@@ -141,7 +160,7 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
     it reuses it; otherwise creates a new conversation doc.
     """
     conv_id = (initial_config or {}).get("conversation_id")
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     conversations = db.collection("conversations")
     if conv_id:
@@ -159,8 +178,12 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
             "updated_at": now,
             "subscription_id": (initial_config or {}).get("subscription_id"),
             "title": (initial_config or {}).get("title") or "New conversation",
-            "summary": "",  # optional running summary
+            "summary": "",                 # running summary (optional)
+            "message_count": 0,            # <- new
+            "last_summary_count": 0,       # <- new
+            "last_summary_at": None,       # <- optional
         })
+
 
     doc = await conv_ref.get()
     return conv_ref, (doc.to_dict() or {})
@@ -171,13 +194,18 @@ async def save_message(conv_ref, role: str, sender: str, content: str):
     """
     if not content:
         return
+    now = datetime.now(timezone.utc)
     await conv_ref.collection("messages").add({
         "role": role,
         "sender": sender,
         "content": content,
-        "timestamp": datetime.utcnow()
+        "timestamp": now
     })
-    await conv_ref.update({"updated_at": datetime.utcnow()})
+    # atomic increment; also advances updated_at
+    await conv_ref.update({
+        "updated_at": now,
+        "message_count": Increment(1),
+    })
 
 # --- End Conversation persistence helpers ---
 
@@ -244,7 +272,7 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
         }
 
     # in /api/users/me/usage and in the WS handler where you count conversations
-    first_day_of_month = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    first_day_of_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
     monthly_usage_query = db.collection('conversations').where(
         'user_id', '==', current_user['id']
@@ -349,6 +377,120 @@ async def create_checkout_session(request: SubscriptionRequest, current_user: di
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+async def cheap_summarize(prompt: str) -> str:
+    if openai_client is None:
+        return ""   # silently skip if not configured
+    try:
+        resp = await openai_client.chat.completions.create(
+            model=OPENAI_SUMMARY_MODEL,
+            messages=[
+                {"role": "system", "content": "You produce terse, accurate summaries."},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            max_tokens=400,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        print(f"[cheap_summarize] error: {e}")
+        return ""
+
+# --- Conversation title helper ---
+TITLE_DEFAULT = "New conversation"
+
+async def maybe_set_title(conv_ref, user_text: str):
+    """
+    If the conversation does not have a real title yet, derive one from the user's text.
+    Fast path uses the user's first short utterance; fallback asks cheap_summarize.
+    """
+    if not user_text:
+        return
+    try:
+        snap = await conv_ref.get()
+        doc = snap.to_dict() or {}
+        current = (doc.get("title") or "").strip()
+        if current and current != TITLE_DEFAULT:
+            return  # already titled
+
+        trimmed = user_text.strip().replace("\n", " ")
+        # quick heuristic: short inputs become the title directly (no trailing punctuation)
+        if 0 < len(trimmed) <= 60:
+            title = trimmed.rstrip(".?!")
+        else:
+            # cheap model to generate a concise 6–8 word title
+            prompt = (
+                "Make a short chat title (max 8 words) for this user's request. "
+                "Only output the title, no quotes or extra text.\n\n"
+                f"Request: {user_text}"
+            )
+            title = await cheap_summarize(prompt)
+
+        title = (title or "").strip()[:80] or TITLE_DEFAULT
+        await conv_ref.update({"title": title})
+    except Exception as e:
+        print(f"maybe_set_title error: {e}")
+
+
+async def maybe_refresh_summary(conv_ref, threshold: int = 10, window: int = 40):
+    """
+    Refresh the running summary only if at least `threshold` new messages
+    have arrived since the last summary. Summarize only the latest `window` messages.
+    """
+    try:
+        conv_snap = await conv_ref.get()
+        conv = conv_snap.to_dict() or {}
+        mc = int(conv.get("message_count", 0))
+        lsc = int(conv.get("last_summary_count", 0))
+
+        if (mc - lsc) < threshold:
+            return  # nothing to do
+
+        # pull last `window` messages, newest first
+        msgs = []
+        q = (conv_ref.collection("messages")
+             .order_by("timestamp", direction=firestore.Query.DESCENDING)
+             .limit(window))
+        async for doc in q.stream():
+            d = doc.to_dict() or {}
+            msgs.append(d)
+        msgs.reverse()  # chronological (oldest -> newest)
+
+        # build a compact text for summarization
+        lines = []
+        for m in msgs:
+            role = m.get("role") or "assistant"
+            sender = m.get("sender") or "assistant"
+            content = (m.get("content") or "").strip()
+            if not content:
+                continue
+            lines.append(f"{sender} ({role}): {content}")
+        transcript = "\n".join(lines)
+
+        if not transcript:
+            return
+
+        # --- call your cheapest summarizer (you can swap models here) ---
+        prompt = (
+            "Summarize this chat so far in 8-12 concise bullet points, "
+            "capture decisions, to-dos, names, and key facts. Keep neutral tone.\n\n"
+            f"{transcript}"
+        )
+
+        # Example using your OpenAI client safely (adjust to your client var)
+        summary_text = await cheap_summarize(prompt)
+
+        now = datetime.now(timezone.utc)
+        await conv_ref.update({
+            "summary": summary_text,
+            "last_summary_count": mc,
+            "last_summary_at": now,
+            "updated_at": now,
+        })
+    except Exception as e:
+        print(f"[maybe_refresh_summary] skipped due to error: {e}")
+
+
+
 @app.post("/api/stripe-webhook")
 async def stripe_webhook(request: Request):
     payload = await request.body()
@@ -416,7 +558,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         user_subscription_data = user_subscription_doc.to_dict()
 
         if user_subscription_data['monthly_limit'] is not None:
-            first_day_of_month = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)          
+            first_day_of_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)          
             conversation_count_query = (
                 db.collection('conversations')
                 .where('user_id', '==', user['id'])
@@ -450,6 +592,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "type": "conversation_id",
             "id": conv_ref.id,
         })
+        # If we already have a running summary, tell the client (for the banner)
+        if (conv_doc or {}).get("summary"):
+            await websocket.send_json({
+                "sender": "System",
+                "type": "context_summary",
+                "summary": conv_doc["summary"],
+            })
+        # Optional: seed title from the very first greeting if it's meaningful
+        try:
+            seed_msg = (initial_config or {}).get("message", "").strip()
+            if seed_msg and seed_msg.lower() not in ("hi", "hello", "hey"):
+                await maybe_set_title(conv_ref, seed_msg)
+        except Exception:
+            pass
 
         message_output_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
 
@@ -469,15 +625,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         raw_user_name = (initial_config.get('user_name') or 'User').strip()
         safe_user_name = re.sub(r'[^A-Za-z0-9_-]', '_', raw_user_name) or 'User'  # <-- no spaces/specials for the LLM API
         user_display_name = raw_user_name.replace('_', ' ').strip()               # <-- pretty name for your UI
-
-        # Map internal -> pretty sender names for the frontend
-        display_name_map = {
-            "ChatGPT": "ChatGPT",
-            "Claude": "Claude",
-            "Gemini": "Gemini",
-            "Mistral": "Mistral",
-            safe_user_name: user_display_name,
-        }
 
         # Keep this list in one place
         agent_names = ["ChatGPT", "Claude", "Gemini", "Mistral"]
@@ -716,7 +863,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 # Push to the frontend
                 if cleaned:
-                    await self._message_output_queue.put({"sender": sender_name, "text": cleaned})
+                    # Use the same non-blocking queue helper used by the assistants
+                    queue_send_nowait({"sender": sender_name, "text": cleaned})
 
                 # IMPORTANT: also persist this message in Autogen's conversation history
                 # so other agents see it as context on their next turn.
@@ -763,21 +911,41 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         selector = CustomSpeakerSelector(agents, user_name=safe_user_name)
 
+        # --- Seed messages: summary (if any) + memory primer and group rules ---
         seed_messages = []
+
+        # If you already saved a running summary on the conversation, drop it in
         if conv_doc.get("summary"):
             seed_messages.append({
                 "role": "system",
                 "content": f"Conversation summary so far:\n{conv_doc['summary']}"
             })
-        seed_messages.append({"role": "system", "name": "System", "content": roster_text})
+
+        # Memory primer + participants and addressing rules
+        participants = ", ".join(agent_names)  # just the AIs
+        seed_messages.append({
+            "role": "system",
+            "content": (
+                f"Participants: {participants}. User: {user_display_name}. Conversation ID: {conv_ref.id}.\n"
+                "Memory: This conversation is persistent across sessions. Use the 'Conversation summary' (above) "
+                "as ground truth for prior context. If a detail seems missing, briefly ask the user before assuming.\n\n"
+                "Addressing rules for group chat:\n"
+                "1) If the user starts with a name (e.g., 'Claude,'), that named agent should answer first.\n"
+                "2) If no name is given and the user is replying to the last speaker, that last speaker should respond.\n"
+                "3) Mentioning an agent by name in third-person does not imply that agent is being addressed.\n"
+                "4) If the user says 'you all' or 'everyone', each agent may respond once (no duplicates), then yield.\n"
+                "Keep responses concise; avoid name→name echoing."
+            )
+        })
 
         groupchat = autogen.GroupChat(
             agents=agents,
             messages=seed_messages,
             max_round=999999,
             speaker_selection_method=selector,
-            allow_repeat_speaker=True
-)
+            allow_repeat_speaker=True,
+        )
+
         manager = autogen.GroupChatManager(
             groupchat=groupchat,
             llm_config=False,
@@ -814,46 +982,47 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 try:
                     await save_message(conv_ref, role=role, sender=sender, content=text)
+                    await maybe_refresh_summary(conv_ref)
+                    
                 except Exception as e:
                     # don't crash the socket if Firestore hiccups
                     print(f"save_message failed: {e}")
        
-        async def user_input_handler_task(ws: WebSocket, proxy: WebSocketUserProxyAgent, conv_ref, user_internal_name: str):
+        async def user_input_handler_task(ws: WebSocket, proxy: WebSocketUserProxyAgent, conv_ref):
             while True:
                 try:
                     data = await ws.receive_json()
-                    if not isinstance(data, dict):
-                        continue
 
-                    t = data.get("type")
-                    if t == "ping":
-                        await ws.send_json({"type": "pong"})
+                    # --- heartbeat handling ---
+                    if isinstance(data, dict) and data.get("type") in ("ping", "pong"):
+                        if data.get("type") == "ping":
+                            # reply and ignore
+                            await ws.send_json({"type": "pong"})
                         continue
-                    if t == "pong":
-                        continue
+                    # --- end heartbeat handling ---
 
-                    if "message" in data and isinstance(data["message"], str):
-                        user_msg = data["message"]
-                        # persist the user turn
-                        try:
-                            await save_message(conv_ref, role="user", sender=user_internal_name, content=user_msg)
-                        except Exception as e:
-                            print(f"save_message (user) failed: {e}")
-                        # inject into Autogen flow
-                        await proxy.a_inject_user_message(user_msg)
-                        continue
+                    user_message = data["message"]
 
-                    # ignore unexpected payloads
+                    # persist the user message
+                    await save_message(conv_ref, role="user", sender=proxy.name, content=user_message)
+
+                    # set a title if we don't have one yet
+                    await maybe_set_title(conv_ref, user_message)
+
+                    # feed into the group chat
+                    await proxy.a_inject_user_message(user_message)
+
                 except WebSocketDisconnect:
                     break
                 except Exception as e:
-                    print(f"user_input_handler_task error: {e}")
+                    print(f"Error handling user input: {e}")
                     try:
                         await ws.send_json({"sender": "System", "text": f"Error: {e}"})
                     except WebSocketDisconnect:
                         break
+
        
-        assistant_name_set = {"ChatGPT", "Claude", "Gemini", "Mistral"}
+        assistant_name_set = set(agent_names)
 
         consumer_task = asyncio.create_task(
             message_consumer_task(message_output_queue, websocket, conv_ref, assistant_name_set, safe_user_name)
@@ -862,8 +1031,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             user_proxy.a_initiate_chat(manager, message=initial_config.get('message', 'Hello!'))
         )
         input_handler_task = asyncio.create_task(
-            user_input_handler_task(websocket, user_proxy, conv_ref, safe_user_name)
+            user_input_handler_task(websocket, user_proxy, conv_ref)
         )
+
 
 
         async def keepalive_task(ws: WebSocket):
