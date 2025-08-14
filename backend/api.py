@@ -78,9 +78,12 @@ GROUPCHAT_SYSTEM_MESSAGE = _env(
     "GROUPCHAT_SYSTEM_MESSAGE",
     (
         "You are the group chat coordinator. Keep discussion focused, prevent loops, and ensure each agent only speaks "
-        "when it adds value. If agents repeat themselves or stall, hand control back to the user."
+        "when it adds value. If agents repeat themselves or stall, hand control back to the user. "
+        "Do not allow repetitive salutations: agents should greet at most once at the start of a new conversation; "
+        "on follow-up turns they should answer directly without re-greeting."
     )
 )
+
 # ==== end system prompts ====
 
 # ===== Retry & fallback helpers for LLM calls =====
@@ -827,13 +830,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "type": "conversation_id",
             "id": conv_ref.id,
         })
-        # If we already have a running summary, tell the client (for the banner)
-        if (conv_doc or {}).get("summary"):
-            await websocket.send_json({
-                "sender": "System",
-                "type": "context_summary",
-                "summary": conv_doc["summary"],
-            })
+        # (No summary banner here — the UI can show titles via /api/conversations)
+
         # Optional: seed title from the very first greeting if it's meaningful
         try:
             seed_msg = (initial_config or {}).get("message", "").strip()
@@ -893,8 +891,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             return (
                 f"{base}\n\n"
                 f"Your name is {name}. Participants: {user_display_name} (user), {', '.join(agent_names)} (AIs).\n"
-                f"{roster_text}"
+                f"{roster_text}\n"
+                "Etiquette: Do not repeat greetings on every turn. Greet at most once when the conversation is new; "
+                "for follow-up questions answer directly without re-greeting."
             )
+
 
         # ---- model configs ----
         chatgpt_llm_config = {
