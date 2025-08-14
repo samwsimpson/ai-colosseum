@@ -108,7 +108,7 @@ export default function ChatPage() {
 
     // A simple ref to distinguish the first render
     const isInitialRender = useRef(true);
-    const chatContainerRef = useRef<HTMLDivElement>(null);
+    const chatScrollRef = useRef<HTMLDivElement | null>(null);
     const chatEndRef = useRef<HTMLDivElement>(null);
     const ws = useRef<WebSocket | null>(null);
     const pendingSends = useRef<Array<Record<string, unknown>>>([]);
@@ -570,7 +570,8 @@ export default function ChatPage() {
     return (
     <div className="flex h-screen w-full bg-gray-950 text-white font-sans antialiased">
         {/* LEFT SIDEBAR */}
-        <aside className="hidden md:flex flex-col w-72 border-r border-gray-800 bg-gray-900">
+        <aside className="hidden md:flex flex-col w-72 border-r border-gray-800 bg-gray-900 pt-[72px]">
+
         <div className="p-4 border-b border-gray-800 flex items-center justify-between">
             <div className="font-semibold">Conversations</div>
             <button
