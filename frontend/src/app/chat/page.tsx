@@ -185,31 +185,22 @@ export default function ChatPage() {
         const currentWs = ws.current; 
 
         currentWs.onopen = () => {
-            console.log('WebSocket connection opened.');
             setIsWsOpen(true);
-            setLoadedSummary(null);
-            setShowSummary(false);
 
-            // --- HEARTBEAT to keep connection alive ---
-            const heartbeatInterval = window.setInterval(() => {
-                if ((currentWs as HBWebSocket)._lastPongAt && Date.now() - (currentWs as HBWebSocket)._lastPongAt! > 60000) {
-                    currentWs.close();
-                    return;
-                }
-                currentWs.send(JSON.stringify({ sender: "System", type: "ping" }));
-            }, 20000);
-            // store so we can clear on close
-            (currentWs as HBWebSocket)._heartbeatInterval = heartbeatInterval;
-            // --- END HEARTBEAT ---
-
-            const initialPayload = {
+            const initialPayload: Record<string, unknown> = {
                 message: "Hello!",
                 user_name: userName,
-                conversation_id: conversationId || undefined, // reuse or create on server
             };
-            currentWs.send(JSON.stringify(initialPayload));
 
+            if (conversationId) {
+                initialPayload.conversation_id = conversationId; // reuse exact convo
+            } else {
+                initialPayload.resume_last = true;               // tell server to resume latest
+            }
+
+            currentWs.send(JSON.stringify(initialPayload));
         };
+
 
         currentWs.onmessage = (event: MessageEvent) => {
             let msg: ServerMessage;

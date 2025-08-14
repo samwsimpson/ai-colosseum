@@ -154,39 +154,62 @@ def create_access_token(data: dict, expires_delta: Union[timedelta, None] = None
 
 # --- Conversation persistence helpers ---
 
+# --- Conversation persistence helpers ---
+
 async def get_or_create_conversation(user_id: str, initial_config: dict):
     """
-    Returns (conv_ref, conv_doc_dict). If initial_config['conversation_id'] is present,
-    it reuses it; otherwise creates a new conversation doc.
+    Returns (conv_ref, conv_doc_dict).
+    If initial_config['conversation_id'] is present -> reuse it.
+    Else if initial_config['resume_last'] is truthy -> resume user's most recent conversation.
+    Else create a new conversation.
     """
-    conv_id = (initial_config or {}).get("conversation_id")
-    now = datetime.now(timezone.utc)
+    cfg = initial_config or {}
+    conv_id = cfg.get("conversation_id")
+    resume_last = bool(cfg.get("resume_last"))
+    now = datetime.utcnow()
 
     conversations = db.collection("conversations")
+
     if conv_id:
         conv_ref = conversations.document(conv_id)
-        # Ensure doc exists and bump updated_at
-        await conv_ref.set({
-            "user_id": user_id,
-            "updated_at": now
-        }, merge=True)
-    else:
-        conv_ref = conversations.document()
-        await conv_ref.set({
+        # ensure doc exists / touch updated_at
+        await conv_ref.set({"user_id": user_id, "updated_at": now}, merge=True)
+        doc = await conv_ref.get()
+        return conv_ref, (doc.to_dict() or {})
+
+    if resume_last:
+        # try to pick the latest conversation for this user
+        try:
+            q = (
+                conversations.where("user_id", "==", user_id)
+                .order_by("updated_at", direction=firestore.Query.DESCENDING)
+                .limit(1)
+            )
+            # async stream to list
+            last = [doc async for doc in q.stream()]
+            if last:
+                conv_ref = conversations.document(last[0].id)
+                await conv_ref.update({"updated_at": now})
+                doc = await conv_ref.get()
+                return conv_ref, (doc.to_dict() or {})
+        except Exception as e:
+            print("Resume-last query failed; creating new conversation. Error:", e)
+
+    # create a new conversation
+    conv_ref = conversations.document()
+    await conv_ref.set(
+        {
             "user_id": user_id,
             "created_at": now,
             "updated_at": now,
-            "subscription_id": (initial_config or {}).get("subscription_id"),
-            "title": (initial_config or {}).get("title") or "New conversation",
-            "summary": "",                 # running summary (optional)
-            "message_count": 0,            # <- new
-            "last_summary_count": 0,       # <- new
-            "last_summary_at": None,       # <- optional
-        })
-
-
+            "subscription_id": cfg.get("subscription_id"),
+            "title": cfg.get("title") or "New conversation",
+            "summary": "",  # running summary (optional)
+        }
+    )
     doc = await conv_ref.get()
     return conv_ref, (doc.to_dict() or {})
+
 
 async def save_message(conv_ref, role: str, sender: str, content: str):
     """
