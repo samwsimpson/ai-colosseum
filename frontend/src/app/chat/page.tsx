@@ -25,11 +25,81 @@ interface ServerMessage {
   summary?: string;       // when type === 'context_summary'
 }
 
-type HBWebSocket = WebSocket & {
-  _heartbeatInterval?: number | null;
-  _lastPongAt?: number;
-  _pingWatchdog?: number | null;
-};
+// Past-convo list item returned by the API
+interface ConversationListItem {
+  id: string;
+  title: string;
+  updated_at?: string;
+}
+
+// Base REST API (same host as WS but https/http, not ws)
+const API_BASE =
+  (process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '')) ||
+  'https://api.aicolosseum.app';
+
+// Helper: fetch with Authorization header and 1x retry on 401 using /api/refresh
+async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
+  const headers = new Headers(init.headers || {});
+  const access = localStorage.getItem('access_token');
+  if (access) headers.set('Authorization', `Bearer ${access}`);
+
+  // always send cookies so /api/refresh can read the refresh cookie
+  let res = await fetch(input, { ...init, headers, credentials: 'include' });
+  if (res.status !== 401) return res;
+
+  // try to refresh access token
+  const rr = await fetch(`${API_BASE}/api/refresh`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!rr.ok) return res;
+
+  const { token } = await rr.json();
+  if (token) {
+    localStorage.setItem('access_token', token);
+    headers.set('Authorization', `Bearer ${token}`);
+    res = await fetch(input, { ...init, headers, credentials: 'include' });
+  }
+  return res;
+}
+
+const authHeaders = (token: string) => ({
+  'Content-Type': 'application/json',
+  'Authorization': `Bearer ${token}`,
+});
+
+function parseJwtExpMs(token: string | null): number {
+  if (!token) return 0;
+  try {
+    const [, payload] = token.split('.');
+    const data = JSON.parse(atob(payload));
+    return (data.exp ?? 0) * 1000;
+  } catch {
+    return 0;
+  }
+}
+
+async function refreshTokenIfNeeded(): Promise<void> {
+  const token = localStorage.getItem('access_token');
+  const expMs = parseJwtExpMs(token);
+  const now = Date.now();
+  // refresh if expiring within 2 minutes
+  if (!expMs || expMs - now > 2 * 60 * 1000) return;
+
+  const res = await fetch(`${API_BASE}/api/refresh`, {
+    method: 'POST',
+    credentials: 'include',
+  });
+  if (!res.ok) return;
+
+  const data = await res.json();
+  if (data?.token) {
+    localStorage.setItem('access_token', data.token);
+  }
+}
+
+
+
 export default function ChatPage() {
     const { userName, userToken } = useUser();
     const router = useRouter();
@@ -40,11 +110,16 @@ export default function ChatPage() {
     const [isWsOpen, setIsWsOpen] = useState<boolean>(false);
     // Shows a one-time banner when a past-session summary exists
     const [loadedSummary, setLoadedSummary] = useState<string | null>(null);
+
     // Toggle to reveal/hide the text of the summary
     const [showSummary, setShowSummary] = useState(false);
 
     const [wsReconnectNonce, setWsReconnectNonce] = useState(0);
     const [conversationId, setConversationId] = useState<string | null>(null);
+
+    // Sidebar + conversation list
+    const [conversations, setConversations] = useState<ConversationListItem[]>([]);
+    const [isLoadingConvs, setIsLoadingConvs] = useState(false);
 
     // New state to track which agents are typing
     const [isTyping, setIsTyping] = useState<TypingState>({
@@ -53,6 +128,7 @@ export default function ChatPage() {
         Gemini: false,
         Mistral: false,
     });
+
     // A simple ref to distinguish the first render
     const isInitialRender = useRef(true);
     const chatContainerRef = useRef<HTMLDivElement>(null);
@@ -73,19 +149,42 @@ export default function ChatPage() {
     
     // load saved conversation id on mount
     useEffect(() => {
-    try {
-        const saved = localStorage.getItem('conversationId');
-        if (saved) setConversationId(saved);
-    } catch {}
-    }, []);
+        try {
+            const saved = localStorage.getItem('conversationId');
+            if (saved) setConversationId(saved);
+        } catch {}
+        }, []);
 
-    // save id whenever it changes
-    useEffect(() => {
-    try {
-        if (conversationId) localStorage.setItem('conversationId', conversationId);
-    } catch {}
+        // save id whenever it changes
+        useEffect(() => {
+        try {
+            if (conversationId) localStorage.setItem('conversationId', conversationId);
+        } catch {}
     }, [conversationId]);
 
+    // Fetch the list of conversations
+    const loadConversations = useCallback(async () => {
+    if (!userToken) return;
+        try {
+            setIsLoadingConvs(true);
+            const res = await apiFetch(`${API_BASE}/api/conversations?limit=100`, {            
+            cache: 'no-store',
+            });
+            if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
+            const data = await res.json();
+            // Support either {items:[...]} or [...] responses
+            setConversations(Array.isArray(data) ? data : (data.items ?? []));
+        } catch (e) {
+            console.warn('loadConversations error:', e);
+        } finally {
+            setIsLoadingConvs(false);
+        }
+    }, [userToken]);
+
+    // keep the sidebar list fresh
+    useEffect(() => {
+        if (userToken) loadConversations();
+    }, [userToken, conversationId, loadConversations]);
 
     // Handle redirection to sign-in page when userToken is not present
     useEffect(() => {
@@ -144,147 +243,199 @@ export default function ChatPage() {
         setMessage('');
     };
 
-    // WebSocket connection logic
-    useEffect(() => {
-        // Guard clause to prevent connection without a token
-        if (!userToken) {
-            if (ws.current) {
-                ws.current.close();
-            }
-            ws.current = null;
-            setIsWsOpen(false);
+
+
+
+
+
+
+
+    // Open an existing conversation from the sidebar
+    const handleOpenConversation = async (id: string) => {
+        try { localStorage.setItem('conversationId', id); } catch {}
+        setConversationId(id);
+        setLoadedSummary(null);
+        setShowSummary(false);
+        setChatHistory([]);
+        setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+
+        // Reconnect WS so the server seeds the prior context
+        if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
+            ws.current.close(1000, 'switch-conversation');
+        }
+        ws.current = null;
+        setTimeout(() => setWsReconnectNonce(n => n + 1), 50);
+    };
+
+    // Create a brand-new conversation
+    const handleNewConversation = () => {
+        try { localStorage.removeItem('conversationId'); } catch {}
+        setConversationId(null);
+        setLoadedSummary(null);
+        setShowSummary(false);
+        setChatHistory([]);
+        setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+        if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
+            ws.current.close(1000, 'new-conversation');
+        }
+        ws.current = null;
+        setTimeout(() => setWsReconnectNonce(n => n + 1), 50);
+    };
+
+    // Rename the selected conversation
+    const handleRenameConversation = async (id: string) => {
+        if (!userToken) return;
+        const current = conversations.find(c => c.id === id);
+        const proposed = window.prompt('Rename conversation to:', current?.title ?? '');
+        if (!proposed || !proposed.trim()) return;
+
+        const res = await apiFetch(`${API_BASE}/api/conversations/${id}`, {
+            method: 'PATCH',            
+            body: JSON.stringify({ title: proposed.trim() }),
+        });
+        if (!res.ok) {
+            alert('Rename failed.');
+            return;
+        }
+        await loadConversations();
+    };
+
+    // Delete a conversation
+    const handleDeleteConversation = async (id: string) => {
+        if (!userToken) return;
+        if (!window.confirm('Delete this conversation? This cannot be undone.')) return;
+
+        const res = await apiFetch(`${API_BASE}/api/conversations/${id}`, {
+            method: 'DELETE',            
+        });
+        if (!res.ok) {
+            alert('Delete failed.');
             return;
         }
 
-        // Only create a new WebSocket if one does not exist or is already closed
-        if (!ws.current || ws.current.readyState === WebSocket.CLOSED) {
-            // Build the URL safely with the URL API
-            const base = process.env.NEXT_PUBLIC_WS_URL ?? 'http://localhost:8000';
-            let u: URL;
-            try {
-                u = new URL(base); // e.g. https://api.aicolosseum.app
-            } catch {
-                // Fallback in case the env var is malformed
-                u = new URL('http://localhost:8000');
-            }
-
-            // Switch scheme to ws/wss, set path and token
-            u.protocol = (u.protocol === 'https:') ? 'wss:' : 'ws:';
-            u.pathname = '/ws/colosseum-chat';
-            u.search = `?token=${encodeURIComponent(userToken)}`;
-
-            const wsUrl = u.toString();
-            console.log('[WS] dialing:', wsUrl);
-
-            const socket = new WebSocket(wsUrl);
-            ws.current = socket;
-            setIsWsOpen(false);
+        // If we deleted the one we’re viewing, start fresh
+        if (conversationId === id) {
+            handleNewConversation();
+        } else {
+            await loadConversations();
         }
+    };
+
+
+    // WebSocket connection logic
+    useEffect(() => {
+    // don’t try to connect without a token
+    if (!userToken) {
+        if (ws.current) {
+        try { ws.current.close(); } catch {}
+        }
+        ws.current = null;
+        setIsWsOpen(false);
+        return;
+    }
+
+    // Build the URL safely
+    const base = process.env.NEXT_PUBLIC_WS_URL ?? 'http://localhost:8000';
+    let u: URL;
+    try {
+        u = new URL(base); // e.g. https://api.aicolosseum.app
+    } catch {
+        u = new URL('http://localhost:8000');
+    }
+    u.protocol = (u.protocol === 'https:') ? 'wss:' : 'ws:';
+    u.pathname = '/ws/colosseum-chat';
+    u.search = `?token=${encodeURIComponent(localStorage.getItem('access_token') || userToken)}`;
+
+    const socket = new WebSocket(u.toString());
+    ws.current = socket;
+    setIsWsOpen(false);
+
+    const currentWs = socket;
+
+    currentWs.onopen = () => {
+        setIsWsOpen(true);
+
+        const initialPayload: Record<string, unknown> = {
+        message: 'Hello!',
+        user_name: userName,
+        };
+        if (conversationId) {
+        initialPayload.conversation_id = conversationId; // reuse exact convo
+        } else {
+        initialPayload.resume_last = true;               // ask server to resume latest
+        }
+
+        currentWs.send(JSON.stringify(initialPayload));
+    };
+
+    currentWs.onmessage = (event: MessageEvent) => {
+        let msg: ServerMessage;
+        try { msg = JSON.parse(event.data); }
+        catch { return; }
+
+        // meta/system messages
+        if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
+        setConversationId(msg.id);
+        loadConversations(); // refresh sidebar
+        return;
+        }
+        if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
+        setLoadedSummary(msg.summary);
+        return;
+        }
+        if (msg.type === 'ping' || msg.type === 'pong') return;
+
+        // typing
+        if (typeof msg.sender === 'string' && typeof msg.typing === 'boolean') {
+        setIsTyping(prev => ({ ...prev, [msg.sender!]: msg.typing! }));
+        return;
+        }
+
+        // normal chat
+        if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
+        addMessageToChat({ sender: msg.sender, text: msg.text });
+        return;
+        }
+    };
+
+    currentWs.onclose = async (evt) => {
+        console.log('WebSocket closed.', 'code=', evt.code, 'reason=', evt.reason, 'wasClean=', evt.wasClean);
+        setIsWsOpen(false);
+        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+
+        // try a refresh on auth-ish closure codes
+        const looksAuthy =
+        evt.code === 1008 || evt.code === 4001 || (evt.reason && /auth|token|credential/i.test(evt.reason));
+        if (looksAuthy) {
+        try {
+            const rr = await fetch(`${API_BASE}/api/refresh`, { method: 'POST', credentials: 'include' });
+            if (rr.ok) {
+            const { token } = await rr.json();
+            if (token) localStorage.setItem('access_token', token);
+            }
+        } catch {}
+        }
+
+        ws.current = null;
+        setTimeout(() => setWsReconnectNonce(n => n + 1), 1000);
+    };
+
+    currentWs.onerror = (event: Event) => {
+        console.error('WebSocket error:', event);
+        setIsWsOpen(false);
+    };
+
+    return () => {
+        if (currentWs && (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING)) {
+        try { currentWs.close(); } catch {}
+        }
+    };
+    }, [userToken, userName, conversationId, addMessageToChat, loadConversations, wsReconnectNonce]);
+
         
-        // Create a stable local reference to the current WebSocket instance
-        const currentWs = ws.current; 
-
-        currentWs.onopen = () => {
-            setIsWsOpen(true);
-
-            const initialPayload: Record<string, unknown> = {
-                message: "Hello!",
-                user_name: userName,
-            };
-
-            if (conversationId) {
-                initialPayload.conversation_id = conversationId; // reuse exact convo
-            } else {
-                initialPayload.resume_last = true;               // tell server to resume latest
-            }
-
-            currentWs.send(JSON.stringify(initialPayload));
-        };
 
 
-        currentWs.onmessage = (event: MessageEvent) => {
-            let msg: ServerMessage;
-            try {
-                msg = JSON.parse(event.data);
-            } catch (e) {
-                console.warn('[WS] non-JSON message:', event.data);
-                return;
-            }
 
-            // --- Handle system/meta messages FIRST ---
-
-            // Conversation id announced by the server
-            if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
-                setConversationId(msg.id);
-                return;
-            }
-
-            // NEW: running summary sent once on connect (for your banner)
-            if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
-                setLoadedSummary(msg.summary);   // <- make sure you have `const [loadedSummary, setLoadedSummary] = useState<string | null>(null);`
-                return;
-            }
-
-            // Ignore pings/pongs in the UI
-            if (msg.type === 'ping' || msg.type === 'pong') {
-                return;
-            }
-
-            // --- Then handle typing updates ---
-            if (typeof msg.sender === 'string' && typeof msg.typing === 'boolean') {
-                const senderKey: string = msg.sender;
-                const isTypingVal: boolean = msg.typing;
-                setIsTyping((prev) => {
-                const next = { ...prev };
-                next[senderKey] = isTypingVal;
-                return next;
-                });
-                return;
-            }
-
-            // --- Finally, normal chat messages ---
-            if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
-                addMessageToChat({ sender: msg.sender, text: msg.text });
-                return;
-            }
-
-            // Fallback: unrecognized message
-            console.debug('[WS] unhandled message:', msg);
-        };
-
-                
-        currentWs.onclose = (evt) => {
-            console.log('WebSocket closed. code=', evt.code, 'reason=', evt.reason, 'wasClean=', evt.wasClean);
-            setIsWsOpen(false);
-            setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
-
-            // clear heartbeat if present
-            const hb = (currentWs as HBWebSocket)._heartbeatInterval;
-            if (hb) window.clearInterval(hb);
-
-            // avoid reconnect loop if server closed for policy/limit
-            if (evt.code !== 1008) {
-                ws.current = null;
-                setTimeout(() => setWsReconnectNonce(n => n + 1), 1000);
-            }
-        };
-
-        
-        currentWs.onerror = (event: Event) => {
-            console.error('WebSocket error:', event);
-            setIsWsOpen(false);
-        };
-
-        // Cleanup function for the useEffect hook
-        return () => {
-            const hb = (currentWs as HBWebSocket)._heartbeatInterval;
-            if (hb) window.clearInterval(hb);
-
-            if (currentWs && (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING)) {
-                currentWs.close();
-            }
-        };
-    }, [userToken, userName, addMessageToChat, wsReconnectNonce]);
 
     if (!userToken) {
         return null;
@@ -306,149 +457,251 @@ export default function ChatPage() {
         setTimeout(() => setWsReconnectNonce(n => n + 1), 50);
     };
 
+    useEffect(() => {
+    if (!userToken) return;
+    const id = window.setInterval(() => {
+        refreshTokenIfNeeded();
+    }, 5 * 60 * 1000); // every 5 min
+    return () => { window.clearInterval(id); };
+    }, [userToken]);
+
 
 
     return (
-        <div className="flex flex-col h-screen w-full bg-gray-950 text-white font-sans antialiased">
-            <main ref={chatContainerRef} className="flex-1 overflow-y-auto pt-[72px] pb-[100px] bg-gray-900 custom-scrollbar">
-                <div className="max-w-4xl mx-auto flex flex-col space-y-4 md:space-y-6">
-                    {/* Conditional rendering for the initial message */}
-                    {!isWsOpen && userToken ? (
-                        <p className="text-center text-gray-500 py-12 text-lg">Connecting to chat...</p>
-                    ) : (
-                        chatHistory.length === 0 && (
-                            <p className="text-center text-gray-500 py-12 text-lg">
-                                {userName ? `Start a conversation with the AI team, ${userName}...` : `Please sign in to start a conversation...`}
-                            </p>
-                        )
-                    )}
-
-                    {chatHistory.length > 0 && (
-                        chatHistory.map((msg, index) => (
-                            <div
-                                key={index}
-                                className={`flex ${msg.sender === (userName || 'You') ? 'justify-end' : 'justify-start'}`}
-                            >
-                                <div className={`relative p-3 md:p-4 max-w-[80%] text-white rounded-2xl md:rounded-3xl shadow-lg transition-all duration-200 ease-in-out transform hover:scale-[1.01] ${
-                                    msg.sender === (userName || 'You')
-                                        ? 'bg-blue-600 text-white rounded-tr-none'
-                                        : msg.sender === 'Claude'
-                                        ? 'bg-gray-700 text-white rounded-bl-none'
-                                        : msg.sender === 'ChatGPT'
-                                        ? 'bg-gray-800 text-white rounded-bl-none'
-                                        : msg.sender === 'Gemini'
-                                        ? 'bg-gray-600 text-white rounded-bl-none'
-                                        : msg.sender === 'Mistral'
-                                        ? 'bg-gray-500 text-white rounded-bl-none'
-                                        : 'bg-gray-700 text-gray-200 rounded-bl-none'
-                                }`}>
-                                    {msg.sender !== (userName || 'You') && (
-                                        <div className="text-xs text-gray-300 mb-1 font-semibold">
-                                            {msg.sender}
-                                        </div>
-                                    )}
-                                    <pre className="whitespace-pre-wrap font-sans text-sm md:text-base leading-relaxed">{msg.text}</pre>
-                                </div>
-                            </div>
-                        ))
-                    )}
-                    <div className="flex flex-col space-y-2">
-                        {isTyping.ChatGPT && (
-                            <div className="flex items-center space-x-2 px-3 py-2 md:px-4 md:py-3 rounded-2xl max-w-xs bg-gray-800 text-white shadow-md">
-                                <div className="flex space-x-1">
-                                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-fast"></span>
-                                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slow"></span>
-                                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slower"></span>
-                                </div>
-                                <span className="text-sm text-gray-300 font-medium">ChatGPT is typing...</span>
-                            </div>
-                        )}
-                        {isTyping.Claude && (
-                            <div className="flex items-center space-x-2 px-3 py-2 md:px-4 md:py-3 rounded-2xl max-w-xs bg-gray-700 text-white shadow-md">
-                                <div className="flex space-x-1">
-                                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-fast"></span>
-                                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slow"></span>
-                                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slower"></span>
-                                </div>
-                                <span className="text-sm text-gray-300 font-medium">Claude is typing...</span>
-                            </div>
-                        )}
-                        {isTyping.Gemini && (
-                            <div className="flex items-center space-x-2 px-3 py-2 md:px-4 md:py-3 rounded-2xl max-w-xs bg-purple-800 text-white shadow-md">
-                                <div className="flex space-x-1">
-                                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-fast"></span>
-                                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slow"></span>
-                                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slower"></span>
-                                </div>
-                                <span className="text-sm text-gray-300 font-medium">Gemini is typing...</span>
-                            </div>
-                        )}
-                        {isTyping.Mistral && (
-                            <div className="flex items-center space-x-2 px-3 py-2 md:px-4 md:py-3 rounded-2xl max-w-xs bg-green-800 text-white shadow-md">
-                                <div className="flex space-x-1">
-                                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-fast"></span>
-                                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slow"></span>
-                                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slower"></span>
-                                </div>
-                                <span className="text-sm text-gray-300 font-medium">Mistral is typing...</span>
-                            </div>
-                        )}
-                    </div>
-                    <div ref={chatEndRef} />
-                </div>
-            </main>
-
-            <form
-                onSubmit={handleSubmit}
-                className="fixed bottom-0 left-0 right-0 z-10 bg-gray-900 border-t border-gray-800 p-4 md:p-6 shadow-lg"
+    <div className="flex h-screen w-full bg-gray-950 text-white font-sans antialiased">
+        {/* LEFT SIDEBAR */}
+        <aside className="hidden md:flex flex-col w-72 border-r border-gray-800 bg-gray-900">
+        <div className="p-4 border-b border-gray-800 flex items-center justify-between">
+            <div className="font-semibold">Conversations</div>
+            <button
+            onClick={handleNewConversation}
+            className="text-xs px-2 py-1 rounded bg-blue-600 hover:bg-blue-700"
             >
-            {loadedSummary && (
-                <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                    <div className="flex items-start justify-between gap-3">
-                    <div>
-                        <strong>Context loaded</strong> — this chat includes knowledge from earlier sessions.
-                    </div>
+            New
+            </button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto custom-scrollbar">
+            {isLoadingConvs && (
+            <div className="p-4 text-sm text-gray-400">Loading…</div>
+            )}
+            {!isLoadingConvs && conversations.length === 0 && (
+            <div className="p-4 text-sm text-gray-400">No conversations yet</div>
+            )}
+            <ul className="divide-y divide-gray-800">
+            {conversations.map((c) => (
+                <li
+                key={c.id}
+                className={`group px-3 py-2 cursor-pointer ${
+                    conversationId === c.id
+                    ? 'bg-gray-800'
+                    : 'hover:bg-gray-800/60'
+                }`}
+                >
+                <div className="flex items-center justify-between gap-2">
                     <button
-                        className="shrink-0 underline"
-                        onClick={() => setShowSummary(s => !s)}
+                    onClick={() => handleOpenConversation(c.id)}
+                    className="flex-1 text-left truncate"
+                    title={c.title}
                     >
-                        {showSummary ? "Hide" : "Show"} summary
+                    {c.title || 'Untitled'}
+                    </button>
+                    <div className="opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+                    <button
+                        onClick={() => handleRenameConversation(c.id)}
+                        className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+                        title="Rename"
+                    >
+                        Rename
+                    </button>
+                    <button
+                        onClick={() => handleDeleteConversation(c.id)}
+                        className="text-xs px-2 py-1 rounded bg-red-700 hover:bg-red-600"
+                        title="Delete"
+                    >
+                        Delete
                     </button>
                     </div>
-                    {showSummary && (
-                    <div className="mt-2 whitespace-pre-wrap">
-                        {loadedSummary}
-                    </div>
-                    )}
                 </div>
+                {c.updated_at && (
+                    <div className="mt-1 text-[11px] text-gray-400">
+                    {new Date(c.updated_at).toLocaleString()}
+                    </div>
+                )}
+                </li>
+            ))}
+            </ul>
+        </div>
+        </aside>
+
+        {/* MAIN COLUMN (YOUR EXISTING CHAT UI, UNCHANGED) */}
+        <div className="flex-1 flex flex-col">
+        <main
+            ref={chatContainerRef}
+            className="flex-1 overflow-y-auto pt-[72px] pb-[100px] bg-gray-900 custom-scrollbar"
+        >
+            <div className="max-w-4xl mx-auto flex flex-col space-y-4 md:space-y-6">
+            {/* Conditional rendering for the initial message */}
+            {!isWsOpen && userToken ? (
+                <p className="text-center text-gray-500 py-12 text-lg">
+                Connecting to chat...
+                </p>
+            ) : (
+                chatHistory.length === 0 && (
+                <p className="text-center text-gray-500 py-12 text-lg">
+                    {userName
+                    ? `Start a conversation with the AI team, ${userName}...`
+                    : `Please sign in to start a conversation...`}
+                </p>
+                )
             )}
 
-                <div className="flex gap-4 max-w-4xl mx-auto">
-                    <input
-                        type="text"
-                        value={message}
-                        onChange={(e) => setMessage(e.target.value)}
-                        placeholder="Type your message..."
-                        className="flex-grow p-3 rounded-xl border border-gray-700 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200 text-sm md:text-base"
-                        disabled={!isWsOpen || !userName}
-                    />
-                    <button
-                        type="submit"
-                        className="px-4 py-2 md:px-6 md:py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 disabled:opacity-50 transition-colors duration-200 text-sm"
-                        disabled={!isWsOpen || !userName}
+            {chatHistory.length > 0 &&
+                chatHistory.map((msg, index) => (
+                <div
+                    key={index}
+                    className={`flex ${
+                    msg.sender === (userName || 'You')
+                        ? 'justify-end'
+                        : 'justify-start'
+                    }`}
+                >
+                    <div
+                    className={`relative p-3 md:p-4 max-w-[80%] text-white rounded-2xl md:rounded-3xl shadow-lg transition-all duration-200 ease-in-out transform hover:scale-[1.01] ${
+                        msg.sender === (userName || 'You')
+                        ? 'bg-blue-600 text-white rounded-tr-none'
+                        : msg.sender === 'Claude'
+                        ? 'bg-gray-700 text-white rounded-bl-none'
+                        : msg.sender === 'ChatGPT'
+                        ? 'bg-gray-800 text-white rounded-bl-none'
+                        : msg.sender === 'Gemini'
+                        ? 'bg-gray-600 text-white rounded-bl-none'
+                        : msg.sender === 'Mistral'
+                        ? 'bg-gray-500 text-white rounded-bl-none'
+                        : 'bg-gray-700 text-gray-200 rounded-bl-none'
+                    }`}
                     >
-                        Send
-                    </button>
-                    <button
-                        type="button"
-                        onClick={handleResetConversation}
-                        className="px-4 py-2 md:px-6 md:py-3 bg-gray-700 text-white font-semibold rounded-xl hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-gray-400 focus:ring-offset-2 focus:ring-offset-gray-900 transition-colors duration-200 text-sm"
-                        disabled={!isWsOpen}
-                    >
-                        Reset conversation
-                    </button>
+                    {msg.sender !== (userName || 'You') && (
+                        <div className="text-xs text-gray-300 mb-1 font-semibold">
+                        {msg.sender}
+                        </div>
+                    )}
+                    <pre className="whitespace-pre-wrap font-sans text-sm md:text-base leading-relaxed">
+                        {msg.text}
+                    </pre>
+                    </div>
                 </div>
-            </form>
+                ))}
+
+            <div className="flex flex-col space-y-2">
+                {isTyping.ChatGPT && (
+                <div className="flex items-center space-x-2 px-3 py-2 md:px-4 md:py-3 rounded-2xl max-w-xs bg-gray-800 text-white shadow-md">
+                    <div className="flex space-x-1">
+                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-fast"></span>
+                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slow"></span>
+                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slower"></span>
+                    </div>
+                    <span className="text-sm text-gray-300 font-medium">
+                    ChatGPT is typing...
+                    </span>
+                </div>
+                )}
+                {isTyping.Claude && (
+                <div className="flex items-center space-x-2 px-3 py-2 md:px-4 md:py-3 rounded-2xl max-w-xs bg-gray-700 text-white shadow-md">
+                    <div className="flex space-x-1">
+                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-fast"></span>
+                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slow"></span>
+                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slower"></span>
+                    </div>
+                    <span className="text-sm text-gray-300 font-medium">
+                    Claude is typing...
+                    </span>
+                </div>
+                )}
+                {isTyping.Gemini && (
+                <div className="flex items-center space-x-2 px-3 py-2 md:px-4 md:py-3 rounded-2xl max-w-xs bg-purple-800 text-white shadow-md">
+                    <div className="flex space-x-1">
+                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-fast"></span>
+                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slow"></span>
+                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slower"></span>
+                    </div>
+                    <span className="text-sm text-gray-300 font-medium">
+                    Gemini is typing...
+                    </span>
+                </div>
+                )}
+                {isTyping.Mistral && (
+                <div className="flex items-center space-x-2 px-3 py-2 md:px-4 md:py-3 rounded-2xl max-w-xs bg-green-800 text-white shadow-md">
+                    <div className="flex space-x-1">
+                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-fast"></span>
+                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slow"></span>
+                    <span className="h-2 w-2 bg-gray-400 rounded-full animate-pulse-slower"></span>
+                    </div>
+                    <span className="text-sm text-gray-300 font-medium">
+                    Mistral is typing...
+                    </span>
+                </div>
+                )}
+            </div>
+
+            <div ref={chatEndRef} />
+            </div>
+        </main>
+
+        {/* INPUT FORM — fixed on mobile, static on desktop so it doesn't cover the sidebar */}
+        <form
+            onSubmit={handleSubmit}
+            className="fixed md:static bottom-0 left-0 right-0 z-10 bg-gray-900 border-t border-gray-800 p-4 md:p-6 shadow-lg"
+        >
+            {loadedSummary && (
+            <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                <div className="flex items-start justify-between gap-3">
+                <div>
+                    <strong>Context loaded</strong> — this chat includes knowledge from earlier sessions.
+                </div>
+                <button
+                    type="button"
+                    className="shrink-0 underline"
+                    onClick={() => setShowSummary((s) => !s)}
+                >
+                    {showSummary ? 'Hide' : 'Show'} summary
+                </button>
+
+                </div>
+                {showSummary && (
+                <div className="mt-2 whitespace-pre-wrap">{loadedSummary}</div>
+                )}
+            </div>
+            )}
+
+            <div className="flex gap-4 max-w-4xl mx-auto">
+            <input
+                type="text"
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                placeholder="Type your message..."
+                className="flex-grow p-3 rounded-xl border border-gray-700 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200 text-sm md:text-base"
+                disabled={!isWsOpen || !userName}
+            />
+            <button
+                type="submit"
+                className="px-4 py-2 md:px-6 md:py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 disabled:opacity-50 transition-colors duration-200 text-sm"
+                disabled={!isWsOpen || !userName}
+            >
+                Send
+            </button>
+            <button
+                type="button"
+                onClick={handleResetConversation}
+                className="px-4 py-2 md:px-6 md:py-3 bg-gray-700 text-white font-semibold rounded-xl hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-gray-400 focus:ring-offset-2 focus:ring-offset-gray-900 transition-colors duration-200 text-sm"
+                disabled={!isWsOpen}
+            >
+                Reset conversation
+            </button>
+            </div>
+        </form>
         </div>
+    </div>
     );
+
 }

@@ -4,6 +4,7 @@ print("TOP OF api.py: Script starting...", file=sys.stderr)
 from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
+from fastapi import Request, Response
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
@@ -11,7 +12,7 @@ import autogen
 import asyncio
 import re
 from typing import List, Dict, Any, Union
-from jose import JWTError, jwt
+import jwt as pyjwt
 from datetime import datetime, timedelta, timezone
 from google.auth.transport import requests as google_requests
 from google.oauth2.id_token import verify_oauth2_token
@@ -131,28 +132,35 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         headers={"WWW-Authenticate": "Bearer"},
     )
     try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        payload = pyjwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = payload.get("sub")
-        
+        if not user_id:
+            raise credentials_exception
+
         user_ref = db.collection('users').document(user_id)
         user_doc = await user_ref.get()
-
         if not user_doc.exists:
             raise credentials_exception
-            
-        user = user_doc.to_dict()
+
+        user = user_doc.to_dict() or {}
         user['id'] = user_doc.id
         return user
-    except JWTError:
+    except pyjwt.PyJWTError:
         raise credentials_exception
 
 def create_access_token(data: dict, expires_delta: Union[timedelta, None] = None):
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=15))
     to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+    return pyjwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-# --- Conversation persistence helpers ---
+def create_refresh_token(*, data: dict, expires_delta: timedelta = timedelta(days=14)) -> str:
+    to_encode = data.copy()
+    expire = datetime.now(timezone.utc) + expires_delta
+    to_encode.update({"exp": expire, "type": "refresh"})
+    return pyjwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
+
+
 
 # --- Conversation persistence helpers ---
 
@@ -172,20 +180,17 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
 
     if conv_id:
         conv_ref = conversations.document(conv_id)
-        # ensure doc exists / touch updated_at
         await conv_ref.set({"user_id": user_id, "updated_at": now}, merge=True)
         doc = await conv_ref.get()
         return conv_ref, (doc.to_dict() or {})
 
     if resume_last:
-        # try to pick the latest conversation for this user
         try:
             q = (
                 conversations.where("user_id", "==", user_id)
                 .order_by("updated_at", direction=firestore.Query.DESCENDING)
                 .limit(1)
             )
-            # async stream to list
             last = [doc async for doc in q.stream()]
             if last:
                 conv_ref = conversations.document(last[0].id)
@@ -195,7 +200,6 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
         except Exception as e:
             print("Resume-last query failed; creating new conversation. Error:", e)
 
-    # create a new conversation
     conv_ref = conversations.document()
     await conv_ref.set(
         {
@@ -204,11 +208,12 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
             "updated_at": now,
             "subscription_id": cfg.get("subscription_id"),
             "title": cfg.get("title") or "New conversation",
-            "summary": "",  # running summary (optional)
+            "summary": "",
         }
     )
     doc = await conv_ref.get()
     return conv_ref, (doc.to_dict() or {})
+
 
 
 async def save_message(conv_ref, role: str, sender: str, content: str):
@@ -279,7 +284,129 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
         "user_id": user_doc.id,              # use doc id, not a field
         "user_plan_name": subscription_doc.id
     }
-    
+
+# === Conversations REST ===
+from typing import Optional, List
+from pydantic import BaseModel, constr
+from google.cloud import firestore
+
+def _ts_iso(v):
+    try:
+        return v.isoformat()
+    except Exception:
+        return None
+
+class RenameBody(BaseModel):
+    title: constr(min_length=1, max_length=120)
+
+@app.get("/api/conversations")
+async def list_conversations(user=Depends(get_current_user)):
+    items: List[dict] = []
+    q = (
+        db.collection("conversations")
+        .where("user_id", "==", user["id"])
+        .order_by("updated_at", direction=firestore.Query.DESCENDING)
+        .limit(100)
+    )
+    async for d in q.stream():
+        c = d.to_dict() or {}
+        items.append({
+            "id": d.id,
+            "title": c.get("title") or "New conversation",
+            "updated_at": _ts_iso(c.get("updated_at")),
+            "message_count": c.get("message_count", 0),
+            "summary": c.get("summary", ""),
+        })
+    return {"items": items}
+
+
+@app.get("/api/conversations/{conv_id}/messages")
+async def list_messages(conv_id: str, limit: int = 50, user=Depends(get_current_user)):
+    conv_ref = db.collection("conversations").document(conv_id)
+    conv = await conv_ref.get()
+    if (not conv.exists) or ((conv.to_dict() or {}).get("user_id") != user["id"]):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    msgs = []
+    q = (conv_ref.collection("messages")
+         .order_by("timestamp", direction=firestore.Query.DESCENDING)
+         .limit(limit))
+    async for m in q.stream():
+        d = m.to_dict() or {}
+        msgs.append({
+            "id": m.id,
+            "role": d.get("role"),
+            "sender": d.get("sender"),
+            "content": d.get("content"),
+            "timestamp": _ts_iso(d.get("timestamp")),
+        })
+    msgs.reverse()
+    return {"items": msgs}
+
+
+@app.patch("/api/conversations/{conv_id}")
+async def rename_conversation(conv_id: str, body: RenameBody, user=Depends(get_current_user)):
+    conv_ref = db.collection("conversations").document(conv_id)
+    snap = await conv_ref.get()
+    if (not snap.exists) or ((snap.to_dict() or {}).get("user_id") != user["id"]):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    await conv_ref.update({"title": body.title, "updated_at": datetime.now(timezone.utc)})
+    return {"ok": True}
+
+
+@app.delete("/api/conversations/{conv_id}")
+async def delete_conversation(conv_id: str, user=Depends(get_current_user)):
+    conv_ref = db.collection("conversations").document(conv_id)
+    snap = await conv_ref.get()
+    if (not snap.exists) or ((snap.to_dict() or {}).get("user_id") != user["id"]):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    while True:
+        batch = db.batch()
+        count = 0
+        async for m in conv_ref.collection("messages").limit(300).stream():
+            batch.delete(m.reference)
+            count += 1
+        if count == 0:
+            break
+        await batch.commit()
+
+    await conv_ref.delete()
+    return {"ok": True}
+
+
+@app.get("/api/conversations/{conv_id}/export")
+async def export_conversation(conv_id: str, user=Depends(get_current_user)):
+    conv_ref = db.collection("conversations").document(conv_id)
+    snap = await conv_ref.get()
+    if (not snap.exists) or ((snap.to_dict() or {}).get("user_id") != user["id"]):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv = snap.to_dict() or {}
+
+    msgs = []
+    q = conv_ref.collection("messages").order_by("timestamp")
+    async for m in q.stream():
+        d = m.to_dict() or {}
+        msgs.append({
+            "role": d.get("role"),
+            "sender": d.get("sender"),
+            "content": d.get("content"),
+            "timestamp": _ts_iso(d.get("timestamp")),
+        })
+
+    return {
+        "id": conv_id,
+        "title": conv.get("title") or "Conversation",
+        "summary": conv.get("summary") or "",
+        "message_count": conv.get("message_count", len(msgs)),
+        "created_at": _ts_iso(conv.get("created_at")),
+        "updated_at": _ts_iso(conv.get("updated_at")),
+        "messages": msgs,
+    }
+
+# === end Conversations REST ===
+
+
 @app.get("/api/users/me/usage")
 async def get_user_usage(current_user: dict = Depends(get_current_user)):
     user_doc = await db.collection('users').document(current_user['id']).get()
@@ -316,7 +443,7 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
     }
 
 @app.post("/api/google-auth", response_model=Token)
-async def google_auth(auth_code: GoogleAuthCode):
+async def google_auth(auth_code: GoogleAuthCode, response: Response):
     try:
         client_config = {
             "web": {
@@ -334,43 +461,65 @@ async def google_auth(auth_code: GoogleAuthCode):
         }
         flow = Flow.from_client_config(
             client_config,
-            scopes=['https://www.googleapis.com/auth/userinfo.profile', 'https://www.googleapis.com/auth/userinfo.email', 'openid'],
-            redirect_uri=auth_code.redirect_uri
+            scopes=[
+                "https://www.googleapis.com/auth/userinfo.profile",
+                "https://www.googleapis.com/auth/userinfo.email",
+                "openid",
+            ],
+            redirect_uri=auth_code.redirect_uri,
         )
-
         flow.fetch_token(code=auth_code.code)
         credentials = flow.credentials
-        
-        idinfo = verify_oauth2_token(credentials.id_token, google_requests.Request(), credentials.client_id)
-        google_id = idinfo['sub']
-        
-        users_ref = db.collection('users')
-        user_doc_query = users_ref.where('google_id', '==', google_id).limit(1).stream()
-        user_list = [doc async for doc in user_doc_query]
 
-        if not user_list:
-            free_plan_doc = await db.collection('subscriptions').document('Free').get()
-            
+        idinfo = verify_oauth2_token(credentials.id_token, google_requests.Request(), credentials.client_id)
+        google_id = idinfo["sub"]
+
+        users_ref = db.collection("users")
+        q = users_ref.where("google_id", "==", google_id).limit(1).stream()
+        docs = [doc async for doc in q]
+
+        if not docs:
+            free_plan_doc = await db.collection("subscriptions").document("Free").get()
             new_user_ref = users_ref.document()
             user_data = {
-                'google_id': google_id,
-                'name': idinfo['name'],
-                'email': idinfo['email'],
-                'subscription_id': free_plan_doc.id,
+                "google_id": google_id,
+                "name": idinfo.get("name"),
+                "email": idinfo.get("email"),
+                "subscription_id": free_plan_doc.id,
             }
             await new_user_ref.set(user_data)
             user_id = new_user_ref.id
-            print(f"New user created: {idinfo['name']} on Free plan.")
+            user_name = user_data["name"] or "User"
         else:
-            user_id = user_list[0].id
-            print(f"User found in database: {user_list[0].to_dict()['name']}")
+            user_id = docs[0].id
+            data = docs[0].to_dict() or {}
+            user_name = data.get("name") or "User"
 
-        token = create_access_token({"sub": user_id}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-        return {"access_token": token, "token_type": "bearer", "user_name": idinfo['name'], "user_id": user_id}
+        # Access token (front-end uses this)
+        access_token = create_access_token({"sub": user_id}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
+
+        # Refresh token cookie (silent refresh later)
+        refresh_token = create_refresh_token(data={"sub": user_id})
+        response.set_cookie(
+            key="refresh_token",
+            value=refresh_token,
+            max_age=14 * 24 * 60 * 60,
+            httponly=True,
+            secure=True,
+            samesite="none",
+        )
+
+        return Token(
+            access_token=access_token,
+            token_type="bearer",
+            user_name=user_name,
+            user_id=user_id,
+        )
 
     except Exception as e:
         print(f"Google auth failed: {e}")
         raise HTTPException(status_code=401, detail="Google authentication failed")
+
 
 
 # === STRIPE IMPLEMENTATION ===
@@ -379,6 +528,34 @@ stripe_webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
 
 class SubscriptionRequest(BaseModel):
     price_id: str
+
+@app.post("/api/refresh")
+async def refresh_access_token(request: Request):
+    rt = request.cookies.get("refresh_token")
+    if not rt:
+        raise HTTPException(status_code=401, detail="No refresh token")
+
+    try:
+        payload = pyjwt.decode(rt, SECRET_KEY, algorithms=[ALGORITHM])
+        if payload.get("type") != "refresh":
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
+        user_id = payload.get("sub")
+        if not user_id:
+            raise HTTPException(status_code=401, detail="Invalid refresh token payload")
+    except pyjwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Refresh token expired")
+    except pyjwt.PyJWTError:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+
+    access_expires_in = 60 * 60
+    new_access = create_access_token(
+        data={"sub": user_id},
+        expires_delta=timedelta(seconds=access_expires_in),
+    )
+    expires_at = int(datetime.now(timezone.utc).timestamp()) + access_expires_in
+    return {"token": new_access, "expires_at": expires_at}
+
+
 
 @app.post("/api/create-checkout-session")
 async def create_checkout_session(request: SubscriptionRequest, current_user: dict = Depends(get_current_user)):
