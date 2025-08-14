@@ -110,6 +110,13 @@ export default function ChatPage() {
     const chatEndRef = useRef<HTMLDivElement>(null);
     const ws = useRef<WebSocket | null>(null);
 
+    // Tracks reconnect backoff and any pending timer
+    const reconnectRef = useRef<{ tries: number; timer: number | null }>({
+        tries: 0,
+        timer: null,
+    });
+
+
     // ws reconnect guards/backoff
     const authFailedRef = useRef(false);
     const reconnectBackoffRef = useRef(1000); // start at 1s, exponential up to 15s
@@ -223,6 +230,16 @@ export default function ChatPage() {
     }
     }, [userToken, pathname, router]);
 
+    useEffect(() => {
+    const onVisible = () => {
+        if (document.visibilityState === 'visible' && !ws.current) {
+        // nudge a reconnect attempt
+        setWsReconnectNonce((n) => n + 1);
+        }
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+    }, []);
 
     // Use useCallback to memoize the function, preventing unnecessary re-renders
     const addMessageToChat = useCallback((msg: { sender: string; text: string }) => {
@@ -372,6 +389,13 @@ export default function ChatPage() {
     const currentWs = socket;
 
     currentWs.onopen = () => {
+        // reset reconnect backoff on successful open
+        reconnectRef.current.tries = 0;
+        if (reconnectRef.current.timer) {
+            window.clearTimeout(reconnectRef.current.timer);
+            reconnectRef.current.timer = null;
+        }
+
         setIsWsOpen(true);
         authFailedRef.current = false;
         reconnectBackoffRef.current = 1000;
@@ -425,48 +449,30 @@ export default function ChatPage() {
         }
     };
 
-    currentWs.onclose = async (ev) => {
+    currentWs.onclose = (ev) => {
         console.log('WebSocket closed. code=', ev.code, 'reason=', ev.reason, 'wasClean=', ev.wasClean);
         setIsWsOpen(false);
         setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
 
-
-        // mark closed
+        // mark ref as closed
         ws.current = null;
 
-        // If it's an auth-related closure, try a SINGLE forced refresh
-        const AUTHISH = ev.code === 1008 || ev.code === 4001 || ev.code === 4002 || ev.code === 4003;
-        if (AUTHISH && !authFailedRef.current) {
-            try {
-            await refreshTokenIfNeeded(true); // force refresh
-            authFailedRef.current = false;    // success → keep reconnecting
-            reconnectBackoffRef.current = 1000;
-            } catch {
-            // refresh truly failed → STOP reconnecting to avoid loops
-            authFailedRef.current = true;
-            }
-        }
+        // compute next backoff (up to 15s)
+        const base = 1000; // 1s
+        const max = 15000; // 15s
+        const tries = reconnectRef.current.tries;
+        const nextDelay = Math.min(max, base * Math.pow(2, tries)) + Math.floor(Math.random() * 250);
+        reconnectRef.current.tries = tries + 1;
 
-        if (authFailedRef.current) {
-            console.warn('Auth refresh failed; not auto-reconnecting.');
-            return;
+        // clear any previous timer and schedule a reconnect attempt
+        if (reconnectRef.current.timer) {
+            window.clearTimeout(reconnectRef.current.timer);
         }
-
-        // Exponential backoff reconnect
-        const delay = reconnectBackoffRef.current;
-        reconnectBackoffRef.current = Math.min(reconnectBackoffRef.current * 2, 15000);
-        // Don't reconnect while tab is hidden to avoid loops on background tabs
-        if (document.hidden) {
-        const onVisible = () => {
-            document.removeEventListener('visibilitychange', onVisible);
-            setWsReconnectNonce(n => n + 1);
-        };
-        document.addEventListener('visibilitychange', onVisible);
-        return;
-        }
-
-        setTimeout(() => setWsReconnectNonce(n => n + 1), delay);
+        reconnectRef.current.timer = window.setTimeout(() => {
+            setWsReconnectNonce((n) => n + 1);
+        }, nextDelay);
     };
+
 
 
     currentWs.onerror = (event: Event) => {
