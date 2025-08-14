@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, FormEvent, useRef, useEffect, useCallback } from 'react';
+import { useState, FormEvent, useRef, useEffect, useCallback, useMemo } from 'react';
 import { useUser } from '../../context/UserContext';
 import { usePathname, useRouter } from 'next/navigation';
 
@@ -97,6 +97,7 @@ export default function ChatPage() {
     // Sidebar + conversation list
     const [conversations, setConversations] = useState<ConversationListItem[]>([]);
     const [isLoadingConvs, setIsLoadingConvs] = useState(false);
+    const chatContainerRef = useRef<HTMLDivElement | null>(null);
 
     // New state to track which agents are typing
     const [isTyping, setIsTyping] = useState<TypingState>({
