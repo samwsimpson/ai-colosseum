@@ -133,6 +133,54 @@ def create_access_token(data: dict, expires_delta: Union[timedelta, None] = None
     to_encode.update({"exp": expire})
     return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
+# --- Conversation persistence helpers ---
+
+async def get_or_create_conversation(user_id: str, initial_config: dict):
+    """
+    Returns (conv_ref, conv_doc_dict). If initial_config['conversation_id'] is present,
+    it reuses it; otherwise creates a new conversation doc.
+    """
+    conv_id = (initial_config or {}).get("conversation_id")
+    now = datetime.utcnow()
+
+    conversations = db.collection("conversations")
+    if conv_id:
+        conv_ref = conversations.document(conv_id)
+        # Ensure doc exists and bump updated_at
+        await conv_ref.set({
+            "user_id": user_id,
+            "updated_at": now
+        }, merge=True)
+    else:
+        conv_ref = conversations.document()
+        await conv_ref.set({
+            "user_id": user_id,
+            "created_at": now,
+            "updated_at": now,
+            "subscription_id": (initial_config or {}).get("subscription_id"),
+            "title": (initial_config or {}).get("title") or "New conversation",
+            "summary": "",  # optional running summary
+        })
+
+    doc = await conv_ref.get()
+    return conv_ref, (doc.to_dict() or {})
+
+async def save_message(conv_ref, role: str, sender: str, content: str):
+    """
+    role: 'user' | 'assistant' | 'system'
+    """
+    if not content:
+        return
+    await conv_ref.collection("messages").add({
+        "role": role,
+        "sender": sender,
+        "content": content,
+        "timestamp": datetime.utcnow()
+    })
+    await conv_ref.update({"updated_at": datetime.utcnow()})
+
+# --- End Conversation persistence helpers ---
+
 @app.on_event("startup")
 async def startup_event():
     print("STARTUP EVENT: Initializing Firestore...")
@@ -203,7 +251,7 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
     ).where(
         'subscription_id', '==', user_data['subscription_id']
     ).where(
-        'timestamp', '>=', first_day_of_month
+        'created_at', '>=', first_day_of_month
     )
     
     monthly_usage = 0
@@ -368,12 +416,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         user_subscription_data = user_subscription_doc.to_dict()
 
         if user_subscription_data['monthly_limit'] is not None:
-            first_day_of_month = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            first_day_of_month = datetime.utcnow().replace(day=1, hour=0, minute=0, second=0, microsecond=0)          
             conversation_count_query = (
                 db.collection('conversations')
                 .where('user_id', '==', user['id'])
                 .where('subscription_id', '==', user_data['subscription_id'])
-                .where('timestamp', '>=', first_day_of_month)
+                .where('created_at', '>=', first_day_of_month)
             )
             conversation_count = 0
             async for _ in conversation_count_query.stream():
@@ -387,14 +435,22 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Limit reached")
                 return
 
-        await db.collection('conversations').add({
-            'user_id': user['id'],
-            'timestamp': datetime.utcnow(),
-            'subscription_id': user_data['subscription_id'],
-        })
-
         # ---- init from client ----
         initial_config = await websocket.receive_json()
+
+        # Create or reuse a conversation (persists across reconnects)
+        conv_ref, conv_doc = await get_or_create_conversation(user['id'], {
+            **(initial_config or {}),
+            "subscription_id": user_data.get("subscription_id"),
+        })
+
+        # Tell the client which conversation id we’re using
+        await websocket.send_json({
+            "sender": "System",
+            "type": "conversation_id",
+            "id": conv_ref.id,
+        })
+
         message_output_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
 
         def queue_send_nowait(payload: dict):
@@ -441,7 +497,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "6) If the user replies without naming anyone, assume they’re talking to the last assistant who spoke.\n"
             "7) When addressing another assistant directly, start with their name (e.g., 'Claude, ...'). "
             "When addressing the user, use natural language (e.g., 'Sam, ...'), not arrows or labels.\n"
-            "8) Do not lecture about roles/identities unless the user asks. No meta: don not write lines like 'Sam → Claude:' or 'Claude → chat_manager:'.\n"
+            "8) Do not lecture about roles/identities unless the user asks. No meta: do not write lines like 'Sam → Claude:' or 'Claude → chat_manager:'.\n"
             "9) Keep replies helpful and concise. If greeted (e.g., 'Hi everyone'), reply with a short greeting and one clarifying question to move forward.\n"
         )
 
@@ -707,14 +763,21 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         selector = CustomSpeakerSelector(agents, user_name=safe_user_name)
 
+        seed_messages = []
+        if conv_doc.get("summary"):
+            seed_messages.append({
+                "role": "system",
+                "content": f"Conversation summary so far:\n{conv_doc['summary']}"
+            })
+        seed_messages.append({"role": "system", "name": "System", "content": roster_text})
+
         groupchat = autogen.GroupChat(
             agents=agents,
-            messages=[{"role": "system", "name": "System", "content": roster_text}],
+            messages=seed_messages,
             max_round=999999,
             speaker_selection_method=selector,
             allow_repeat_speaker=True
-        )
-
+)
         manager = autogen.GroupChatManager(
             groupchat=groupchat,
             llm_config=False,
@@ -722,9 +785,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         )
 
         # ---- tasks ----
-        async def message_consumer_task(queue: asyncio.Queue, ws: WebSocket):
+        async def message_consumer_task(queue: asyncio.Queue, ws: WebSocket, conv_ref, agent_name_set: set, user_internal_name: str):
             while True:
                 msg = await queue.get()
+
+                # forward to browser
                 try:
                     await ws.send_json(msg)
                 except WebSocketDisconnect as e:
@@ -734,20 +799,50 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     print(f"message_consumer_task error: {e}")
                     break
 
-        async def user_input_handler_task(ws: WebSocket, proxy: WebSocketUserProxyAgent):
+                # persist (only if there's text)
+                sender = (msg or {}).get("sender") or "System"
+                text = (msg or {}).get("text") or ""
+                if not text:
+                    continue
+
+                if sender in agent_name_set:
+                    role = "assistant"
+                elif sender == user_internal_name:
+                    role = "user"
+                else:
+                    role = "system"
+
+                try:
+                    await save_message(conv_ref, role=role, sender=sender, content=text)
+                except Exception as e:
+                    # don't crash the socket if Firestore hiccups
+                    print(f"save_message failed: {e}")
+       
+        async def user_input_handler_task(ws: WebSocket, proxy: WebSocketUserProxyAgent, conv_ref, user_internal_name: str):
             while True:
                 try:
                     data = await ws.receive_json()
-                    if isinstance(data, dict):
-                        t = data.get("type")
-                        if t == "ping":
-                            await ws.send_json({"type": "pong"})
-                            continue
-                        if t == "pong":
-                            continue
-                        if "message" in data and isinstance(data["message"], str):
-                            await proxy.a_inject_user_message(data["message"])
-                            continue
+                    if not isinstance(data, dict):
+                        continue
+
+                    t = data.get("type")
+                    if t == "ping":
+                        await ws.send_json({"type": "pong"})
+                        continue
+                    if t == "pong":
+                        continue
+
+                    if "message" in data and isinstance(data["message"], str):
+                        user_msg = data["message"]
+                        # persist the user turn
+                        try:
+                            await save_message(conv_ref, role="user", sender=user_internal_name, content=user_msg)
+                        except Exception as e:
+                            print(f"save_message (user) failed: {e}")
+                        # inject into Autogen flow
+                        await proxy.a_inject_user_message(user_msg)
+                        continue
+
                     # ignore unexpected payloads
                 except WebSocketDisconnect:
                     break
@@ -757,10 +852,19 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         await ws.send_json({"sender": "System", "text": f"Error: {e}"})
                     except WebSocketDisconnect:
                         break
+       
+        assistant_name_set = {"ChatGPT", "Claude", "Gemini", "Mistral"}
 
-        consumer_task = asyncio.create_task(message_consumer_task(message_output_queue, websocket))
-        conversation_task = asyncio.create_task(user_proxy.a_initiate_chat(manager, message=initial_config.get('message', 'Hello!')))
-        input_handler_task = asyncio.create_task(user_input_handler_task(websocket, user_proxy))
+        consumer_task = asyncio.create_task(
+            message_consumer_task(message_output_queue, websocket, conv_ref, assistant_name_set, safe_user_name)
+        )
+        conversation_task = asyncio.create_task(
+            user_proxy.a_initiate_chat(manager, message=initial_config.get('message', 'Hello!'))
+        )
+        input_handler_task = asyncio.create_task(
+            user_input_handler_task(websocket, user_proxy, conv_ref, safe_user_name)
+        )
+
 
         async def keepalive_task(ws: WebSocket):
             try:

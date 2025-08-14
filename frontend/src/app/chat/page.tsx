@@ -19,7 +19,9 @@ interface ServerMessage {
   sender?: string;
   text?: string;
   typing?: boolean;
-  type?: 'ping' | 'pong' | string;
+  // include conversation id messages
+  type?: 'ping' | 'pong' | 'conversation_id' | string;
+  id?: string; // used when type === 'conversation_id'
 }
 
 type HBWebSocket = WebSocket & {
@@ -36,6 +38,8 @@ export default function ChatPage() {
     const [chatHistory, setChatHistory] = useState<Message[]>([]);
     const [isWsOpen, setIsWsOpen] = useState<boolean>(false);
     const [wsReconnectNonce, setWsReconnectNonce] = useState(0);
+    const [conversationId, setConversationId] = useState<string | null>(null);
+
     // New state to track which agents are typing
     const [isTyping, setIsTyping] = useState<TypingState>({
         ChatGPT: false,
@@ -61,12 +65,45 @@ export default function ChatPage() {
         }
     }, [chatHistory]);
     
+    // load saved conversation id on mount
+    useEffect(() => {
+    try {
+        const saved = localStorage.getItem('conversationId');
+        if (saved) setConversationId(saved);
+    } catch {}
+    }, []);
+
+    // save id whenever it changes
+    useEffect(() => {
+    try {
+        if (conversationId) localStorage.setItem('conversationId', conversationId);
+    } catch {}
+    }, [conversationId]);
+
+
     // Handle redirection to sign-in page when userToken is not present
     useEffect(() => {
-      if (!userToken && pathname !== '/sign-in') {
+    if (!userToken) {
+        // wipe conversation continuity on sign-out
+        try { localStorage.removeItem('conversationId'); } catch {}
+        setConversationId(null);
+        setChatHistory([]);
+        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+
+        // close any open socket
+        if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
+        ws.current.close(1000, 'logout');
+        }
+        ws.current = null;
+
+        // route to sign-in if not already there
+        if (pathname !== '/sign-in') {
         router.push('/sign-in');
-      }
+        }
+        return; // don’t try to connect without a token
+    }
     }, [userToken, pathname, router]);
+
 
     // Use useCallback to memoize the function, preventing unnecessary re-renders
     const addMessageToChat = useCallback((msg: { sender: string; text: string }) => {
@@ -159,51 +196,58 @@ export default function ChatPage() {
 
             const initialPayload = {
                 message: "Hello!",
-                user_name: userName 
+                user_name: userName,
+                conversation_id: conversationId || undefined, // reuse or create on server
             };
             currentWs.send(JSON.stringify(initialPayload));
+
         };
 
         currentWs.onmessage = (event: MessageEvent<string>) => {
             try {
                 const parsed: unknown = JSON.parse(event.data);
-
                 const msg = parsed as ServerMessage;
-                
+
+                // NEW: accept the conversation id the server assigns
+                if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
+                setConversationId(msg.id);
+                return;
+                }
+
                 if (msg.type === 'pong') {
-                    (currentWs as HBWebSocket)._lastPongAt = Date.now();
-                    return; // swallow
+                (currentWs as HBWebSocket)._lastPongAt = Date.now();
+                return; // swallow
                 }
 
                 // reply to server pings (skip showing them)
                 if (msg.type === 'ping') {
-                    if (currentWs.readyState === WebSocket.OPEN) {
-                        currentWs.send(JSON.stringify({ type: 'pong' }));
-                    }
-                    return;
+                if (currentWs.readyState === WebSocket.OPEN) {
+                    currentWs.send(JSON.stringify({ type: 'pong' }));
+                }
+                return;
                 }
 
                 if (typeof msg.sender === 'string' && typeof msg.typing === 'boolean') {
-                    const senderKey: string = msg.sender;
-                    const isTypingVal: boolean = msg.typing;
+                const senderKey: string = msg.sender;
+                const isTypingVal: boolean = msg.typing;
 
-                    setIsTyping((prev: TypingState): TypingState => {
-                        const next: TypingState = { ...prev };
-                        next[senderKey] = isTypingVal;
-                        return next;
-                    });
-                    return;
+                setIsTyping((prev: TypingState): TypingState => {
+                    const next: TypingState = { ...prev };
+                    next[senderKey] = isTypingVal;
+                    return next;
+                });
+                return;
                 }
 
                 if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
-                    addMessageToChat({ sender: msg.sender, text: msg.text });
+                addMessageToChat({ sender: msg.sender, text: msg.text });
                 }
-
             } catch (err: unknown) {
                 console.error('Failed to parse message:', err);
                 addMessageToChat({ sender: 'System', text: `Error: ${event.data}` });
             }
         };
+
                 
         currentWs.onclose = (evt) => {
             console.log('WebSocket closed. code=', evt.code, 'reason=', evt.reason, 'wasClean=', evt.wasClean);
@@ -242,6 +286,23 @@ export default function ChatPage() {
         return null;
     }
     
+    const handleResetConversation = () => {
+        try { localStorage.removeItem('conversationId'); } catch {}
+        setConversationId(null);
+        setChatHistory([]);
+        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+
+        // Close current socket to force a clean handshake + new conversation on reopen
+        if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
+            ws.current.close(1000, 'user-reset');
+        }
+        ws.current = null;
+
+        // nudge the reconnect effect
+        setTimeout(() => setWsReconnectNonce(n => n + 1), 50);
+    };
+
+
     return (
         <div className="flex flex-col h-screen w-full bg-gray-950 text-white font-sans antialiased">
             <main ref={chatContainerRef} className="flex-1 overflow-y-auto pt-[72px] pb-[100px] bg-gray-900 custom-scrollbar">
@@ -351,6 +412,14 @@ export default function ChatPage() {
                         disabled={!isWsOpen || !userName}
                     >
                         Send
+                    </button>
+                    <button
+                        type="button"
+                        onClick={handleResetConversation}
+                        className="px-4 py-2 md:px-6 md:py-3 bg-gray-700 text-white font-semibold rounded-xl hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-gray-400 focus:ring-offset-2 focus:ring-offset-gray-900 transition-colors duration-200 text-sm"
+                        disabled={!isWsOpen}
+                    >
+                        Reset conversation
                     </button>
                 </div>
             </form>
