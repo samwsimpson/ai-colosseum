@@ -83,6 +83,41 @@ GROUPCHAT_SYSTEM_MESSAGE = _env(
 )
 # ==== end system prompts ====
 
+# ===== Retry & fallback helpers for LLM calls =====
+import random
+
+async def call_with_retry(op_coro_factory, ws, *, retries: int = 2, base_delay: float = 0.8):
+    """
+    Run an awaitable produced by op_coro_factory() with exponential backoff on 429 / capacity errors.
+    Sends lightweight status updates to the websocket so the UI isn't blank.
+    """
+    for attempt in range(retries + 1):
+        try:
+            return await op_coro_factory()
+        except Exception as e:
+            msg = str(e)
+            is_429 = "429" in msg or "service_tier_capacity_exceeded" in msg or "capacity" in msg.lower()
+            if not is_429:
+                raise  # not a capacity issue, bubble up
+
+            # Tell the UI what's going on
+            try:
+                await ws.send_json({"sender": "System", "text": "Provider is under heavy load, retrying..."})
+            except Exception:
+                pass
+
+            if attempt == retries:
+                # Give a final friendly message then re-raise so logs show it
+                try:
+                    await ws.send_json({"sender": "System", "text": "Still busy. Please try again in a moment."})
+                except Exception:
+                    pass
+                raise
+
+            # jittered backoff
+            delay = base_delay * (2 ** attempt) + random.random() * 0.3
+            await asyncio.sleep(delay)
+
 
 app = FastAPI()
 
@@ -1210,7 +1245,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     await maybe_set_title(conv_ref, user_message)
 
                     # feed into the group chat
-                    await proxy.a_inject_user_message(user_message)
+                    await call_with_retry(
+                        lambda: proxy.a_inject_user_message(user_message),
+                        ws,
+                        retries=2,
+                        base_delay=0.8,
+                    )
 
                 except WebSocketDisconnect:
                     break
@@ -1228,7 +1268,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             message_consumer_task(message_output_queue, websocket, conv_ref, assistant_name_set, safe_user_name)
         )
         conversation_task = asyncio.create_task(
-            user_proxy.a_initiate_chat(manager, message=initial_config.get('message', 'Hello!'))
+            call_with_retry(
+                lambda: user_proxy.a_initiate_chat(manager, message=initial_config['message']),
+                websocket,
+                retries=2,
+                base_delay=0.8,
+            )
         )
         input_handler_task = asyncio.create_task(
             user_input_handler_task(websocket, user_proxy, conv_ref)
