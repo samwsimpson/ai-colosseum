@@ -1038,7 +1038,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # If they handed off, let the addressee speak
                     addressees = self._direct_addressees(content)
                     if addressees:
-                        return self.agent_by_name[addressees[0]]
+                        self.previous_assistant = self.agent_by_name[addressees[0]]
+                        return self.previous_assistant
+
 
                     # Continue one-pass broadcast
                     if self.multi["active"]:
@@ -1085,7 +1087,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 else:
                     return None
 
+                # Strip Autogen termination trailers etc.
                 cleaned = re.sub(r'(TERMINATE|Task Completed\.)[\s\S]*', '', content).strip()
+
+                # If there's nothing meaningful, do NOT advance the turn
+                if not cleaned:
+                    return None
 
                 # Choose a display name that hides the manager
                 sender_name = None
@@ -1098,22 +1105,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     sender_name = "System"
 
                 # Push to the frontend
-                if cleaned:
-                    # Use the same non-blocking queue helper used by the assistants
-                    queue_send_nowait({"sender": sender_name, "text": cleaned})
+                queue_send_nowait({"sender": sender_name, "text": cleaned})
 
-                # IMPORTANT: also persist this message in Autogen's conversation history
-                # so other agents see it as context on their next turn.
-                if isinstance(message, dict):
-                    msg_for_history = {**message, "content": cleaned}
-                else:
-                    msg_for_history = cleaned
-
+                # Persist in Autogen's history so other agents can see it
+                msg_for_history = {**message, "content": cleaned} if isinstance(message, dict) else cleaned
                 return await super().a_receive(
                     msg_for_history,
                     sender,
                     request_reply=False,  # don't trigger a reply; just record it
-                    silent=True           # don't echo anything extra
+                    silent=True            # no extra echoes
                 )
 
             async def a_generate_reply(self, messages: List[Dict[str, Any]] = None, sender: autogen.ConversableAgent = None, **kwargs) -> Union[str, Dict, None]:
@@ -1122,6 +1122,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
             async def a_inject_user_message(self, message: str):
                 await self._user_input_queue.put(message)
+
 
         # ---- build roster ----
         user_proxy = WebSocketUserProxyAgent(
