@@ -38,13 +38,21 @@ const API_BASE =
   'https://api.aicolosseum.app';
 
 // Helper: fetch with Authorization header and 1x retry on 401 using /api/refresh
-async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
+async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
+  // Always build absolute URL against API_BASE
+  const url =
+    typeof pathOrUrl === 'string'
+      ? (pathOrUrl.startsWith('http')
+          ? pathOrUrl
+          : `${API_BASE}${pathOrUrl.startsWith('/') ? '' : '/'}${pathOrUrl}`)
+      : pathOrUrl.toString();
+
   const headers = new Headers(init.headers || {});
-  const access = localStorage.getItem('access_token');
+  const access = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
   if (access) headers.set('Authorization', `Bearer ${access}`);
 
   // always send cookies so /api/refresh can read the refresh cookie
-  let res = await fetch(input, { ...init, headers, credentials: 'include' });
+  let res = await fetch(url, { ...init, headers, credentials: 'include' });
   if (res.status !== 401) return res;
 
   // try to refresh access token
@@ -56,12 +64,13 @@ async function apiFetch(input: RequestInfo | URL, init: RequestInit = {}) {
 
   const { token } = await rr.json();
   if (token) {
-    localStorage.setItem('access_token', token);
+    if (typeof window !== 'undefined') localStorage.setItem('access_token', token);
     headers.set('Authorization', `Bearer ${token}`);
-    res = await fetch(input, { ...init, headers, credentials: 'include' });
+    res = await fetch(url, { ...init, headers, credentials: 'include' });
   }
   return res;
 }
+
 
 function parseJwtExpMs(token: string | null): number {
   if (!token) return 0;
@@ -387,8 +396,14 @@ export default function ChatPage() {
 
         // typing
         if (typeof msg.sender === 'string' && typeof msg.typing === 'boolean') {
-        setIsTyping(prev => ({ ...prev, [msg.sender]: msg.typing }));
-        return;
+            const key = msg.sender;      // narrowed to string
+            const val = msg.typing;      // narrowed to boolean
+            setIsTyping(prev => {
+                const next: TypingState = { ...prev };
+                next[key] = val;
+                return next;
+            });
+            return;
         }
 
         // normal chat
@@ -436,10 +451,10 @@ export default function ChatPage() {
 
     useEffect(() => {
     if (!userToken) return;
-    const id = window.setInterval(() => {
-        refreshTokenIfNeeded();
-    }, 5 * 60 * 1000); // every 5 min
-    return () => { window.clearInterval(id); };
+        const id = window.setInterval(() => {
+            refreshTokenIfNeeded();
+        }, 5 * 60 * 1000); // every 5 min
+        return () => { window.clearInterval(id); };
     }, [userToken]);
 
 
