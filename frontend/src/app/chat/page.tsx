@@ -434,12 +434,15 @@ export default function ChatPage() {
 
         
 
+    useEffect(() => {
+    if (!userToken) return;
+    const id = window.setInterval(() => {
+        refreshTokenIfNeeded();
+    }, 5 * 60 * 1000); // every 5 min
+    return () => { window.clearInterval(id); };
+    }, [userToken]);
 
 
-
-    if (!userToken) {
-        return null;
-    }
     
     const handleResetConversation = () => {
         try { localStorage.removeItem('conversationId'); } catch {}
@@ -457,13 +460,7 @@ export default function ChatPage() {
         setTimeout(() => setWsReconnectNonce(n => n + 1), 50);
     };
 
-    useEffect(() => {
-    if (!userToken) return;
-    const id = window.setInterval(() => {
-        refreshTokenIfNeeded();
-    }, 5 * 60 * 1000); // every 5 min
-    return () => { window.clearInterval(id); };
-    }, [userToken]);
+
 
 
 
