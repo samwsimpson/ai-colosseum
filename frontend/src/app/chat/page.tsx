@@ -32,6 +32,9 @@ interface ConversationListItem {
   updated_at?: string;
 }
 
+// put this just after your interfaces
+type HBWebSocket = WebSocket & { _heartbeatInterval?: number };
+
 // Base REST API (same host as WS but https/http, not ws)
 const API_BASE =
   (process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '')) ||
@@ -72,38 +75,6 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
 }
 
 
-function parseJwtExpMs(token: string | null): number {
-  if (!token) return 0;
-  try {
-    const [, payload] = token.split('.');
-    const data = JSON.parse(atob(payload));
-    return (data.exp ?? 0) * 1000;
-  } catch {
-    return 0;
-  }
-}
-
-async function refreshTokenIfNeeded(): Promise<void> {
-  const token = localStorage.getItem('access_token');
-  const expMs = parseJwtExpMs(token);
-  const now = Date.now();
-  // refresh if expiring within 2 minutes
-  if (!expMs || expMs - now > 2 * 60 * 1000) return;
-
-  const res = await fetch(`${API_BASE}/api/refresh`, {
-    method: 'POST',
-    credentials: 'include',
-  });
-  if (!res.ok) return;
-
-  const data = await res.json();
-  if (data?.token) {
-    localStorage.setItem('access_token', data.token);
-  }
-}
-
-
-
 export default function ChatPage() {
     const { userName, userToken } = useUser();
     const router = useRouter();
@@ -138,6 +109,45 @@ export default function ChatPage() {
     const chatContainerRef = useRef<HTMLDivElement>(null);
     const chatEndRef = useRef<HTMLDivElement>(null);
     const ws = useRef<WebSocket | null>(null);
+
+    // ws reconnect guards/backoff
+    const authFailedRef = useRef(false);
+    const reconnectBackoffRef = useRef(1000); // start at 1s, exponential up to 15s
+
+    // --- guarded token refresh helpers ---
+    const refreshInFlight = useRef<Promise<void> | null>(null);
+    const lastRefreshAt = useRef<number>(0);
+
+    async function refreshTokenIfNeeded(force = false) {
+    const now = Date.now();
+    // throttle non-forced refresh to at most once/minute
+    if (!force && now - lastRefreshAt.current < 60_000) return;
+    if (refreshInFlight.current) return refreshInFlight.current;
+
+    refreshInFlight.current = (async () => {
+        try {
+        const res = await fetch(`${API_BASE}/api/refresh`, {
+            method: 'POST',
+            credentials: 'include',
+        });
+        if (!res.ok) throw new Error('refresh failed');
+        const { token } = await res.json();
+        if (token) {
+            localStorage.setItem('access_token', token);
+            lastRefreshAt.current = Date.now();
+        } else {
+            throw new Error('no token in refresh');
+        }
+        } finally {
+        // always clear the in-flight marker
+        refreshInFlight.current = null;
+        }
+    })();
+
+    return refreshInFlight.current;
+    }
+    // --- end guarded token refresh helpers ---
+
 
     // Unconditional scroll to the last message
     useEffect(() => {
@@ -363,15 +373,17 @@ export default function ChatPage() {
 
     currentWs.onopen = () => {
         setIsWsOpen(true);
+        authFailedRef.current = false;
+        reconnectBackoffRef.current = 1000;
 
         const initialPayload: Record<string, unknown> = {
         message: 'Hello!',
         user_name: userName,
         };
         if (conversationId) {
-        initialPayload.conversation_id = conversationId; // reuse exact convo
+            initialPayload.conversation_id = conversationId; // reuse exact convo
         } else {
-        initialPayload.resume_last = true;               // ask server to resume latest
+            initialPayload.resume_last = true;               // ask server to resume latest
         }
 
         currentWs.send(JSON.stringify(initialPayload));
@@ -413,27 +425,49 @@ export default function ChatPage() {
         }
     };
 
-    currentWs.onclose = async (evt) => {
-        console.log('WebSocket closed.', 'code=', evt.code, 'reason=', evt.reason, 'wasClean=', evt.wasClean);
+    currentWs.onclose = async (ev) => {
+        console.log('WebSocket closed. code=', ev.code, 'reason=', ev.reason, 'wasClean=', ev.wasClean);
         setIsWsOpen(false);
         setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
 
-        // try a refresh on auth-ish closure codes
-        const looksAuthy =
-        evt.code === 1008 || evt.code === 4001 || (evt.reason && /auth|token|credential/i.test(evt.reason));
-        if (looksAuthy) {
-        try {
-            const rr = await fetch(`${API_BASE}/api/refresh`, { method: 'POST', credentials: 'include' });
-            if (rr.ok) {
-            const { token } = await rr.json();
-            if (token) localStorage.setItem('access_token', token);
+
+        // mark closed
+        ws.current = null;
+
+        // If it's an auth-related closure, try a SINGLE forced refresh
+        const AUTHISH = ev.code === 1008 || ev.code === 4001 || ev.code === 4002 || ev.code === 4003;
+        if (AUTHISH && !authFailedRef.current) {
+            try {
+            await refreshTokenIfNeeded(true); // force refresh
+            authFailedRef.current = false;    // success → keep reconnecting
+            reconnectBackoffRef.current = 1000;
+            } catch {
+            // refresh truly failed → STOP reconnecting to avoid loops
+            authFailedRef.current = true;
             }
-        } catch {}
         }
 
-        ws.current = null;
-        setTimeout(() => setWsReconnectNonce(n => n + 1), 1000);
+        if (authFailedRef.current) {
+            console.warn('Auth refresh failed; not auto-reconnecting.');
+            return;
+        }
+
+        // Exponential backoff reconnect
+        const delay = reconnectBackoffRef.current;
+        reconnectBackoffRef.current = Math.min(reconnectBackoffRef.current * 2, 15000);
+        // Don't reconnect while tab is hidden to avoid loops on background tabs
+        if (document.hidden) {
+        const onVisible = () => {
+            document.removeEventListener('visibilitychange', onVisible);
+            setWsReconnectNonce(n => n + 1);
+        };
+        document.addEventListener('visibilitychange', onVisible);
+        return;
+        }
+
+        setTimeout(() => setWsReconnectNonce(n => n + 1), delay);
     };
+
 
     currentWs.onerror = (event: Event) => {
         console.error('WebSocket error:', event);
@@ -449,12 +483,35 @@ export default function ChatPage() {
 
         
 
+    // keep access token fresh while user is signed in
+    const refreshTimerId = useRef<number | null>(null);
+
     useEffect(() => {
-    if (!userToken) return;
-        const id = window.setInterval(() => {
-            refreshTokenIfNeeded();
-        }, 5 * 60 * 1000); // every 5 min
-        return () => { window.clearInterval(id); };
+    if (!userToken) {
+        // clear any existing timer if user logs out
+        if (refreshTimerId.current) {
+        window.clearInterval(refreshTimerId.current);
+        refreshTimerId.current = null;
+        }
+        return;
+    }
+
+    // do an initial (throttled) refresh to extend session
+    refreshTokenIfNeeded().catch(() => {});
+
+    // set interval
+    if (refreshTimerId.current) window.clearInterval(refreshTimerId.current);
+    refreshTimerId.current = window.setInterval(() => {
+        refreshTokenIfNeeded().catch(() => {});
+    }, 5 * 60 * 1000);
+
+    // cleanup
+    return () => {
+        if (refreshTimerId.current) {
+        window.clearInterval(refreshTimerId.current);
+        refreshTimerId.current = null;
+        }
+    };
     }, [userToken]);
 
 
