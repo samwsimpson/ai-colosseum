@@ -40,6 +40,8 @@ const API_BASE =
   (process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '')) ||
   'https://api.aicolosseum.app';
 
+
+
 // Helper: fetch with Authorization header and 1x retry on 401 using /api/refresh
 async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
   // Always build absolute URL against API_BASE
@@ -109,7 +111,7 @@ export default function ChatPage() {
     const chatContainerRef = useRef<HTMLDivElement>(null);
     const chatEndRef = useRef<HTMLDivElement>(null);
     const ws = useRef<WebSocket | null>(null);
-
+    const pendingSends = useRef<Array<Record<string, unknown>>>([]);
     // Tracks reconnect backoff and any pending timer
     const reconnectRef = useRef<{ tries: number; timer: number | null }>({
         tries: 0,
@@ -256,23 +258,37 @@ export default function ChatPage() {
         });
     }, []);
 
-    const handleSubmit = (e: FormEvent) => {
+    const handleSubmit = useCallback((e: React.FormEvent) => {
         e.preventDefault();
-        // Updated condition
-        if (!message.trim() || !ws.current || ws.current.readyState !== WebSocket.OPEN) return;
-        
-        const userMessage = { sender: userName || 'You', model: 'Human User', text: message };
-        setChatHistory(prev => [...prev, userMessage]);
-        
-        // Prepare the payload for the backend with Mistral flag
-        const payload = {
-            message,
-            user_name: userName,
-        };
-        ws.current.send(JSON.stringify(payload));
-        
-        setMessage('');
-    };
+
+        const text = message.trim();
+        if (!text || !userName) return;
+
+        const payload: Record<string, unknown> = { message: text };
+
+        try {
+            const sock = ws.current;
+            const open = sock && sock.readyState === WebSocket.OPEN;
+
+            if (open) {
+            sock!.send(JSON.stringify(payload));
+            } else {
+            // queue until socket is open
+            pendingSends.current.push(payload);
+            // ensure a reconnect attempt is queued if it’s closed
+            if (!sock || sock.readyState === WebSocket.CLOSED) {
+                setWsReconnectNonce((n) => n + 1);
+            }
+            }
+
+            // optimistic UI
+            addMessageToChat({ sender: userName, text });
+            setMessage('');
+        } catch (err) {
+            console.error('Send failed:', err);
+        }
+    }, [message, userName, addMessageToChat]);
+
 
 
 
@@ -400,18 +416,27 @@ export default function ChatPage() {
         authFailedRef.current = false;
         reconnectBackoffRef.current = 1000;
 
+        // --- initial handshake ---
         const initialPayload: Record<string, unknown> = {
-        message: 'Hello!',
-        user_name: userName,
+            message: "Hello!",
+            user_name: userName,
         };
         if (conversationId) {
             initialPayload.conversation_id = conversationId; // reuse exact convo
         } else {
             initialPayload.resume_last = true;               // ask server to resume latest
         }
-
         currentWs.send(JSON.stringify(initialPayload));
+        // --- end handshake ---
+
+        // --- flush any queued messages that were sent while connecting ---
+        while (pendingSends.current.length > 0) {
+            const next = pendingSends.current.shift();
+            if (next) currentWs.send(JSON.stringify(next));
+        }
+        // --- end flush ---
     };
+
 
     currentWs.onmessage = (event: MessageEvent) => {
         let msg: ServerMessage;
@@ -613,7 +638,7 @@ export default function ChatPage() {
         <div className="flex-1 flex flex-col">
         <main
             ref={chatContainerRef}
-            className="flex-1 overflow-y-auto pt-[72px] pb-[100px] bg-gray-900 custom-scrollbar"
+            className="flex-1 overflow-y-auto pt-[72px] pb-[120px] bg-gray-900 custom-scrollbar"
         >
             <div className="max-w-4xl mx-auto flex flex-col space-y-4 md:space-y-6">
             {/* Conditional rendering for the initial message */}
@@ -724,57 +749,61 @@ export default function ChatPage() {
         </main>
 
         {/* INPUT FORM — fixed on mobile, static on desktop so it doesn't cover the sidebar */}
-        <form
-            onSubmit={handleSubmit}
-            className="fixed md:static bottom-0 left-0 right-0 z-10 bg-gray-900 border-t border-gray-800 p-4 md:p-6 shadow-lg"
-        >
-            {loadedSummary && (
-            <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                <div className="flex items-start justify-between gap-3">
-                <div>
-                    <strong>Context loaded</strong> — this chat includes knowledge from earlier sessions.
-                </div>
-                <button
-                    type="button"
-                    className="shrink-0 underline"
-                    onClick={() => setShowSummary((s) => !s)}
-                >
-                    {showSummary ? 'Hide' : 'Show'} summary
-                </button>
+{/* ===== Composer (fixed footer) ===== */}
+<div className="fixed bottom-0 left-0 right-0 z-50 bg-gray-900 border-t border-gray-800">
+  {/* Summary banner (if you have one) can live above the form if you like */}
+  {loadedSummary && (
+    <div className="max-w-4xl mx-auto px-4 pt-3">
+      <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <strong>Context loaded</strong> — this chat includes knowledge from earlier sessions.
+          </div>
+          <button
+            type="button"
+            className="shrink-0 underline"
+            onClick={() => setShowSummary(s => !s)}
+          >
+            {showSummary ? "Hide" : "Show"} summary
+          </button>
+        </div>
+        {showSummary && (
+          <div className="mt-2 whitespace-pre-wrap">{loadedSummary}</div>
+        )}
+      </div>
+    </div>
+  )}
 
-                </div>
-                {showSummary && (
-                <div className="mt-2 whitespace-pre-wrap">{loadedSummary}</div>
-                )}
-            </div>
-            )}
+  <form onSubmit={handleSubmit} className="max-w-4xl mx-auto p-4 md:p-6">
+    <div className="flex gap-4">
+      <input
+        type="text"
+        value={message}
+        onChange={(e) => setMessage(e.target.value)}
+        placeholder="Type your message..."
+        className="flex-grow p-3 rounded-xl border border-gray-700 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200 text-sm md:text-base"
+        // Let users type even while connecting; we'll queue the send
+        disabled={!userName}
+      />
+      <button
+        type="submit"
+        className="px-4 py-2 md:px-6 md:py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 transition-colors duration-200 text-sm"
+        disabled={!userName}
+      >
+        Send
+      </button>
+      <button
+        type="button"
+        onClick={handleResetConversation}
+        className="px-4 py-2 md:px-6 md:py-3 bg-gray-700 text-white font-semibold rounded-xl hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-gray-400 focus:ring-offset-2 focus:ring-offset-gray-900 transition-colors duration-200 text-sm"
+      >
+        Reset conversation
+      </button>
+    </div>
+  </form>
+</div>
+{/* ===== /Composer ===== */}
 
-            <div className="flex gap-4 max-w-4xl mx-auto">
-            <input
-                type="text"
-                value={message}
-                onChange={(e) => setMessage(e.target.value)}
-                placeholder="Type your message..."
-                className="flex-grow p-3 rounded-xl border border-gray-700 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200 text-sm md:text-base"
-                disabled={!isWsOpen || !userName}
-            />
-            <button
-                type="submit"
-                className="px-4 py-2 md:px-6 md:py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 disabled:opacity-50 transition-colors duration-200 text-sm"
-                disabled={!isWsOpen || !userName}
-            >
-                Send
-            </button>
-            <button
-                type="button"
-                onClick={handleResetConversation}
-                className="px-4 py-2 md:px-6 md:py-3 bg-gray-700 text-white font-semibold rounded-xl hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-gray-400 focus:ring-offset-2 focus:ring-offset-gray-900 transition-colors duration-200 text-sm"
-                disabled={!isWsOpen}
-            >
-                Reset conversation
-            </button>
-            </div>
-        </form>
         </div>
     </div>
     );
