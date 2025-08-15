@@ -23,7 +23,6 @@ from google_auth_oauthlib.flow import Flow
 from openai import AsyncOpenAI
 from collections import defaultdict
 from fastapi import Header, HTTPException
-from google.cloud import firestore_async
 
 OPENAI_SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -184,7 +183,7 @@ async def list_conversations(authorization: str = Header(default=None), limit: i
 
     col = db.collection("conversations")
     # newest first
-    q = col.where("user_id", "==", user["id"]).order_by("updated_at", direction=firestore_async.AsyncQuery.DESCENDING).limit(limit)
+    q = col.where("user_id", "==", user["id"]).order_by("updated_at", direction=firestore.Query.DESCENDING).limit(limit)
 
     items = []
     async for doc in q.stream():
