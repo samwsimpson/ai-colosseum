@@ -16,13 +16,12 @@ interface TypingState {
 }
 
 interface ServerMessage {
-  sender?: string;
+  sender?: string | null;
   text?: string;
   typing?: boolean;
-  // include conversation id messages
-  type?: 'ping' | 'pong' | 'conversation_id' | string;
-  id?: string; // used when type === 'conversation_id'
-  summary?: string;       // when type === 'context_summary'
+  type?: 'ping' | 'pong' | 'conversation_id' | 'context_summary' | string;
+  id?: string;
+  summary?: string;
 }
 
 // Past-convo list item returned by the API
@@ -407,6 +406,9 @@ const handleNewConversation = () => {
         setIsWsOpen(false);
 
         const currentWs = socket;
+        const isNonEmptyString = (v: unknown): v is string =>
+        typeof v === 'string' && v.length > 0;
+
 
         // --- Start of the refactored code block ---
         Object.assign(currentWs, {
@@ -444,60 +446,47 @@ const handleNewConversation = () => {
             },
         
             onmessage: (event: MessageEvent) => {
-                let msg: ServerMessage;
-                try { msg = JSON.parse(event.data); }
-                catch { return; }
-        
-                // meta/system messages
-                if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
-                    setConversationId(msg.id);
-                    loadConversations(); // refresh sidebar
-                    return;
-                }
-                if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
-                    setLoadedSummary(msg.summary);
-                    return;
-                }
-                if (msg.type === 'ping' || msg.type === 'pong') return;
-        
-                // typing
-                if (typeof msg.sender === 'string' && typeof msg.typing === 'boolean') {
-                    const sender = msg.sender;
-                    const val = msg.typing;
-                    setIsTyping(prev => {
-                        const next: TypingState = { ...prev };
-                        next[sender] = val;
-                        return next;
-                    });
-                    return;
-                }
+            let msg: ServerMessage;
+            try { msg = JSON.parse(event.data); }
+            catch { return; }
 
-                // normal chat
-                if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
-                    // This inline conditional check will satisfy the compiler.
-                    setIsTyping(prev => {
-                        const next: TypingState = { ...prev };
-                        if (typeof msg.sender === 'string') {
-                            next[msg.sender] = false;
-                        }
-                        return next;
-                    });
-                    addMessageToChat({ sender: msg.sender, text: msg.text });
-                    return;
-                }
-        
-                // normal chat
-                // Explicitly check that msg.sender is a truthy string value before using it as an index.
-                if (typeof msg.sender === 'string' && typeof msg.text === 'string' && msg.sender) {
-                    setIsTyping(prev => {
-                        const next: TypingState = { ...prev };
-                        next[msg.sender] = false;
-                        return next;
-                    });
-                    addMessageToChat({ sender: msg.sender, text: msg.text });
-                    return;
-                }
+            // meta/system messages
+            if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
+                setConversationId(msg.id);
+                loadConversations(); // refresh sidebar
+                return;
+            }
+            if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
+                setLoadedSummary(msg.summary);
+                return;
+            }
+            if (msg.type === 'ping' || msg.type === 'pong') return;
+
+            // normalize once so TS knows it's safe when used
+            const sender = isNonEmptyString(msg.sender) ? msg.sender : null;
+
+            // typing updates
+            if (sender && typeof msg.typing === 'boolean') {
+                setIsTyping(prev => {
+                const next: TypingState = { ...prev };
+                next[sender] = msg.typing;
+                return next;
+                });
+                return;
+            }
+
+            // normal chat message
+            if (sender && typeof msg.text === 'string') {
+                setIsTyping(prev => {
+                const next: TypingState = { ...prev };
+                next[sender] = false;
+                return next;
+                });
+                addMessageToChat({ sender, text: msg.text });
+                return;
+            }
             },
+
         
             onclose: (ev) => {
                 console.log('WebSocket closed. code=', ev.code, 'reason=', ev.reason, 'wasClean=', ev.wasClean);
