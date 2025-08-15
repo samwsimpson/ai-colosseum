@@ -21,6 +21,7 @@ from google.cloud import firestore  # for Query.DESCENDING
 import stripe
 from google_auth_oauthlib.flow import Flow
 from openai import AsyncOpenAI
+from collections import defaultdict
 
 OPENAI_SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -1099,131 +1100,89 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self._user_input_queue: asyncio.Queue[str] = asyncio.Queue()
                 self._assistant_name_set = set(assistant_name_set)
                 self._assistant_name_lower = {n.lower(): n for n in self._assistant_name_set}
+                self._utter_count: dict[str, int] = defaultdict(int)  # count messages per assistant
                 self._greeted_once: set[str] = set()  # track which assistants have already greeted
 
+     
             async def a_receive(
                 self,
                 message,
                 sender=None,
-                request_reply: Optional[bool] = None,
-                silent: Optional[bool] = False,
+                request_reply: bool = False,
+                silent: bool = False,
                 **kwargs,
             ):
-                """
-                Intercept assistant messages before they go to the websocket.
-
-                - Identifies the real assistant speaker using message['name'] when available;
-                otherwise uses a leading "Name:" label in content; otherwise falls back to sender.name.
-                - Drops repeated greetings (per assistant).
-                - Pushes messages into the output queue for the browser.
-                - Records to conversation history via super().a_receive(...).
-                """
-                try:
-                    # ---- extract text & any hint name from the message ----
+                # --- extract text payload ---
+                if isinstance(message, dict):
+                    text = message.get("content") or message.get("text") or ""
+                    hint_name = (message.get("name") or "").strip()
+                elif isinstance(message, str):
+                    text = message
                     hint_name = ""
-                    if isinstance(message, dict):
-                        raw_text = str(message.get("content") or "")
-                        hint_name = (message.get("name") or "").strip()
-                    else:
-                        raw_text = str(message or "")
+                else:
+                    text = str(message)
+                    hint_name = ""
 
-                    text = raw_text.strip()
+                # --- resolve speaker name (sender > name field > "Name:" prefix) ---
+                speaker = None
 
-                    # ---- resolve real speaker name ----
-                    speaker = None
+                # 1) From sender object
+                if sender and getattr(sender, "name", None):
+                    cand = sender.name
+                    if cand in self._assistant_name_set:
+                        speaker = cand
 
-                    # 1) If the model filled message["name"] with one of our assistants (case-insensitive), trust it.
+                # 2) From messages[i].name (case-insensitive)
+                if not speaker and hint_name:
                     hn = hint_name.lower()
                     if hn in self._assistant_name_lower:
                         speaker = self._assistant_name_lower[hn]
 
+                # 3) From leading "Name:" / "Name -" / "Name —"
+                if not speaker:
+                    m = re.match(r'^\s*([A-Za-z0-9_]+)\s*[:\-—]\s*', text)
+                    if m and m.group(1).lower() in self._assistant_name_lower:
+                        speaker = self._assistant_name_lower[m.group(1).lower()]
+                        text = text[m.end():].lstrip()
 
-                    # 2) Leading "Name:" or "Name —" label in the content (and strip it from text).
-                    if speaker is None and text:
-                   
-                        # build a case-insensitive alternation of assistant names
-                        name_alt = "|".join(re.escape(n) for n in sorted(self._assistant_name_set, key=len, reverse=True))
-                        m = re.match(rf"^\s*(?P<n>{name_alt})\s*[:\-—]\s*", text, flags=re.I)
-                        if m:
-                            matched = m.group("n")
-                            # normalize to the canonical casing from our set
-                            for n in self._assistant_name_set:
-                                if n.lower() == matched.lower():
-                                    speaker = n
-                                    break
-                            # strip the label so the UI doesn't show "Claude: ..."
-                            text = text[m.end():].lstrip()
+                # 4) Fallback
+                if not speaker:
+                    speaker = "System"
 
-                    # 3) Fallback to the sender object's .name if it matches an assistant
-                    if speaker is None:
-                        try:
-                            sn = getattr(sender, "name", None)
-                            if isinstance(sn, str) and sn in self._assistant_name_set:
-                                speaker = sn
-                        except Exception:
-                            pass
+                # Never forward manager/system chatter to the UI
+                if speaker.lower() in ("manager", "chat_manager"):
+                    return
 
-                    # Final fallback: ignore manager/system; otherwise call it "Assistant"
-                    if not speaker:
-                        try:
-                            sn = getattr(sender, "name", "") or ""
-                        except Exception:
-                            sn = ""
-                        if sn.lower() in ("chat_manager", "manager", "groupchatmanager"):
-                            # record to history silently; do not send to UI
-                            return await super().a_receive(message, sender, request_reply=False, silent=True, **kwargs)
-                        speaker = "Assistant"  # generic (should rarely happen)
+                # --- robust greeting filter (swallow repeated “Hi Sam, how can I help…” openers) ---
+                compact = re.sub(r'\s+', ' ', (text or "")).strip()
+                is_pure_greeting = False
+                if 0 < len(compact) <= 200:
+                    low = compact.lower()
+                    starts_greet = re.match(r'^(hi|hello|hey|greetings)\b', low) is not None
+                    asks_help   = re.search(r'\b(how (?:can|may) i (?:help|assist)|what can i do for you)\b', low) is not None
+                    # tolerate the name in between, but nothing substantial
+                    is_pure_greeting = starts_greet and asks_help
 
-                    # If this came from the manager, don't show it (already handled above)
-                    if speaker.lower() in ("chat_manager", "manager", "groupchatmanager"):
-                        return await super().a_receive(message, sender, request_reply=False, silent=True, **kwargs)
+                # If this assistant already spoke at least once, drop pure greetings
+                if self._utter_count.get(speaker, 0) > 0 and is_pure_greeting:
+                    return
 
-                    # If nothing usable to show, just record silently
-                    if not text:
-                        return await super().a_receive(message, sender, request_reply=False, silent=True, **kwargs)
+                # Also record the very first pure greeting so later ones get swallowed
+                if is_pure_greeting:
+                    self._greeted_once.add(speaker)
 
-                    # ---- suppress repeat greetings from any assistant ----
-                    low = text.lower()
-                    looks_like_greeting = (
-                        bool(re.match(r"^\s*(hi|hello|hey)\b", low))
-                        or "how can i assist" in low
-                        or "how can i help" in low
-                        or "what can i help" in low
-                        or "how may i assist" in low
-                        or "nice to meet you" in low
-                        or "great to meet you" in low
-                        or "happy to help" in low
-                    )
-                    if looks_like_greeting:
-                        if speaker in self._greeted_once:
-                            # record to history but don't forward another greeting
-                            return await super().a_receive(message, sender, request_reply=False, silent=True, **kwargs)
-                        self._greeted_once.add(speaker)
+                # --- forward to browser ---
+                await self._message_output_queue.put({
+                    "sender": speaker,
+                    "text": text,
+                })
 
-                    # ---- forward to browser (non-blocking, overflow-safe) ----
-                    payload = {"sender": speaker, "text": text}
-                    try:
-                        self._message_output_queue.put_nowait(payload)
-                    except asyncio.QueueFull:
-                        try:
-                            _ = self._message_output_queue.get_nowait()
-                        except Exception:
-                            pass
-                        try:
-                            self._message_output_queue.put_nowait(payload)
-                        except Exception:
-                            pass
+                # bump per-assistant utter count
+                self._utter_count[speaker] = self._utter_count.get(speaker, 0) + 1
 
-                    # record in conversation history but don’t trigger a reply here
-                    return await super().a_receive(message, sender, request_reply=False, silent=True, **kwargs)
+                # (no auto reply from the proxy)
+                return None
 
-                except Exception as e:
-                    # best-effort error forwarding
-                    try:
-                        self._message_output_queue.put_nowait({"sender": "System", "text": f"Error in a_receive: {e}"})
-                    except Exception:
-                        pass
-                    return None
 
             async def a_generate_reply(
                 self,
