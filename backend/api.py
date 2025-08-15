@@ -975,33 +975,45 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     "all agents", "all ais", "you all", "@all"
                 ))
 
-            def _direct_addressees(self, text: str) -> List[str]:
-                """Return [name] if the user clearly directs a message (leading vocative or 'to <name>'), else []."""
-                if not text:
-                    return []
-                t = text.strip()
-                name_map = {n.lower(): n for n in self.assistant_names}
-                if not name_map:
-                    return []
+            def _direct_addressees(self, text: str):
+                """
+                Returns a list of assistant names that the user directly addressed.
+                Much more permissive:
+                - "Name ..."  (no punctuation required)
+                - "@Name", "Name:", "Name —", "Name -", "Name,"
+                - "hey Name", "hi Name", "ok Name" at start
+                - "over to Name", "hand to Name", "pass to Name" anywhere
+                """
+                low = (text or "").lower()
+                addressees = []
 
-               
-                name_alt = "|".join(re.escape(n) for n in name_map.keys())
+                # Accept either self.assistant_names or a cached set
+                names = getattr(self, "assistant_names", None) or list(getattr(self, "_assistant_name_set", [])) or []
+                name_set = {n for n in names}
 
-                # Leading vocative (allow 'hey/hi/hello', optional '@', then a name)
-                m = re.match(rf"^(?:hey|hi|hello)\s+@?(?P<n>{name_alt})\b[:,\s\-—]", t, flags=re.I)
-                if m:
-                    return [name_map[m.group('n').lower()]]
+                # 1) Pure at-start vocative, no punctuation required
+                #    e.g. "mistral where did that come from?"
+                for name in names:
+                    nl = name.lower()
+                    if re.match(rf"^\s*@?{re.escape(nl)}\b", low):
+                        addressees.append(name)
 
-                m = re.match(rf"^@?(?P<n>{name_alt})\b[:,\s\-—]", t, flags=re.I)
-                if m:
-                    return [name_map[m.group('n').lower()]]
+                # 2) Friendly openers at the very beginning: "hey name", "hi name", "ok name"
+                if not addressees:
+                    for name in names:
+                        nl = name.lower()
+                        if re.match(rf"^\s*(?:hey|hi|hello|ok|okay)\s+@?{re.escape(nl)}\b", low):
+                            addressees.append(name)
 
-                # Directed handoff phrases anywhere
-                m = re.search(rf"\b(?:to|over to|hand(?:\s+it)?\s+to)\s+(?P<n>{name_alt})\b", t, flags=re.I)
-                if m:
-                    return [name_map[m.group('n').lower()]]
+                # 3) Handoff phrases anywhere
+                for name in names:
+                    nl = name.lower()
+                    if re.search(rf"(?:over\s+to|hand\s+to|pass(?:\s+it)?\s+to)\s+{re.escape(nl)}\b", low):
+                        if name not in addressees:
+                            addressees.append(name)
 
-                return []
+                return addressees
+
 
             def __call__(self, last_speaker: autogen.Agent, groupchat: autogen.GroupChat) -> autogen.Agent:
                 # If no history at all, start with ChatGPT (or first assistant)
@@ -1086,6 +1098,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self._message_output_queue = message_output_queue
                 self._user_input_queue: asyncio.Queue[str] = asyncio.Queue()
                 self._assistant_name_set = set(assistant_name_set)
+                self._assistant_name_lower = {n.lower(): n for n in self._assistant_name_set}
                 self._greeted_once: set[str] = set()  # track which assistants have already greeted
 
             async def a_receive(
@@ -1119,9 +1132,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # ---- resolve real speaker name ----
                     speaker = None
 
-                    # 1) If the model filled message["name"] with one of our assistants, trust it.
-                    if hint_name in self._assistant_name_set:
-                        speaker = hint_name
+                    # 1) If the model filled message["name"] with one of our assistants (case-insensitive), trust it.
+                    hn = hint_name.lower()
+                    if hn in self._assistant_name_lower:
+                        speaker = self._assistant_name_lower[hn]
+
 
                     # 2) Leading "Name:" or "Name —" label in the content (and strip it from text).
                     if speaker is None and text:
@@ -1279,13 +1294,16 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             )
         })
 
+
+
         groupchat = autogen.GroupChat(
             agents=agents,
             messages=seed_messages,
             max_round=999999,
-            speaker_selection_method=selector,
+            speaker_selection_method=selector,  # <-- use your CustomSpeakerSelector
             allow_repeat_speaker=True,
         )
+
 
         manager = autogen.GroupChatManager(
             groupchat=groupchat,
