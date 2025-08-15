@@ -1108,14 +1108,17 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # --- Squelch repeated ChatGPT greetings ---
                     if sender_name == "ChatGPT":
                         low = cleaned.lower()
+                        # broaden what we consider a greetingy opener
                         looks_like_greeting = (
-                            "how can i assist" in low
+                            bool(re.search(r"^\s*(hi|hello|hey)\b", low))
+                            or "how can i assist" in low
                             or "how can i help" in low
                             or "what can i help" in low
                             or "how may i assist" in low
+                            or "let me know how i can help" in low
                             or "nice to meet you" in low
-                            or "glad to help" in low
-                            or bool(re.search(r"^\s*(hi|hello|hey)\b", low))
+                            or "great to meet you" in low
+                            or "happy to help" in low
                         )
                         if looks_like_greeting:
                             if self._chatgpt_greeted_once:
@@ -1260,6 +1263,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     role = "user"
                 else:
                     role = "system"
+                # Track last assistant who actually spoke; the selector uses this.
+                if role == "assistant":
+                    try:
+                        selector.previous_assistant = selector.agent_by_name.get(sender, selector.previous_assistant)
+                    except Exception:
+                        pass                    
 
                 try:
                     await save_message(conv_ref, role=role, sender=sender, content=text)
