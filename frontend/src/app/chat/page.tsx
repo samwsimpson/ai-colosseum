@@ -474,11 +474,12 @@ const handleNewConversation = () => {
 
                 // normal chat
                 if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
-                    // We create a new local constant that the compiler can trust.
-                    const sender = msg.sender;
+                    // This inline conditional check will satisfy the compiler.
                     setIsTyping(prev => {
                         const next: TypingState = { ...prev };
-                        next[sender as string] = false;
+                        if (typeof msg.sender === 'string') {
+                            next[msg.sender] = false;
+                        }
                         return next;
                     });
                     addMessageToChat({ sender: msg.sender, text: msg.text });
