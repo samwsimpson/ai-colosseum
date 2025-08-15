@@ -1207,8 +1207,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     if targets:
                         return self.agent_by_name[targets[0]]
 
-                    if self.previous_assistant is not None:
-                        return self.previous_assistant
+                    import random
+                    return random.choice(self.assistant_agents) if self.assistant_agents else self.agent_by_name[self.user_name]
 
                     return self.assistant_agents[0] if self.assistant_agents else self.agent_by_name[self.user_name]
 
@@ -1384,7 +1384,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     except Exception:
                         pass
                     # --- END NEW ADDITION ---
-
+                else:
+                    # NEW: if we suppressed/stripped the text, still clear any typing bubble
+                    try:
+                        self._message_output_queue.put_nowait({"sender": speaker, "typing": False, "text": ""})
+                    except Exception:
+                        pass
                 # Keep base behavior for Autogen bookkeeping
                 return await super().a_receive(message, sender=sender, request_reply=request_reply, silent=silent)
 

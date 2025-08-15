@@ -495,7 +495,7 @@ const handleNewConversation = () => {
         
                 // --- initial handshake ---
                 const initialPayload: Record<string, unknown> = {
-                    message: "Hello!",
+                    
                     user_name: userName,
                 };
                 if (conversationId) {
