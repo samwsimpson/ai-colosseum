@@ -474,6 +474,7 @@ const handleNewConversation = () => {
 
                 // normal chat
                 if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
+                    // By creating a new constant, we give the compiler a variable it can trust.
                     const sender = msg.sender;
                     setIsTyping(prev => {
                         const next: TypingState = { ...prev };
