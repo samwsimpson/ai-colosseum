@@ -1261,6 +1261,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         r'(?:how(?:\'| i)s (?:your )?day|how (?:are|r) you|'
                         r'(?:how can i )?(?:help|assist) you|nice to meet you|great to meet you|'
                         r'hope (?:you(?:\'re)? )?(?:doing )?(?:well|good))'
+                        r'(?:how (?:can|may) i (?:help|assist)|'
+                        r'what can i do for you|'
+                        r'how can i support you(?: today)?|'
+                        r'what can i help you with(?: today)?|'
+                        r'how can i assist you(?: today)?|'
+                        r'how may i assist you(?: today)?|'
+                        r'let me know if i can help|'
+                        r'how are you(?: doing)?(?: today)?|'
+                        r'hope (?:you(?:\'re)? )?(?:doing )?(?:well|good))'
                     )
 
                     looks_open = bool(re.match(greet_start, low))
@@ -1274,7 +1283,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         return (False, t)
 
                     # try to remove the greeting prefix + filler punctuation
-                    pat = rf'{greet_start}[\s,!\.-:]*?(?:{greet_phrases})?[\s,!\.-:]*'
+                    name_token = re.escape(uname)
+                    pat = (
+                        rf'{greet_start}'                 # "hello|hi|hey|good morning|{uname}"
+                        rf'(?:\s*,?\s*{name_token}\b)?'   # optional "Sam" or "Sam Simpson"
+                        r'[\s,!\.-:]*'                    # filler punctuation/space
+                        rf'(?:{greet_phrases})?'          # optional "how can I help/assist..."
+                        r'[\s,!\.-:]*'                    # trailing punctuation/space
+                    )
                     stripped = re.sub(pat, '', t, flags=re.IGNORECASE).strip()
                     return (True, stripped)
 
