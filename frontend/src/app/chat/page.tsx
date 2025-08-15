@@ -461,10 +461,23 @@ const handleNewConversation = () => {
                 if (msg.type === 'ping' || msg.type === 'pong') return;
         
                 // typing
-                if (typeof msg.sender === 'string' && typeof msg.text === 'string' && msg.sender) {
+                if (typeof msg.sender === 'string' && typeof msg.typing === 'boolean') {
+                    const sender = msg.sender;
+                    const val = msg.typing;
                     setIsTyping(prev => {
                         const next: TypingState = { ...prev };
-                        next[msg.sender as string] = false;
+                        next[sender] = val;
+                        return next;
+                    });
+                    return;
+                }
+
+                // normal chat
+                if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
+                    const sender = msg.sender;
+                    setIsTyping(prev => {
+                        const next: TypingState = { ...prev };
+                        next[sender] = false;
                         return next;
                     });
                     addMessageToChat({ sender: msg.sender, text: msg.text });
