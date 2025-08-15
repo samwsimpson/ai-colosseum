@@ -938,19 +938,67 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         # ---- agent classes ----
         class WebSocketAssistantAgent(autogen.AssistantAgent):
-            def __init__(self, *args, message_output_queue: asyncio.Queue, **kwargs):
+            def __init__(
+                self,
+                *args,
+                message_output_queue: asyncio.Queue,
+                proxy_for_forward: "WebSocketUserProxyAgent",
+                **kwargs
+            ):
                 super().__init__(*args, **kwargs)
                 self._message_output_queue = message_output_queue
+                # <-- keep a handle to the user proxy so we can forward replies
+                self._proxy_for_forward = proxy_for_forward
 
             async def a_send_typing_indicator(self, is_typing: bool):
-                queue_send_nowait({"sender": self.name, "typing": is_typing, "text": ""})
+                # (keep your typing indicators as-is)
+                try:
+                    # using the existing helper to enqueue a typing event
+                    await asyncio.get_running_loop().run_in_executor(
+                        None, lambda: None
+                    )  # noop; just ensures we're in async context
+                finally:
+                    # your queue helper already handles backpressure, we reuse it:
+                    try:
+                        # this uses the existing closure queue_send_nowait
+                        queue_send_nowait({"sender": self.name, "typing": is_typing, "text": ""})
+                    except Exception:
+                        pass
 
             async def a_generate_reply(self, messages=None, sender=None, **kwargs):
+                # show "is typing"
                 await self.a_send_typing_indicator(True)
                 try:
-                    return await super().a_generate_reply(messages=messages, sender=sender, **kwargs)
+                    # let the model produce the reply
+                    result = await super().a_generate_reply(messages=messages, sender=sender, **kwargs)
+
+                    # normalize to a plain string for forwarding through the proxy
+                    if isinstance(result, dict):
+                        out_text = (result.get("content") or result.get("text") or "").strip()
+                    elif isinstance(result, str):
+                        out_text = result.strip()
+                    else:
+                        out_text = str(result).strip()
+
+                    if out_text:
+                        # Forward THROUGH the user proxy so your greeting/dup filters run
+                        # (this is what ultimately writes to message_output_queue)
+                        try:
+                            await self._proxy_for_forward.a_receive(
+                                {"content": out_text, "name": self.name},
+                                sender=self,
+                                request_reply=False,
+                                silent=True,
+                            )
+                        except Exception as e:
+                            print(f"[Assistant forward -> proxy] error: {e}")
+
+                    # return the original result to the manager
+                    return result
                 finally:
+                    # stop "is typing"
                     await self.a_send_typing_indicator(False)
+
 
         class CustomSpeakerSelector:
             """
@@ -1275,12 +1323,36 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             code_execution_config={"use_docker": False},
             is_termination_msg=lambda x: isinstance(x, dict) and x.get("content", "").endswith("TERMINATE")
         )
-
+     
         agents = [user_proxy]
-        agents.append(WebSocketAssistantAgent("ChatGPT", llm_config=chatgpt_llm_config, system_message=make_agent_system("ChatGPT"), message_output_queue=message_output_queue))
-        agents.append(WebSocketAssistantAgent("Claude",  llm_config=claude_llm_config,  system_message=make_agent_system("Claude"),  message_output_queue=message_output_queue))
-        agents.append(WebSocketAssistantAgent("Gemini",  llm_config=gemini_llm_config,  system_message=make_agent_system("Gemini"),  message_output_queue=message_output_queue))
-        agents.append(WebSocketAssistantAgent("Mistral", llm_config=mistral_llm_config, system_message=make_agent_system("Mistral"), message_output_queue=message_output_queue))
+        agents.append(WebSocketAssistantAgent(
+            "ChatGPT",
+            llm_config=chatgpt_llm_config,
+            system_message=make_agent_system("ChatGPT"),
+            message_output_queue=message_output_queue,
+            proxy_for_forward=user_proxy,
+        ))
+        agents.append(WebSocketAssistantAgent(
+            "Claude",
+            llm_config=claude_llm_config,
+            system_message=make_agent_system("Claude"),
+            message_output_queue=message_output_queue,
+            proxy_for_forward=user_proxy,
+        ))
+        agents.append(WebSocketAssistantAgent(
+            "Gemini",
+            llm_config=gemini_llm_config,
+            system_message=make_agent_system("Gemini"),
+            message_output_queue=message_output_queue,
+            proxy_for_forward=user_proxy,
+        ))
+        agents.append(WebSocketAssistantAgent(
+            "Mistral",
+            llm_config=mistral_llm_config,
+            system_message=make_agent_system("Mistral"),
+            message_output_queue=message_output_queue,
+            proxy_for_forward=user_proxy,
+        ))
 
         print("AGENTS IN GROUPCHAT:")
         for a in agents:
