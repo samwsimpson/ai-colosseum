@@ -474,11 +474,11 @@ const handleNewConversation = () => {
 
                 // normal chat
                 if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
-                    // By creating a new constant, we give the compiler a variable it can trust.
+                    // We create a new local constant that the compiler can trust.
                     const sender = msg.sender;
                     setIsTyping(prev => {
                         const next: TypingState = { ...prev };
-                        next[sender] = false;
+                        next[sender as string] = false;
                         return next;
                     });
                     addMessageToChat({ sender: msg.sender, text: msg.text });
