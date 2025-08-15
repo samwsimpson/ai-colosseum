@@ -74,6 +74,28 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
 
 
 export default function ChatPage() {
+    type AgentName = 'ChatGPT' | 'Claude' | 'Gemini' | 'Mistral';
+    const ALLOWED_AGENTS: AgentName[] = ['ChatGPT', 'Claude', 'Gemini', 'Mistral'];
+
+    const typingTimersRef = useRef<Partial<Record<AgentName, number>>>({});
+    const clearTypingTimer = (agent: AgentName) => {
+    const id = typingTimersRef.current[agent];
+    if (typeof id === 'number') {
+        window.clearTimeout(id);
+        delete typingTimersRef.current[agent];
+    }
+    };
+    const setTypingWithTTL = (agent: AgentName, value: boolean, ttlMs = 6000) => {
+    setIsTyping(prev => ({ ...prev, [agent]: value }));
+    clearTypingTimer(agent);
+    if (value) {
+        const id = window.setTimeout(() => {
+        setIsTyping(prev => ({ ...prev, [agent]: false }));
+        delete typingTimersRef.current[agent];
+        }, ttlMs);
+        typingTimersRef.current[agent] = id;
+    }
+    }
     const { userName, userToken } = useUser();
     const router = useRouter();
     const pathname = usePathname();
@@ -261,6 +283,10 @@ export default function ChatPage() {
         const text = message.trim();
         if (!text || !userName) return;
 
+        Object.values(typingTimersRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+        typingTimersRef.current = {};
+        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+
         const payload: Record<string, unknown> = { message: text };
 
         try {
@@ -268,7 +294,7 @@ export default function ChatPage() {
             const open = sock && sock.readyState === WebSocket.OPEN;
 
             if (open) {
-            sock!.send(JSON.stringify(payload));
+                sock!.send(JSON.stringify(payload));
             } else {
             // queue until socket is open
             pendingSends.current.push(payload);
@@ -461,33 +487,27 @@ const handleNewConversation = () => {
 
             // normalize once so TS knows it's safe when used
             const sender = isNonEmptyString(msg.sender) ? msg.sender : null;
-
+    
             // typing updates
-            if (sender && typeof msg.typing === 'boolean') {
-                setIsTyping(prev => {
-                const next: TypingState = { ...prev };
-                const val: boolean = msg.typing === true; // narrow to boolean
-                next[sender] = val;
-                return next;
-                });
-                return;
+            if (sender && typeof msg.typing === 'boolean' && ALLOWED_AGENTS.includes(sender as AgentName)) {
+            setTypingWithTTL(sender as AgentName, msg.typing === true);
+            return;
             }
 
             // normal chat message
-            if (sender && typeof msg.text === 'string') {
-                setIsTyping(prev => {
-                const next: TypingState = { ...prev };
-                next[sender] = false;
-                return next;
-                });
-                addMessageToChat({ sender, text: msg.text });
-                return;
+            if (sender && typeof msg.text === 'string' && ALLOWED_AGENTS.includes(sender as AgentName)) {
+            setTypingWithTTL(sender as AgentName, false); // clear typing on message
+            addMessageToChat({ sender, text: msg.text });
+            return;
             }
             },
 
         
             onclose: (ev: CloseEvent) => {
                 console.log('WebSocket closed. code=', ev.code, 'reason=', ev.reason, 'wasClean=', ev.wasClean);
+                Object.values(typingTimersRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+                typingTimersRef.current = {};
+
                 setIsWsOpen(false);
                 setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
         
@@ -512,6 +532,9 @@ const handleNewConversation = () => {
         
             onerror: (event: Event) => {
                 console.error('WebSocket error:', event);
+                Object.values(typingTimersRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+                typingTimersRef.current = {};
+                setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false }); // add this
                 setIsWsOpen(false);
             }
         });
