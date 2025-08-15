@@ -444,8 +444,11 @@ const handleNewConversation = () => {
 
     currentWs.onmessage = (event: MessageEvent) => {
         let msg: ServerMessage;
-        try { msg = JSON.parse(event.data); }
-        catch { return; }
+        try {
+            msg = JSON.parse(event.data);
+        } catch {
+            return;
+        }
 
         // meta/system messages
         if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
@@ -473,6 +476,19 @@ const handleNewConversation = () => {
             });
             return;
         }
+
+        // normal chat
+        // Explicitly check that msg.sender is a truthy string value before using it as an index.
+        if (typeof msg.sender === 'string' && typeof msg.text === 'string' && msg.sender) {
+            setIsTyping(prev => {
+                const next: TypingState = { ...prev };
+                next[msg.sender] = false;
+                return next;
+            });
+            addMessageToChat({ sender: msg.sender, text: msg.text });
+            return;
+        }
+    };
 
         // normal chat
         // This `if` statement already confirms msg.sender is a string
