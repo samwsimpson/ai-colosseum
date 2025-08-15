@@ -469,7 +469,8 @@ const handleNewConversation = () => {
             if (sender && typeof msg.typing === 'boolean') {
                 setIsTyping(prev => {
                 const next: TypingState = { ...prev };
-                next[sender] = msg.typing;
+                nconst val: boolean = msg.typing === true; // narrow to boolean
+                next[sender] = val;
                 return next;
                 });
                 return;
