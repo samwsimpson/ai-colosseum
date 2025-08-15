@@ -984,7 +984,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 if not name_map:
                     return []
 
-                import re
+               
                 name_alt = "|".join(re.escape(n) for n in name_map.keys())
 
                 # Leading vocative (allow 'hey/hi/hello', optional '@', then a name)
@@ -1125,7 +1125,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                     # 2) Leading "Name:" or "Name —" label in the content (and strip it from text).
                     if speaker is None and text:
-                        import re
+                   
                         # build a case-insensitive alternation of assistant names
                         name_alt = "|".join(re.escape(n) for n in sorted(self._assistant_name_set, key=len, reverse=True))
                         m = re.match(rf"^\s*(?P<n>{name_alt})\s*[:\-—]\s*", text, flags=re.I)
