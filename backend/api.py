@@ -969,6 +969,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self.previous_assistant: "Optional[autogen.Agent]" = None
                 self.multi = {"active": False, "queue": []}
 
+            def note_speaker(self, name: str) -> None:
+                """Let the proxy tell us which assistant just spoke."""
+                if name in self.assistant_names:
+                    self.previous_assistant = self.agent_by_name.get(name, self.previous_assistant)
+
             def _broadcast_requested(self, text: str) -> bool:
                 low = (text or "").lower()
                 return any(k in low for k in (
@@ -1101,9 +1106,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self._assistant_name_set = set(assistant_name_set)
                 self._assistant_name_lower = {n.lower(): n for n in self._assistant_name_set}
                 self._utter_count: dict[str, int] = defaultdict(int)  # count messages per assistant
-                self._greeted_once: set[str] = set()  # track which assistants have already greeted
+                self._greeted_once: set[str] = set()  # track which assistants have already greeted                
+                self._last_text_by_sender: dict[str, str] = {}            # to drop exact repeats
+                self._last_ai_speaker: str | None = None                  # who spoke last (AI)
+                self._selector = None                                     # set in attach_selector()
+                self._any_ai_ever: bool = False  # once any assistant speaks, drop pure greetings thereafter
 
-     
+            def attach_selector(self, selector) -> None:
+                self._selector = selector     
+                               
             async def a_receive(
                 self,
                 message,
@@ -1112,7 +1123,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 silent: bool = False,
                 **kwargs,
             ):
-                # --- extract text payload ---
+                # -------- extract text + hint name --------
                 if isinstance(message, dict):
                     text = message.get("content") or message.get("text") or ""
                     hint_name = (message.get("name") or "").strip()
@@ -1123,65 +1134,119 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     text = str(message)
                     hint_name = ""
 
-                # --- resolve speaker name (sender > name field > "Name:" prefix) ---
+                # -------- resolve assistant name ----------
                 speaker = None
+                if sender is not None:
+                    cand = getattr(sender, "name", None)
+                    if isinstance(cand, str) and cand.strip():
+                        speaker = cand.strip()
 
-                # 1) From sender object
-                if sender and getattr(sender, "name", None):
-                    cand = sender.name
-                    if cand in self._assistant_name_set:
-                        speaker = cand
-
-                # 2) From messages[i].name (case-insensitive)
                 if not speaker and hint_name:
-                    hn = hint_name.lower()
-                    if hn in self._assistant_name_lower:
-                        speaker = self._assistant_name_lower[hn]
+                    hn = hint_name.strip()
+                    speaker = self._assistant_name_lower.get(hn.lower(), hn)
 
-                # 3) From leading "Name:" / "Name -" / "Name —"
                 if not speaker:
                     m = re.match(r'^\s*([A-Za-z0-9_]+)\s*[:\-—]\s*', text)
-                    if m and m.group(1).lower() in self._assistant_name_lower:
-                        speaker = self._assistant_name_lower[m.group(1).lower()]
+                    if m:
+                        candidate = m.group(1).strip()
+                        speaker = self._assistant_name_lower.get(candidate.lower(), candidate)
                         text = text[m.end():].lstrip()
 
-                # 4) Fallback
                 if not speaker:
                     speaker = "System"
 
-                # Never forward manager/system chatter to the UI
+                # never forward manager/system chatter
                 if speaker.lower() in ("manager", "chat_manager"):
                     return
 
-                # --- robust greeting filter (swallow repeated “Hi Sam, how can I help…” openers) ---
+                # -------- greeting / duplicate filters -------------
+                original_text = text
                 compact = re.sub(r'\s+', ' ', (text or "")).strip()
-                is_pure_greeting = False
-                if 0 < len(compact) <= 200:
-                    low = compact.lower()
-                    starts_greet = re.match(r'^(hi|hello|hey|greetings)\b', low) is not None
-                    asks_help   = re.search(r'\b(how (?:can|may) i (?:help|assist)|what can i do for you)\b', low) is not None
-                    # tolerate the name in between, but nothing substantial
-                    is_pure_greeting = starts_greet and asks_help
+                low = compact.lower()
 
-                # If this assistant already spoke at least once, drop pure greetings
-                if self._utter_count.get(speaker, 0) > 0 and is_pure_greeting:
-                    return
+                def is_pure_greeting(s: str) -> bool:
+                    """True if the whole message is basically a greeting/help opener and nothing else."""
+                    if len(s) <= 320:
+                        if re.match(r'^\s*(hi|hello|hey)\b', s):
+                            # Allow optional name & punctuation and maybe a single short follow-up like "good to meet you"
+                            # but treat as greeting if there’s no substantive sentence after.
+                            tail = re.sub(r'^\s*(hi|hello|hey)\b[^.!?\n]*[.!?\n]*\s*', '', s, flags=re.IGNORECASE)
+                            # If the remaining part is just a generic help-opener, still “pure greeting”
+                            if not tail or re.match(r'^\s*$', tail) or re.match(r'^\s*(how\s+(?:can|may)\s+i\s+(?:help|assist)\s+you(?:\s+today)?\??)\s*$', tail):
+                                return True
+                        if re.search(r'\bhow\s+(?:can|may)\s+i\s+(?:help|assist)\s+you(?:\s+today)?\b', s):
+                            tail = re.sub(
+                                r'^\s*(how\s+(?:can|may)\s+i\s+(?:help|assist)\s+you(?:\s+today)?\??)\s*',
+                                '',
+                                s,
+                                flags=re.IGNORECASE
+                            )
+                            if not tail.strip():
+                                return True
+                    return False
 
-                # Also record the very first pure greeting so later ones get swallowed
-                if is_pure_greeting:
-                    self._greeted_once.add(speaker)
+                # (A) Per-assistant greeting gate:
+                #     allow at most ONE greeting line from each assistant per websocket session.
+                if speaker in self._assistant_name_set and is_pure_greeting(low):
+                    if speaker in self._greeted_once:
+                        return        # drop repeated greeting entirely
+                    else:
+                        self._greeted_once.add(speaker)
+                        # If you prefer to never show greetings at all, uncomment the next line:
+                        # return
 
-                # --- forward to browser ---
-                await self._message_output_queue.put({
-                    "sender": speaker,
-                    "text": text,
-                })
+                # (B) After an assistant has already spoken at least once,
+                #     strip any leading salutation so follow-ups don’t start with “Hi Sam...”
+                if speaker in self._assistant_name_set and self._utter_count.get(speaker, 0) >= 1:
+                    # remove one leading "Hi/Hello/Hey ..." sentence
+                    text = re.sub(
+                        r'^\s*(?:hi|hello|hey)\b[^\.\n!?]*[\.!\?]\s*',
+                        '',
+                        text,
+                        count=1,
+                        flags=re.IGNORECASE
+                    )
+                    # and remove leading "How can I help/assist you (today)?" if present
+                    text = re.sub(
+                        r'^\s*how\s+(?:can|may)\s+i\s+(?:help|assist)\s+you(?:\s+today)?\??\s*',
+                        '',
+                        text,
+                        flags=re.IGNORECASE
+                    )
+                    compact = re.sub(r'\s+', ' ', text).strip()
+                    if compact == "":
+                        return  # nothing useful remains after stripping
 
-                # bump per-assistant utter count
+                # (C) Drop exact duplicates from the same speaker
+                compact = re.sub(r'\s+', ' ', (text or "")).strip()
+                if self._utter_count.get(speaker, 0) > 0:
+                    if self._last_text_by_sender.get(speaker) == compact:
+                        return
+
+                # -------- forward to browser --------------
+                await self._message_output_queue.put({"sender": speaker, "text": text})
+
+                # remember last utterance + counts + last speaker
+                self._last_text_by_sender[speaker] = compact
                 self._utter_count[speaker] = self._utter_count.get(speaker, 0) + 1
 
-                # (no auto reply from the proxy)
+                if speaker in self._assistant_name_set:
+                    # mark that at least one AI has spoken in this session
+                    self._any_ai_ever = True
+                    # update "last AI speaker" only if this wasn’t just a pure greeting
+                    if not is_pure_greeting(low):
+                        self._last_ai_speaker = speaker
+
+                # let the selector know who spoke (so “no addressee” → continue with last speaker)
+                if self._selector and hasattr(self._selector, "note_speaker"):
+                    try:
+                        self._selector.note_speaker(speaker)
+                    except Exception:
+                        pass
+
                 return None
+
+
 
 
             async def a_generate_reply(
@@ -1225,6 +1290,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             return
 
         selector = CustomSpeakerSelector(agents, user_name=safe_user_name)
+        user_proxy.attach_selector(selector)
 
         # --- Seed messages: summary (if any) + memory primer and group rules ---
         seed_messages = []
