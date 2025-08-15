@@ -977,33 +977,38 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     "all agents", "all ais", "you all", "@all"
                 ])
 
-            def _direct_addressees(self, text: str):
+            def _direct_addressees(self, text: str) -> List[str]:
+                """Return the single addressee if the user clearly directs a message to an assistant
+                (leading vocative like 'Claude, …' or explicit handoff 'to Claude'). Otherwise [].
+                """
+                if not text:
+                    return []
+
                 import re
-                low = text.lower()
-                addressees = []
+                t = text.strip()
+                name_map = {n.lower(): n for n in self.assistant_names or []}
+                if not name_map:
+                    return []
 
-                # At-start vocative: "Claude,", "Gemini:", "@Mistral —"
-                for name in self.assistant_names:
-                    nl = name.lower()
-                    if re.search(rf'^\s*@?{re.escape(nl)}\b\s*[:,\-—]?', low):
-                        addressees.append(name)
+                name_alt = "|".join(re.escape(n) for n in name_map.keys())
 
-                # Handoff patterns anywhere
-                for name in self.assistant_names:
-                    nl = name.lower()
-                    if re.search(rf'(?:over\s+to|hand\s+to|pass(?:\s+it)?\s+to)\s+{re.escape(nl)}\b', low):
-                        if name not in addressees:
-                            addressees.append(name)
+                # Leading vocative (allow 'hey/hi/hello', optional '@', then a name)
+                m = re.match(rf"^(?:hey|hi|hello)\s+@?(?P<n>{name_alt})\b[:,\s\-—]", t, flags=re.I)
+                if m:
+                    return [name_map[m.group('n').lower()]]
 
-                # Requesty vocatives near start
-                req = r'(?:would you|can you|please|your (?:thoughts|take)|mind|could you)'
-                for name in self.assistant_names:
-                    nl = name.lower()
-                    if re.search(rf'^\s*@?{re.escape(nl)}\b.*\b{req}\b', low):
-                        if name not in addressees:
-                            addressees.append(name)
+                m = re.match(rf"^@?(?P<n>{name_alt})\b[:,\s\-—]", t, flags=re.I)
+                if m:
+                    return [name_map[m.group('n').lower()]]
 
-                return addressees
+                # Directed handoff phrases anywhere
+                m = re.search(rf"\b(?:to|over to|hand(?:\s+it)?\s+to)\s+(?P<n>{name_alt})\b", t, flags=re.I)
+                if m:
+                    return [name_map[m.group('n').lower()]]
+
+                return []
+
+
 
             def __call__(self, last_speaker: autogen.Agent, groupchat: autogen.GroupChat) -> autogen.Agent:
                 # Guard: if no meaningful history, start with ChatGPT by default
@@ -1071,30 +1076,41 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 return self.agent_by_name[self.user_name]
 
         class WebSocketUserProxyAgent(autogen.UserProxyAgent):
+            """
+            User proxy that:
+            - forwards every visible message to the browser
+            - suppresses repeated ChatGPT greeting spam
+            - lets us inject user text asynchronously
+            """
             def __init__(self, *args, message_output_queue: asyncio.Queue, **kwargs):
                 super().__init__(*args, **kwargs)
-                self._user_input_queue = asyncio.Queue()
                 self._message_output_queue = message_output_queue
+                self._user_input_queue: asyncio.Queue[str] = asyncio.Queue()
+                self._chatgpt_greeted_once = False  # used to squelch repeat greeting
 
-            async def a_receive(self, message, sender, request_reply: bool = True, silent: bool = False):
-                # Normalize incoming
+            async def a_receive(
+                self,
+                message,
+                sender,
+                request_reply: bool = True,
+                silent: bool = False,
+            ):
+                # Normalize
                 if isinstance(message, dict):
-                    content = message.get("content", "")
+                    raw_content = message.get("content", "")
                     incoming_name = message.get("name") or message.get("sender")
                 elif isinstance(message, str):
-                    content = message
+                    raw_content = message
                     incoming_name = None
                 else:
                     return None
 
-                # Strip Autogen termination trailers etc.
-                cleaned = re.sub(r'(TERMINATE|Task Completed\.)[\s\S]*', '', content).strip()
-
-                # If there's nothing meaningful, do NOT advance the turn
+                # Trim boilerplate terminators/whitespace
+                cleaned = re.sub(r"(TERMINATE|Task Completed\.)[\s\S]*", "", str(raw_content)).strip()
                 if not cleaned:
                     return None
 
-                # Choose a display name that hides the manager
+                # Choose a display sender (hide manager aliases)
                 sender_name = None
                 if sender is not None and getattr(sender, "name", None):
                     if sender.name.lower() not in ("chat_manager", "groupchat_manager"):
@@ -1103,26 +1119,61 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     sender_name = str(incoming_name).strip()
                 if not sender_name:
                     sender_name = "System"
+                             
+                # --- Squelch repeated ChatGPT greeting (generic, user-agnostic)
+                if sender_name == "ChatGPT":
+                    low = cleaned.lower()
+                    # treat short “hello / how can I help” style openers as greetings
+                    looks_like_greeting = (
+                        bool(re.search(r"\b(hi|hello|hey)\b", low))
+                        or "how can i assist" in low
+                        or "how can i help" in low
+                        or "nice to meet you" in low
+                    )
 
-                # Push to the frontend
-                queue_send_nowait({"sender": sender_name, "text": cleaned})
+                    if looks_like_greeting:
+                        if self._chatgpt_greeted_once:
+                            # drop repeat greeting
+                            return None
+                        # allow exactly one greeting per conversation
+                        self._chatgpt_greeted_once = True
+                # --- End squelch
 
-                # Persist in Autogen's history so other agents can see it
+                # Forward to browser
+                try:
+                    self._message_output_queue.put_nowait({"sender": sender_name, "text": cleaned})
+                except asyncio.QueueFull:
+                    try:
+                        _ = self._message_output_queue.get_nowait()
+                    except Exception:
+                        pass
+                    try:
+                        self._message_output_queue.put_nowait({"sender": sender_name, "text": cleaned})
+                    except Exception:
+                        pass
+
+                # Record in conversation history but don’t trigger a reply here
                 msg_for_history = {**message, "content": cleaned} if isinstance(message, dict) else cleaned
                 return await super().a_receive(
                     msg_for_history,
                     sender,
-                    request_reply=False,  # don't trigger a reply; just record it
-                    silent=True            # no extra echoes
+                    request_reply=False,
+                    silent=True,
                 )
 
-            async def a_generate_reply(self, messages: List[Dict[str, Any]] = None, sender: autogen.ConversableAgent = None, **kwargs) -> Union[str, Dict, None]:
+            async def a_generate_reply(
+                self,
+                messages: List[Dict[str, Any]] | None = None,
+                sender: autogen.ConversableAgent | None = None,
+                **kwargs,
+            ) -> Union[str, Dict, None]:
+                # Wait for next user input injected from the websocket handler
                 new_user_message = await self._user_input_queue.get()
                 return new_user_message
 
             async def a_inject_user_message(self, message: str):
                 await self._user_input_queue.put(message)
-
+        
 
         # ---- build roster ----
         user_proxy = WebSocketUserProxyAgent(
@@ -1287,7 +1338,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             try:
                 while True:
                     await asyncio.sleep(20)
-                    await ws.send_json({"sender": "System", "type": "ping"})
+                    await ws.send_json({"sender": "System", "type": "server_ping"})
             except WebSocketDisconnect as e:
                 print(f"keepalive_task: client disconnected (code={getattr(e, 'code', 'unknown')})")
             except Exception as e:
