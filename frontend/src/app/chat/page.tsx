@@ -449,13 +449,13 @@ const handleNewConversation = () => {
 
         // meta/system messages
         if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
-        setConversationId(msg.id);
-        loadConversations(); // refresh sidebar
-        return;
+            setConversationId(msg.id);
+            loadConversations(); // refresh sidebar
+            return;
         }
         if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
-        setLoadedSummary(msg.summary);
-        return;
+            setLoadedSummary(msg.summary);
+            return;
         }
         if (msg.type === 'ping' || msg.type === 'pong') return;
 
@@ -465,7 +465,10 @@ const handleNewConversation = () => {
             const val = msg.typing;
             setIsTyping(prev => {
                 const next: TypingState = { ...prev };
-                next[key] = val;
+                // Ensure key is a string before using it
+                if (key) {
+                    next[key] = val;
+                }
                 return next;
             });
             return;
@@ -473,19 +476,18 @@ const handleNewConversation = () => {
 
         // normal chat
         if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
-            // --- THIS IS THE KEY CHANGE ---
-            // Immediately set typing to false for this sender when a message arrives
-            setIsTyping(prev => {
-                const next: TypingState = { ...prev };
-                next[msg.sender] = false;
-                return next;
-            });
-            // --- END OF KEY CHANGE ---
+            // Ensure msg.sender is a string before using it
+            if (msg.sender) {
+                setIsTyping(prev => {
+                    const next: TypingState = { ...prev };
+                    next[msg.sender] = false;
+                    return next;
+                });
+            }
             addMessageToChat({ sender: msg.sender, text: msg.text });
             return;
         }
     };
-
     currentWs.onclose = (ev) => {
         console.log('WebSocket closed. code=', ev.code, 'reason=', ev.reason, 'wasClean=', ev.wasClean);
         setIsWsOpen(false);
