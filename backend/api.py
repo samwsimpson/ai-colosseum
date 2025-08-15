@@ -11,7 +11,7 @@ import os
 import autogen
 import asyncio
 import re
-from typing import List, Dict, Any, Union
+from typing import List, Dict, Any, Union, Optional
 import jwt as pyjwt
 from datetime import datetime, timedelta, timezone
 from google.auth.transport import requests as google_requests
@@ -953,43 +953,38 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         class CustomSpeakerSelector:
             """
-            - If an assistant directly addresses another assistant by name, the addressee replies next.
-            - If the user replies without naming someone, route to the last assistant who spoke.
-            - Mentions that are not direct addresses do not trigger a reply.
-            - If the user says 'everyone'/'all of you', enable a one-pass multi-agent reply (each assistant once).
-            - Basic loop detection hands control back to the user.
+            - If the user addresses an assistant by name (leading vocative like 'Claude,' or 'to Claude'), that assistant replies.
+            - If the user gives no name, the last assistant who spoke replies.
+            - If an assistant clearly hands off to another assistant, the addressee replies next.
+            - If user asks 'everyone'/'you all', run a one-pass round (each assistant once), then hand control back to the user.
             """
-            def __init__(self, agents, user_name):
-                self.assistant_agents = [a for a in agents if a.name not in [user_name, "System"]]
-                self.assistant_names = [a.name for a in self.assistant_agents]
-                self.agent_by_name = {a.name: a for a in agents}
-                self.user_name = user_name
 
-                self.message_history = []      # (speaker, content_lower)
-                self.previous_assistant = None # last assistant who actually spoke
-                self.waiting_on_user_to_break_loop = False
+            def __init__(self, agents: List[autogen.Agent], user_name: str):
+                self.user_name = user_name
+                self.agent_by_name = {a.name: a for a in agents}
+                # assistants are everyone except the user/System
+                self.assistant_names = [a.name for a in agents if a.name not in (user_name, "System")]
+                self.assistant_agents = [self.agent_by_name[n] for n in self.assistant_names]
+                self.previous_assistant: "Optional[autogen.Agent]" = None
                 self.multi = {"active": False, "queue": []}
 
             def _broadcast_requested(self, text: str) -> bool:
-                low = text.lower()
-                return any(k in low for k in [
+                low = (text or "").lower()
+                return any(k in low for k in (
                     "everyone", "all of you", "both of you", "each of you",
                     "all agents", "all ais", "you all", "@all"
-                ])
+                ))
 
             def _direct_addressees(self, text: str) -> List[str]:
-                """Return the single addressee if the user clearly directs a message to an assistant
-                (leading vocative like 'Claude, …' or explicit handoff 'to Claude'). Otherwise [].
-                """
+                """Return [name] if the user clearly directs a message (leading vocative or 'to <name>'), else []."""
                 if not text:
                     return []
-
-                import re
                 t = text.strip()
-                name_map = {n.lower(): n for n in self.assistant_names or []}
+                name_map = {n.lower(): n for n in self.assistant_names}
                 if not name_map:
                     return []
 
+                import re
                 name_alt = "|".join(re.escape(n) for n in name_map.keys())
 
                 # Leading vocative (allow 'hey/hi/hello', optional '@', then a name)
@@ -1008,78 +1003,65 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 return []
 
-
-
             def __call__(self, last_speaker: autogen.Agent, groupchat: autogen.GroupChat) -> autogen.Agent:
-                # Guard: if no meaningful history, start with ChatGPT by default
+                # 0) No history yet → start with ChatGPT if present
                 if not groupchat.messages:
-                    return self.agent_by_name.get("ChatGPT", self.agent_by_name[self.user_name])  
+                    return self.agent_by_name.get("ChatGPT", self.assistant_agents[0])
+
                 last_msg = groupchat.messages[-1]
-                content = (last_msg.get("content") or "").strip()
-                low = content.lower()
+                last_name = str(last_msg.get("name") or "")
+                last_role = str(last_msg.get("role") or "")
+                content = str(last_msg.get("content") or "")
 
-                # Loop detection
-                self.message_history.append((last_speaker.name, low))
-                self.message_history = self.message_history[-10:]
+                # A) Assistant spoke last
+                if last_name in self.assistant_names:
+                    self.previous_assistant = self.agent_by_name[last_name]
 
-                if self.waiting_on_user_to_break_loop:
-                    if last_speaker.name == self.user_name:
-                        self.waiting_on_user_to_break_loop = False
-                    return self.agent_by_name[self.user_name]
-
-                if (
-                    len(self.message_history) >= 4
-                    and self.message_history[-1] == self.message_history[-3]
-                    and self.message_history[-2] == self.message_history[-4]
-                ):
-                    self.waiting_on_user_to_break_loop = True
-                    queue_send_nowait({"sender": "System", "text": "⚠️ Loop detected. Waiting for your input to continue..."})
-                    return self.agent_by_name[self.user_name]
-
-                # Assistant spoke last
-                if last_speaker.name in self.assistant_names:
-                    self.previous_assistant = self.agent_by_name[last_speaker.name]
-
-                    # If they handed off, let the addressee speak
-                    addressees = self._direct_addressees(content)
-                    if addressees:
-                        self.previous_assistant = self.agent_by_name[addressees[0]]
+                    # Did that assistant hand off to someone?
+                    targets = self._direct_addressees(content)
+                    if targets:
+                        self.previous_assistant = self.agent_by_name[targets[0]]
                         return self.previous_assistant
 
-
-                    # Continue one-pass broadcast
+                    # Continue broadcast if active
                     if self.multi["active"]:
                         if self.multi["queue"]:
                             return self.agent_by_name[self.multi["queue"].pop(0)]
+                        # end of broadcast → back to user
                         self.multi["active"] = False
                         return self.agent_by_name[self.user_name]
 
-                    # Otherwise hand back to user
+                    # default after assistant message: hand back to user
                     return self.agent_by_name[self.user_name]
 
-                # User spoke last
-                if last_speaker.name == self.user_name:
+                # B) User spoke last (either role "user" or name == user_name)
+                if last_role == "user" or last_name == self.user_name:
                     if self._broadcast_requested(content):
                         self.multi["active"] = True
                         self.multi["queue"] = [a.name for a in self.assistant_agents]
                         return self.agent_by_name[self.multi["queue"].pop(0)]
 
-                    addressees = self._direct_addressees(content)
-                    if addressees:
-                        return self.agent_by_name[addressees[0]]
+                    targets = self._direct_addressees(content)
+                    if targets:
+                        return self.agent_by_name[targets[0]]
 
+                    # no explicit addressee → last assistant replies
                     if self.previous_assistant is not None:
                         return self.previous_assistant
 
+                    # otherwise first assistant
                     return self.assistant_agents[0] if self.assistant_agents else self.agent_by_name[self.user_name]
 
-                return self.agent_by_name[self.user_name]
+                # C) Fallback
+                return self.agent_by_name.get("ChatGPT", self.assistant_agents[0])
+
+
 
         class WebSocketUserProxyAgent(autogen.UserProxyAgent):
             """
             User proxy that:
             - forwards every visible message to the browser
-            - suppresses repeated ChatGPT greeting spam
+            - suppresses repeated ChatGPT greeting spam (allow exactly one greeting per conversation)
             - lets us inject user text asynchronously
             """
             def __init__(self, *args, message_output_queue: asyncio.Queue, **kwargs):
@@ -1091,75 +1073,85 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             async def a_receive(
                 self,
                 message,
-                sender,
-                request_reply: bool = True,
-                silent: bool = False,
+                sender=None,
+                request_reply: Optional[bool] = None,
+                silent: Optional[bool] = False,
+                **kwargs,
             ):
-                # Normalize
-                if isinstance(message, dict):
-                    raw_content = message.get("content", "")
-                    incoming_name = message.get("name") or message.get("sender")
-                elif isinstance(message, str):
-                    raw_content = message
-                    incoming_name = None
-                else:
-                    return None
-
-                # Trim boilerplate terminators/whitespace
-                cleaned = re.sub(r"(TERMINATE|Task Completed\.)[\s\S]*", "", str(raw_content)).strip()
-                if not cleaned:
-                    return None
-
-                # Choose a display sender (hide manager aliases)
-                sender_name = None
-                if sender is not None and getattr(sender, "name", None):
-                    if sender.name.lower() not in ("chat_manager", "groupchat_manager"):
-                        sender_name = sender.name
-                if sender_name is None and incoming_name:
-                    sender_name = str(incoming_name).strip()
-                if not sender_name:
-                    sender_name = "System"
-                             
-                # --- Squelch repeated ChatGPT greeting (generic, user-agnostic)
-                if sender_name == "ChatGPT":
-                    low = cleaned.lower()
-                    # treat short “hello / how can I help” style openers as greetings
-                    looks_like_greeting = (
-                        bool(re.search(r"\b(hi|hello|hey)\b", low))
-                        or "how can i assist" in low
-                        or "how can i help" in low
-                        or "nice to meet you" in low
-                    )
-
-                    if looks_like_greeting:
-                        if self._chatgpt_greeted_once:
-                            # drop repeat greeting
-                            return None
-                        # allow exactly one greeting per conversation
-                        self._chatgpt_greeted_once = True
-                # --- End squelch
-
-                # Forward to browser
+                """
+                Intercept assistant messages before they go to the websocket.
+                - Drops repeated ChatGPT greetings (allow exactly one per conversation).
+                - Pushes messages into the output queue for the browser.
+                - Lets agents see each other's messages (we still call super() to record history).
+                """
                 try:
-                    self._message_output_queue.put_nowait({"sender": sender_name, "text": cleaned})
-                except asyncio.QueueFull:
+                    # --- normalize sender name ---
                     try:
-                        _ = self._message_output_queue.get_nowait()
+                        from autogen import Agent
+                        if isinstance(sender, Agent):
+                            sender_name = str(getattr(sender, "name", "") or "Assistant")
+                        else:
+                            sender_name = str(sender or "Assistant")
                     except Exception:
-                        pass
-                    try:
-                        self._message_output_queue.put_nowait({"sender": sender_name, "text": cleaned})
-                    except Exception:
-                        pass
+                        sender_name = str(sender or "Assistant")
 
-                # Record in conversation history but don’t trigger a reply here
-                msg_for_history = {**message, "content": cleaned} if isinstance(message, dict) else cleaned
-                return await super().a_receive(
-                    msg_for_history,
-                    sender,
-                    request_reply=False,
-                    silent=True,
-                )
+                    # --- extract text content robustly ---
+                    if isinstance(message, dict):
+                        text = str(message.get("content") or "")
+                    else:
+                        text = str(message or "")
+                    cleaned = text.strip()
+                    if not cleaned:
+                        # still record empty updates in history but nothing to forward
+                        return await super().a_receive(message, sender, request_reply=False, silent=True, **kwargs)
+
+                    # --- Squelch repeated ChatGPT greetings ---
+                    if sender_name == "ChatGPT":
+                        low = cleaned.lower()
+                        looks_like_greeting = (
+                            "how can i assist" in low
+                            or "how can i help" in low
+                            or "what can i help" in low
+                            or "how may i assist" in low
+                            or "nice to meet you" in low
+                            or "glad to help" in low
+                            or bool(re.search(r"^\s*(hi|hello|hey)\b", low))
+                        )
+                        if looks_like_greeting:
+                            if self._chatgpt_greeted_once:
+                                # drop any further greeting-y openers
+                                await super().a_receive(message, sender, request_reply=False, silent=True, **kwargs)
+                                return
+                            # allow exactly one greeting per conversation
+                            self._chatgpt_greeted_once = True
+
+                    # --- end squelch ---
+
+                    # forward to browser (non-blocking with overflow protection)
+                    payload = {"sender": sender_name, "text": cleaned}
+                    try:
+                        self._message_output_queue.put_nowait(payload)
+                    except asyncio.QueueFull:
+                        try:
+                            _ = self._message_output_queue.get_nowait()
+                        except Exception:
+                            pass
+                        try:
+                            self._message_output_queue.put_nowait(payload)
+                        except Exception:
+                            pass
+
+                    # record in conversation history but don’t trigger new reply here
+                    return await super().a_receive(message, sender, request_reply=False, silent=True, **kwargs)
+
+                except Exception as e:
+                    # best-effort error forwarding
+                    err = {"sender": "System", "text": f"Error in a_receive: {e}"}
+                    try:
+                        self._message_output_queue.put_nowait(err)
+                    except Exception:
+                        pass
+                    return None
 
             async def a_generate_reply(
                 self,
@@ -1173,6 +1165,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
             async def a_inject_user_message(self, message: str):
                 await self._user_input_queue.put(message)
+
         
 
         # ---- build roster ----
