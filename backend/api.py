@@ -1205,8 +1205,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self._last_ai_speaker: str | None = None                  # who spoke last (AI)
                 self._selector = None                                     # set in attach_selector()
                 self._any_ai_ever: bool = False  # once any assistant speaks, drop pure greetings thereafter
-                self._greeted_once: set[str] = set()
-                self._last_text_by_speaker: dict[str, str] = {}
                 self._user_display_name = re.sub(r'[_-]+', ' ', (self.name or '')).strip() or 'there'
 
             def attach_selector(self, selector) -> None:
@@ -1251,16 +1249,29 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     Returns (was_greeting, stripped_text).
                     If greeting is the whole message, stripped_text may be empty.
                     """
-                    low = t.strip().lower()
+                    low = (t or "").strip().lower()
 
-                    # Starts with a greeting word OR directly with the user's name
-                    uname = self._user_display_name.lower()
-                    greet_start = rf'^(?:hi|hello|hey|greetings|good (?:morning|afternoon|evening)|{re.escape(uname)}\b)'
-                    # common greeting phrases
+                    # Accept full name, first name, or last name
+                    uname_full = self._user_display_name.strip()
+                    parts = uname_full.split()
+                    first = parts[0] if parts else uname_full
+                    last = parts[-1] if len(parts) > 1 else first
+
+                    name_alt = r'(?:' + '|'.join({
+                        re.escape(uname_full.lower()),
+                        re.escape(first.lower()),
+                        re.escape(last.lower()),
+                    }) + r')'
+
+                    # Greeting starts: allow leading greeting *or* user's name
+                    greet_start = rf'^(?:hi|hello|hey|greetings|good (?:morning|afternoon|evening)|{name_alt}\b)'
+
+                    # Common greeting phrases (NOTE the '|' joining the two groups)
                     greet_phrases = (
                         r'(?:how(?:\'| i)s (?:your )?day|how (?:are|r) you|'
                         r'(?:how can i )?(?:help|assist) you|nice to meet you|great to meet you|'
                         r'hope (?:you(?:\'re)? )?(?:doing )?(?:well|good))'
+                        r'|'
                         r'(?:how (?:can|may) i (?:help|assist)|'
                         r'what can i do for you|'
                         r'how can i support you(?: today)?|'
@@ -1274,19 +1285,16 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                     looks_open = bool(re.match(greet_start, low))
                     mentions_greety = bool(re.search(greet_phrases, low))
+                    is_short = len(low) <= 160  # slightly more generous
 
-                    # short, very greeting-like lines count too
-                    is_short = len(low) <= 120
                     is_greeting = looks_open and (mentions_greety or is_short)
-
                     if not is_greeting:
                         return (False, t)
 
-                    # try to remove the greeting prefix + filler punctuation
-                    name_token = re.escape(uname)
+                    # Strip greeting prefix (greeting + optional name + filler + optional greeting phrases)
                     pat = (
-                        rf'{greet_start}'                 # "hello|hi|hey|good morning|{uname}"
-                        rf'(?:\s*,?\s*{name_token}\b)?'   # optional "Sam" or "Sam Simpson"
+                        rf'{greet_start}'                 # e.g. "hello|hi|hey|good morning|sam|sam simpson"
+                        rf'(?:\s*,?\s*{name_alt}\b)?'     # optional "Sam" / "Sam Simpson"
                         r'[\s,!\.-:]*'                    # filler punctuation/space
                         rf'(?:{greet_phrases})?'          # optional "how can I help/assist..."
                         r'[\s,!\.-:]*'                    # trailing punctuation/space
@@ -1294,11 +1302,24 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     stripped = re.sub(pat, '', t, flags=re.IGNORECASE).strip()
                     return (True, stripped)
 
-                was_greet, stripped = strip_greeting(text)
 
-                # If we already saw a greeting from this speaker, suppress pure greetings
-                if was_greet and speaker in self._greeted_once and not stripped:
-                    return {"content": "", "name": speaker}
+                was_greet, stripped = strip_greeting(text)
+               
+                # If we already saw a greeting from this speaker, suppress if the remainder is empty
+                # or basically just filler.
+                if was_greet and speaker in self._greeted_once:
+                    if not stripped or len(stripped) <= 8:
+                        # Pure greeting or effectively empty -> drop it
+                        return {"content": "", "name": speaker}
+                    else:
+                        text = stripped  # keep the meaningful remainder
+                else:
+                    # First greeting from this speaker -> remember it and use the stripped content if any
+                    if was_greet and speaker not in self._greeted_once:
+                        self._greeted_once.add(speaker)
+                        if stripped:
+                            text = stripped
+
 
                 # First greeting from this speaker -> remember it
                 if was_greet and speaker not in self._greeted_once:
@@ -1313,13 +1334,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 if prev and prev.strip() == text.strip():
                     return {"content": "", "name": speaker}
                 self._last_text_by_speaker[speaker] = text
-
+            
                 # ---- forward to browser exactly as before ----
-                payload = {"sender": speaker, "text": text}
-                try:
-                    self._message_output_queue.put_nowait(payload)
-                except Exception:
-                    await self._message_output_queue.put(payload)
+                if text:
+                    payload = {"sender": speaker, "text": text}
+                    try:
+                        self._message_output_queue.put_nowait(payload)
+                    except Exception:
+                        await self._message_output_queue.put(payload)
+
 
                 # keep base behavior intact
                 return await super().a_receive(message, sender=sender, request_reply=request_reply, silent=silent)
