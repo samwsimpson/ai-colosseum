@@ -461,17 +461,12 @@ const handleNewConversation = () => {
                 if (msg.type === 'ping' || msg.type === 'pong') return;
         
                 // typing
-                if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
-                    // We already know msg.sender is a string, but the compiler is being picky.
-                    // By creating a new variable, we give it a clear and final type.
-                    const senderKey = msg.sender;
-
+                if (typeof msg.sender === 'string' && typeof msg.text === 'string' && msg.sender) {
                     setIsTyping(prev => {
                         const next: TypingState = { ...prev };
-                        next[senderKey] = false;
+                        next[msg.sender as string] = false;
                         return next;
                     });
-
                     addMessageToChat({ sender: msg.sender, text: msg.text });
                     return;
                 }
