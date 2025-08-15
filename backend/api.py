@@ -916,9 +916,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "Conversation rules for all agents:\n"
             "1) You are in a shared room with ALL listed agents. Treat their messages as visible context.\n"
             "2) If the user addresses someone by name at the START of their message (e.g., 'Claude,', 'hey Gemini', 'mistral' or 'ChatGPT:'), "
-            "that named agent should respond first.\n"
+            "that named agent should respond first. Ignore other agents' responses.\n"
             "3) If the user says 'you all', 'everyone', 'all agents', 'both of you', 'each of you', or similar, "
-            "each agent should respond ONCE, concisely.\n"
+            "each agent should respond ONCE, concisely, with their own unique answer. Do not defer to other agents.\n"
             "4) If one assistant clearly addresses another assistant, let the addressee reply next.\n"
             "5) Mentioning an assistant’s name does NOT always mean addressing them (it might be a reference). Prefer direct-address cues (leading name, or 'to <name>').\n"
             "6) If the user replies without naming anyone, assume they’re talking to the last assistant who spoke.\n"
@@ -1042,8 +1042,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # return the original result to the manager
                     return result
                 finally:
-                    # stop "is typing"
-                    await self.a_send_typing_indicator(False)
+                    # We'll handle the "typing off" from the user proxy now.
+                    pass
 
 
         class CustomSpeakerSelector:
@@ -1342,6 +1342,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         self._message_output_queue.put_nowait(payload)
                     except Exception:
                         await self._message_output_queue.put(payload)
+                        
+                    # --- NEW ADDITION ---
+                    # Send the typing-off message now that we know there's content.
+                    try:
+                        self._message_output_queue.put_nowait({"sender": speaker, "typing": False, "text": ""})
+                    except Exception:
+                        pass
+                    # --- END NEW ADDITION ---
 
                 # Keep base behavior for Autogen bookkeeping
                 return await super().a_receive(message, sender=sender, request_reply=request_reply, silent=silent)

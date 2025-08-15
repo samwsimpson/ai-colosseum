@@ -316,7 +316,7 @@ export default function ChatPage() {
     };
 
     // Create a brand-new conversation
-    const handleNewConversation = () => {
+const handleNewConversation = () => {
         try { localStorage.removeItem('conversationId'); } catch {}
         setConversationId(null);
         setLoadedSummary(null);
@@ -327,7 +327,10 @@ export default function ChatPage() {
             ws.current.close(1000, 'new-conversation');
         }
         ws.current = null;
-        setTimeout(() => setWsReconnectNonce(n => n + 1), 50);
+        setTimeout(() => {
+            setWsReconnectNonce(n => n + 1);
+            loadConversations(); // Add this line to force a refresh
+        }, 50);
     };
 
     // Rename the selected conversation
@@ -458,8 +461,8 @@ export default function ChatPage() {
 
         // typing
         if (typeof msg.sender === 'string' && typeof msg.typing === 'boolean') {
-            const key = msg.sender;      // narrowed to string
-            const val = msg.typing;      // narrowed to boolean
+            const key = msg.sender;
+            const val = msg.typing;
             setIsTyping(prev => {
                 const next: TypingState = { ...prev };
                 next[key] = val;
@@ -470,8 +473,16 @@ export default function ChatPage() {
 
         // normal chat
         if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
-        addMessageToChat({ sender: msg.sender, text: msg.text });
-        return;
+            // --- THIS IS THE KEY CHANGE ---
+            // Immediately set typing to false for this sender when a message arrives
+            setIsTyping(prev => {
+                const next: TypingState = { ...prev };
+                next[msg.sender] = false;
+                return next;
+            });
+            // --- END OF KEY CHANGE ---
+            addMessageToChat({ sender: msg.sender, text: msg.text });
+            return;
         }
     };
 
