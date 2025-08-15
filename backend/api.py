@@ -877,6 +877,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "type": "conversation_id",
             "id": conv_ref.id,
         })
+
         # (No summary banner here — the UI can show titles via /api/conversations)
 
         # Optional: seed title from the very first greeting if it's meaningful
@@ -909,6 +910,37 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         # Keep this list in one place
         agent_names = ["ChatGPT", "Claude", "Gemini", "Mistral"]
 
+        # --- randomized opening greeting (one-time per websocket connect if no prior messages) ---
+        try:
+            import random
+
+            # Only greet if this conversation has no messages yet (prevents greeting on resumes/reconnects)
+            has_any = False
+            async for _ in (conv_ref.collection("messages").limit(1).stream()):
+                has_any = True
+                break
+
+            if not has_any:
+                greeter = random.choice(agent_names)  # e.g. "ChatGPT", "Claude", "Gemini", "Mistral"
+                greeting_text = f"Hi {user_display_name}, what can we help you with?"
+
+                # Show typing ON → send message → typing OFF
+                queue_send_nowait({"sender": greeter, "typing": True, "text": ""})
+                queue_send_nowait({"sender": greeter, "text": greeting_text})
+                queue_send_nowait({"sender": greeter, "typing": False, "text": ""})
+
+                # Persist so your history shows the opener
+                await save_message(conv_ref, role="assistant", sender=greeter, content=greeting_text)
+
+                # Track last speaker for the selector (optional but nice)
+                try:
+                    # Your selector is attached later; we’ll tell it once the proxy is alive.
+                    pass
+                except Exception:
+                    pass
+        except Exception as e:
+            print("[opening greeting] skipped:", e)
+        # --- end greeting ---
         roster_text = (
             "SYSTEM: Multi-agent room context\n"
             f"- USER: {user_display_name}\n"
@@ -1164,10 +1196,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 # B) User spoke last → pick addressed agent, else last assistant, else first assistant
                 if last_role == "user" or last_name == self.user_name:
-                    if self._broadcast_requested(content):
+                    if self._broadcast_requested(content):                        
+                        import random
                         self.multi["active"] = True
                         self.multi["queue"] = [a.name for a in self.assistant_agents]
-                        return self.agent_by_name[self.multi["queue"].pop(0)]
+                        random.shuffle(self.multi["queue"])
+                        return self.agent_by_name[self.multi["queue"].pop(0)]                        
 
                     targets = self._direct_addressees(content)
                     if targets:
