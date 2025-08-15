@@ -1004,26 +1004,42 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 return []
 
             def __call__(self, last_speaker: autogen.Agent, groupchat: autogen.GroupChat) -> autogen.Agent:
-                # 0) No history yet → start with ChatGPT if present
+                # If no history at all, start with ChatGPT (or first assistant)
                 if not groupchat.messages:
                     return self.agent_by_name.get("ChatGPT", self.assistant_agents[0])
 
-                last_msg = groupchat.messages[-1]
-                last_name = str(last_msg.get("name") or "")
-                last_role = str(last_msg.get("role") or "")
-                content = str(last_msg.get("content") or "")
+                # Walk backwards to find the last *significant* message:
+                # - skip manager/system lines
+                # - prefer a real assistant or the user
+                idx = len(groupchat.messages) - 1
+                last_name = ""
+                last_role = ""
+                content = ""
+                while idx >= 0:
+                    msg = groupchat.messages[idx]
+                    n = str(msg.get("name") or "")
+                    r = str(msg.get("role") or "")
+                    c = str(msg.get("content") or "")
+                    if n.lower() not in ("chat_manager", "manager", "groupchatmanager") and r != "system":
+                        last_name, last_role, content = n, r, c
+                        break
+                    idx -= 1
 
-                # A) Assistant spoke last
+                # If we somehow found nothing usable, default to ChatGPT
+                if not last_name and not last_role:
+                    return self.agent_by_name.get("ChatGPT", self.assistant_agents[0])
+
+                # A) Assistant spoke last → maybe handoff, else give floor back to user
                 if last_name in self.assistant_names:
                     self.previous_assistant = self.agent_by_name[last_name]
 
-                    # Did that assistant hand off to someone?
+                    # Did that assistant explicitly hand off to someone?
                     targets = self._direct_addressees(content)
                     if targets:
                         self.previous_assistant = self.agent_by_name[targets[0]]
                         return self.previous_assistant
 
-                    # Continue broadcast if active
+                    # If we were mid “everyone” round, continue it
                     if self.multi["active"]:
                         if self.multi["queue"]:
                             return self.agent_by_name[self.multi["queue"].pop(0)]
@@ -1031,10 +1047,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         self.multi["active"] = False
                         return self.agent_by_name[self.user_name]
 
-                    # default after assistant message: hand back to user
+                    # Normal case after an assistant: hand back to the user
                     return self.agent_by_name[self.user_name]
 
-                # B) User spoke last (either role "user" or name == user_name)
+                # B) User spoke last → pick addressed agent, else last assistant, else first assistant
                 if last_role == "user" or last_name == self.user_name:
                     if self._broadcast_requested(content):
                         self.multi["active"] = True
@@ -1045,30 +1061,31 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     if targets:
                         return self.agent_by_name[targets[0]]
 
-                    # no explicit addressee → last assistant replies
                     if self.previous_assistant is not None:
                         return self.previous_assistant
 
-                    # otherwise first assistant
                     return self.assistant_agents[0] if self.assistant_agents else self.agent_by_name[self.user_name]
 
-                # C) Fallback
+                # C) Fallback (e.g., a stray system/manager ended up “last”): ChatGPT or first assistant
                 return self.agent_by_name.get("ChatGPT", self.assistant_agents[0])
 
 
 
+
+        
         class WebSocketUserProxyAgent(autogen.UserProxyAgent):
             """
             User proxy that:
-            - forwards every visible message to the browser
+            - forwards every visible assistant message to the browser
             - suppresses repeated ChatGPT greeting spam (allow exactly one greeting per conversation)
             - lets us inject user text asynchronously
             """
-            def __init__(self, *args, message_output_queue: asyncio.Queue, **kwargs):
+            def __init__(self, *args, message_output_queue: asyncio.Queue, assistant_name_set: set[str], **kwargs):
                 super().__init__(*args, **kwargs)
                 self._message_output_queue = message_output_queue
                 self._user_input_queue: asyncio.Queue[str] = asyncio.Queue()
                 self._chatgpt_greeted_once = False  # used to squelch repeat greeting
+                self._assistant_name_set = set(assistant_name_set)
 
             async def a_receive(
                 self,
@@ -1080,58 +1097,74 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             ):
                 """
                 Intercept assistant messages before they go to the websocket.
+
+                - Identifies the real assistant speaker using message['name'] when available,
+                else falls back to the sender object's .name.
                 - Drops repeated ChatGPT greetings (allow exactly one per conversation).
                 - Pushes messages into the output queue for the browser.
-                - Lets agents see each other's messages (we still call super() to record history).
+                - Records to conversation history via super().a_receive(...).
                 """
                 try:
-                    # --- normalize sender name ---
-                    try:
-                        from autogen import Agent
-                        if isinstance(sender, Agent):
-                            sender_name = str(getattr(sender, "name", "") or "Assistant")
-                        else:
-                            sender_name = str(sender or "Assistant")
-                    except Exception:
-                        sender_name = str(sender or "Assistant")
-
                     # --- extract text content robustly ---
+                    name_hint = ""
                     if isinstance(message, dict):
                         text = str(message.get("content") or "")
+                        name_hint = (message.get("name") or "").strip()
                     else:
                         text = str(message or "")
                     cleaned = text.strip()
+
+                    # --- decide who the speaker really is (robust) ---
+                    derived_name = None
+
+                    # 1) Prefer message["name"] if it is one of our assistants
+                    if name_hint in self._assistant_name_set:
+                        derived_name = name_hint
+
+                    # 2) Otherwise, use the actual sender object's .name when available
+                    if derived_name is None:
+                        try:
+                            sn = getattr(sender, "name", None)  # ConversableAgent, AssistantAgent, GroupChatManager, etc.
+                            if isinstance(sn, str) and sn:
+                                derived_name = sn
+                        except Exception:
+                            pass
+
+                    # 3) Final fallback
+                    if derived_name is None:
+                        derived_name = "Assistant"
+
+                    # If the manager ever “speaks”, do not forward it to the browser;
+                    # still record to history to keep context consistent.
+                    if derived_name.lower() in ("chat_manager", "manager", "groupchatmanager"):
+                        return await super().a_receive(message, sender, request_reply=False, silent=True, **kwargs)
+
+                    # nothing useful to forward?
                     if not cleaned:
-                        # still record empty updates in history but nothing to forward
                         return await super().a_receive(message, sender, request_reply=False, silent=True, **kwargs)
 
                     # --- Squelch repeated ChatGPT greetings ---
-                    if sender_name == "ChatGPT":
+                    if derived_name == "ChatGPT":
                         low = cleaned.lower()
-                        # broaden what we consider a greetingy opener
                         looks_like_greeting = (
                             bool(re.search(r"^\s*(hi|hello|hey)\b", low))
                             or "how can i assist" in low
                             or "how can i help" in low
                             or "what can i help" in low
                             or "how may i assist" in low
-                            or "let me know how i can help" in low
                             or "nice to meet you" in low
                             or "great to meet you" in low
                             or "happy to help" in low
                         )
                         if looks_like_greeting:
                             if self._chatgpt_greeted_once:
-                                # drop any further greeting-y openers
-                                await super().a_receive(message, sender, request_reply=False, silent=True, **kwargs)
-                                return
-                            # allow exactly one greeting per conversation
+                                # record but don't forward another greeting
+                                return await super().a_receive(message, sender, request_reply=False, silent=True, **kwargs)
                             self._chatgpt_greeted_once = True
-
                     # --- end squelch ---
 
                     # forward to browser (non-blocking with overflow protection)
-                    payload = {"sender": sender_name, "text": cleaned}
+                    payload = {"sender": derived_name, "text": cleaned}
                     try:
                         self._message_output_queue.put_nowait(payload)
                     except asyncio.QueueFull:
@@ -1169,6 +1202,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             async def a_inject_user_message(self, message: str):
                 await self._user_input_queue.put(message)
 
+
         
 
         # ---- build roster ----
@@ -1176,6 +1210,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             name=safe_user_name,  # <-- use the safe internal name
             human_input_mode="NEVER",
             message_output_queue=message_output_queue,
+            assistant_name_set=set(agent_names), 
             code_execution_config={"use_docker": False},
             is_termination_msg=lambda x: isinstance(x, dict) and x.get("content", "").endswith("TERMINATE")
         )
