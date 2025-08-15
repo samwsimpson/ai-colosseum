@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, FormEvent, useRef, useEffect, useCallback, useMemo } from 'react';
+import { useState, FormEvent, useRef, useEffect, useCallback } from 'react';
 import { useUser } from '../../context/UserContext';
 import { usePathname, useRouter } from 'next/navigation';
 
@@ -72,19 +72,61 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
   return res;
 }
 
+type AgentName = 'ChatGPT' | 'Claude' | 'Gemini' | 'Mistral';
+const ALLOWED_AGENTS: AgentName[] = ['ChatGPT', 'Claude', 'Gemini', 'Mistral'];
 
 export default function ChatPage() {
-    type AgentName = 'ChatGPT' | 'Claude' | 'Gemini' | 'Mistral';
-    const ALLOWED_AGENTS: AgentName[] = ['ChatGPT', 'Claude', 'Gemini', 'Mistral'];
 
-    const typingTimersRef = useRef<Partial<Record<AgentName, number>>>({});
+    const typingTTLRef = useRef<Partial<Record<AgentName, number>>>({});
+    const typingShowDelayRef = useRef<Partial<Record<AgentName, number>>>({});
+    const typingTimersRef = useRef<Partial<Record<AgentName, number>>>({});    
     const clearTypingTimer = (agent: AgentName) => {
-    const id = typingTimersRef.current[agent];
-    if (typeof id === 'number') {
-        window.clearTimeout(id);
-        delete typingTimersRef.current[agent];
-    }
+        const id = typingTimersRef.current[agent];
+        if (typeof id === 'number') {
+         window.clearTimeout(id);
+            delete typingTimersRef.current[agent];
+        }
     };
+    const clearTypingTTL = (agent: AgentName) => {
+        const id = typingTTLRef.current[agent];
+        if (typeof id === 'number') {
+            window.clearTimeout(id);
+            delete typingTTLRef.current[agent];
+        }
+    };
+    const clearTypingShowDelay = (agent: AgentName) => {
+        const id = typingShowDelayRef.current[agent];
+        if (typeof id === 'number') {
+            window.clearTimeout(id);
+            delete typingShowDelayRef.current[agent];
+        }
+    };
+
+    /** Only show bubble if the agent is still "typing" after showDelayMs.
+     *  When shown, auto-clear after ttlMs unless a message/false arrives. */
+    const setTypingWithDelayAndTTL = (agent: AgentName, value: boolean, showDelayMs = 400, ttlMs = 6000) => {
+        if (!value) {
+            // cancel pending show + ttl, hide immediately
+            clearTypingShowDelay(agent);
+            clearTypingTTL(agent);
+            setIsTyping(prev => ({ ...prev, [agent]: false }));
+            return;
+        }
+
+        // schedule showing after a short delay
+        clearTypingShowDelay(agent);
+        typingShowDelayRef.current[agent] = window.setTimeout(() => {
+            setIsTyping(prev => ({ ...prev, [agent]: true }));
+
+            // (re)start TTL once it’s actually visible
+            clearTypingTTL(agent);
+            typingTTLRef.current[agent] = window.setTimeout(() => {
+            setIsTyping(prev => ({ ...prev, [agent]: false }));
+            delete typingTTLRef.current[agent];
+            }, ttlMs);
+        }, showDelayMs);
+    };    
+
     const setTypingWithTTL = (agent: AgentName, value: boolean, ttlMs = 6000) => {
     setIsTyping(prev => ({ ...prev, [agent]: value }));
     clearTypingTimer(agent);
@@ -280,12 +322,16 @@ export default function ChatPage() {
     const handleSubmit = useCallback((e: React.FormEvent) => {
         e.preventDefault();
 
+        Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+        Object.values(typingTTLRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+        typingShowDelayRef.current = {};
+        typingTTLRef.current = {};
+        setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+
         const text = message.trim();
         if (!text || !userName) return;
 
-        Object.values(typingTimersRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-        typingTimersRef.current = {};
-        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+
 
         const payload: Record<string, unknown> = { message: text };
 
@@ -488,28 +534,35 @@ const handleNewConversation = () => {
             // normalize once so TS knows it's safe when used
             const sender = isNonEmptyString(msg.sender) ? msg.sender : null;
     
+       
             // typing updates
             if (sender && typeof msg.typing === 'boolean' && ALLOWED_AGENTS.includes(sender as AgentName)) {
-            setTypingWithTTL(sender as AgentName, msg.typing === true);
-            return;
+                setTypingWithDelayAndTTL(sender as AgentName, msg.typing === true);
+                return;
             }
 
             // normal chat message
             if (sender && typeof msg.text === 'string' && ALLOWED_AGENTS.includes(sender as AgentName)) {
-            setTypingWithTTL(sender as AgentName, false); // clear typing on message
-            addMessageToChat({ sender, text: msg.text });
-            return;
+                // message arrived → cancel any pending show + turn off immediately
+                setTypingWithDelayAndTTL(sender as AgentName, false);
+                addMessageToChat({ sender, text: msg.text });
+                return;
             }
-            },
+        },
 
         
             onclose: (ev: CloseEvent) => {
                 console.log('WebSocket closed. code=', ev.code, 'reason=', ev.reason, 'wasClean=', ev.wasClean);
                 Object.values(typingTimersRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
                 typingTimersRef.current = {};
+                Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+                Object.values(typingTTLRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+                typingShowDelayRef.current = {};
+                typingTTLRef.current = {};
+                setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
 
                 setIsWsOpen(false);
-                setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+                
         
                 // mark ref as closed
                 ws.current = null;
@@ -533,9 +586,13 @@ const handleNewConversation = () => {
             onerror: (event: Event) => {
                 console.error('WebSocket error:', event);
                 Object.values(typingTimersRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-                typingTimersRef.current = {};
-                setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false }); // add this
+                typingTimersRef.current = {};                
                 setIsWsOpen(false);
+                Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+                Object.values(typingTTLRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+                typingShowDelayRef.current = {};
+                typingTTLRef.current = {};
+                setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
             }
         });
         // --- End of the refactored code block ---

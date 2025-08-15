@@ -1118,7 +1118,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             def __call__(self, last_speaker: autogen.Agent, groupchat: autogen.GroupChat) -> autogen.Agent:
                 # If no history at all, start with ChatGPT (or first assistant)
                 if not groupchat.messages:
-                    return self.agent_by_name.get("ChatGPT", self.assistant_agents[0])
+                    return random.choice(self.assistant_agents) if self.assistant_agents else self.agent_by_name.get("ChatGPT")
 
                 # Walk backwards to find the last *significant* message:
                 # - skip manager/system lines
@@ -1342,7 +1342,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         self._message_output_queue.put_nowait(payload)
                     except Exception:
                         await self._message_output_queue.put(payload)
-                        
+
                     # --- NEW ADDITION ---
                     # Send the typing-off message now that we know there's content.
                     try:
