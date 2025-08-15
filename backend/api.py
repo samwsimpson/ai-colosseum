@@ -1159,140 +1159,77 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self._last_ai_speaker: str | None = None                  # who spoke last (AI)
                 self._selector = None                                     # set in attach_selector()
                 self._any_ai_ever: bool = False  # once any assistant speaks, drop pure greetings thereafter
+                self._user_display_name = re.sub(r'[_-]+', ' ', (self.name or '')).strip() or 'there'
 
             def attach_selector(self, selector) -> None:
                 self._selector = selector     
                                
-            async def a_receive(
-                self,
-                message,
-                sender=None,
-                request_reply: bool = False,
-                silent: bool = False,
-                **kwargs,
-            ):
-                # -------- extract text + hint name --------
-                if isinstance(message, dict):
-                    text = message.get("content") or message.get("text") or ""
-                    hint_name = (message.get("name") or "").strip()
-                elif isinstance(message, str):
-                    text = message
-                    hint_name = ""
-                else:
-                    text = str(message)
-                    hint_name = ""
+            
+            async def a_receive(self, message, sender=None, request_reply=True, silent=False):
+                """
+                Intercepts assistant->user messages, removes repetitive greetings,
+                and forwards to the browser via message_output_queue.
+                """
+                import re
 
-                # -------- resolve assistant name ----------
-                speaker = None
-                if sender is not None:
-                    cand = getattr(sender, "name", None)
-                    if isinstance(cand, str) and cand.strip():
-                        speaker = cand.strip()
+                # --- normalize incoming ---
+                speaker = getattr(sender, "name", None) or (message.get("name") if isinstance(message, dict) else None) or "Unknown"
+                raw_text = (
+                    (message.get("content") if isinstance(message, dict) else None)
+                    or (message.get("text") if isinstance(message, dict) else None)
+                    or (str(message) if not isinstance(message, dict) else "")
+                )
+                text = (raw_text or "").strip()
 
-                if not speaker and hint_name:
-                    hn = hint_name.strip()
-                    speaker = self._assistant_name_lower.get(hn.lower(), hn)
+                # --- helper: detect/strip greeting ---
+                def strip_greeting(t: str) -> tuple[bool, str]:
+                    """returns (was_greeting, stripped_text). If entire message is a greeting or
+                    leading greeting phrase can be removed, it will be stripped."""
+                    low = t.strip().lower()
+                    # short, classic openings
+                    looks_opening = bool(re.match(r'^(hi|hello|hey)\b', low))
+                    mentions_help = any(k in low for k in ["assist you", "help you", "how can i"])
+                    mentions_user = bool(self._user_display_name and re.search(
+                        rf'\b{re.escape(self._user_display_name.lower())}\b', low
+                    ))
 
-                if not speaker:
-                    m = re.match(r'^\s*([A-Za-z0-9_]+)\s*[:\-—]\s*', text)
-                    if m:
-                        candidate = m.group(1).strip()
-                        speaker = self._assistant_name_lower.get(candidate.lower(), candidate)
-                        text = text[m.end():].lstrip()
+                    # a greeting if it starts with hi/hello/hey and either mentions help OR user name
+                    is_greeting = looks_opening and (mentions_help or mentions_user)
 
-                if not speaker:
-                    speaker = "System"
+                    if not is_greeting:
+                        return (False, t)
 
-                # never forward manager/system chatter
-                if speaker.lower() in ("manager", "chat_manager"):
-                    return
+                    # strip the greeting prefix if there is anything substantive after it
+                    # e.g., "Hi Sam! How can I assist you today? Here's an update…" -> "Here's an update…"
+                    pat = rf'^(hi|hello|hey)\b(?:\s+{re.escape(self._user_display_name.lower())})?\W*(?:how can i(?:\s+\w+)?\s+(?:help|assist)\s+you(?:\s+\w+)?\??)?\W*'
+                    stripped = re.sub(pat, '', t, flags=re.IGNORECASE).strip()
+                    return (True, stripped)
 
-                # -------- greeting / duplicate filters -------------
-                original_text = text
-                compact = re.sub(r'\s+', ' ', (text or "")).strip()
-                low = compact.lower()
+                was_greet, stripped = strip_greeting(text)
 
-                def is_pure_greeting(s: str) -> bool:
-                    """True if the whole message is basically a greeting/help opener and nothing else."""
-                    if len(s) <= 320:
-                        if re.match(r'^\s*(hi|hello|hey)\b', s):
-                            # Allow optional name & punctuation and maybe a single short follow-up like "good to meet you"
-                            # but treat as greeting if there’s no substantive sentence after.
-                            tail = re.sub(r'^\s*(hi|hello|hey)\b[^.!?\n]*[.!?\n]*\s*', '', s, flags=re.IGNORECASE)
-                            # If the remaining part is just a generic help-opener, still “pure greeting”
-                            if not tail or re.match(r'^\s*$', tail) or re.match(r'^\s*(how\s+(?:can|may)\s+i\s+(?:help|assist)\s+you(?:\s+today)?\??)\s*$', tail):
-                                return True
-                        if re.search(r'\bhow\s+(?:can|may)\s+i\s+(?:help|assist)\s+you(?:\s+today)?\b', s):
-                            tail = re.sub(
-                                r'^\s*(how\s+(?:can|may)\s+i\s+(?:help|assist)\s+you(?:\s+today)?\??)\s*',
-                                '',
-                                s,
-                                flags=re.IGNORECASE
-                            )
-                            if not tail.strip():
-                                return True
-                    return False
+                # If this speaker already greeted before, suppress pure greetings entirely
+                if was_greet and speaker in self._greeted_once and not stripped:
+                    # drop this message silently
+                    return {"content": "", "name": speaker}
 
-                # (A) Per-assistant greeting gate:
-                #     allow at most ONE greeting line from each assistant per websocket session.
-                if speaker in self._assistant_name_set and is_pure_greeting(low):
-                    if speaker in self._greeted_once:
-                        return        # drop repeated greeting entirely
-                    else:
-                        self._greeted_once.add(speaker)
-                        # If you prefer to never show greetings at all, uncomment the next line:
-                        # return
+                # First time we see a greeting from this speaker, remember it.
+                if was_greet and speaker not in self._greeted_once:
+                    self._greeted_once.add(speaker)
 
-                # (B) After an assistant has already spoken at least once,
-                #     strip any leading salutation so follow-ups don’t start with “Hi Sam...”
-                if speaker in self._assistant_name_set and self._utter_count.get(speaker, 0) >= 1:
-                    # remove one leading "Hi/Hello/Hey ..." sentence
-                    text = re.sub(
-                        r'^\s*(?:hi|hello|hey)\b[^\.\n!?]*[\.!\?]\s*',
-                        '',
-                        text,
-                        count=1,
-                        flags=re.IGNORECASE
-                    )
-                    # and remove leading "How can I help/assist you (today)?" if present
-                    text = re.sub(
-                        r'^\s*how\s+(?:can|may)\s+i\s+(?:help|assist)\s+you(?:\s+today)?\??\s*',
-                        '',
-                        text,
-                        flags=re.IGNORECASE
-                    )
-                    compact = re.sub(r'\s+', ' ', text).strip()
-                    if compact == "":
-                        return  # nothing useful remains after stripping
+                # Use stripped text if any; if stripping consumed everything, leave original (so first hello still shows once)
+                if stripped:
+                    text = stripped
 
-                # (C) Drop exact duplicates from the same speaker
-                compact = re.sub(r'\s+', ' ', (text or "")).strip()
-                if self._utter_count.get(speaker, 0) > 0:
-                    if self._last_text_by_sender.get(speaker) == compact:
-                        return
+                # --- forward to browser as before ---
+                payload = {"sender": speaker, "text": text}
+                try:
+                    self._message_output_queue.put_nowait(payload)
+                except Exception:
+                    await self._message_output_queue.put(payload)
 
-                # -------- forward to browser --------------
-                await self._message_output_queue.put({"sender": speaker, "text": text})
+                # Let the base class continue (so the manager’s flow isn’t broken)
+                return await super().a_receive(message, sender=sender, request_reply=request_reply, silent=silent)
 
-                # remember last utterance + counts + last speaker
-                self._last_text_by_sender[speaker] = compact
-                self._utter_count[speaker] = self._utter_count.get(speaker, 0) + 1
-
-                if speaker in self._assistant_name_set:
-                    # mark that at least one AI has spoken in this session
-                    self._any_ai_ever = True
-                    # update "last AI speaker" only if this wasn’t just a pure greeting
-                    if not is_pure_greeting(low):
-                        self._last_ai_speaker = speaker
-
-                # let the selector know who spoke (so “no addressee” → continue with last speaker)
-                if self._selector and hasattr(self._selector, "note_speaker"):
-                    try:
-                        self._selector.note_speaker(speaker)
-                    except Exception:
-                        pass
-
-                return None
 
 
 
