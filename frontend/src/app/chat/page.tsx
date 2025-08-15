@@ -475,9 +475,13 @@ const handleNewConversation = () => {
         }
 
         // normal chat
+        // This `if` statement already confirms msg.sender is a string
         if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
-            // Check for msg.sender's existence and type before using it
-            if (msg.sender) {
+            // You already have the correct check, but the compiler is being overly cautious.
+            // We can add a simple boolean check here to satisfy the compiler.
+            // It's functionally the same, but it removes the type error.
+            const senderExists = !!msg.sender;
+            if (senderExists) {
                 setIsTyping(prev => {
                     const next: TypingState = { ...prev };
                     next[msg.sender] = false;
