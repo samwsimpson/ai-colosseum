@@ -377,173 +377,153 @@ const handleNewConversation = () => {
 
     // WebSocket connection logic
     useEffect(() => {
-    // don’t try to connect without a token
-    if (!userToken) {
-        if (ws.current) {
-            try { ws.current.close(); } catch {}
-        }
-        ws.current = null;
-        setIsWsOpen(false);
-        return;
-    }
-    // try to top up access token if it's close to expiring (non-blocking)
-    refreshTokenIfNeeded();
-
-
-    // Build the URL safely
-    const base = process.env.NEXT_PUBLIC_WS_URL ?? 'http://localhost:8000';
-    let u: URL;
-    try {
-        u = new URL(base); // e.g. https://api.aicolosseum.app
-    } catch {
-        u = new URL('http://localhost:8000');
-    }
-    u.protocol = (u.protocol === 'https:') ? 'wss:' : 'ws:';
-    u.pathname = '/ws/colosseum-chat';
-    u.search = `?token=${encodeURIComponent(localStorage.getItem('access_token') || userToken)}`;
-
-    const socket = new WebSocket(u.toString());
-    ws.current = socket;
-    setIsWsOpen(false);
-
-    const currentWs = socket;
-
-    currentWs.onopen = () => {
-        // reset reconnect backoff on successful open
-        reconnectRef.current.tries = 0;
-        if (reconnectRef.current.timer) {
-            window.clearTimeout(reconnectRef.current.timer);
-            reconnectRef.current.timer = null;
-        }
-
-        setIsWsOpen(true);
-        authFailedRef.current = false;
-        reconnectBackoffRef.current = 1000;
-
-        // --- initial handshake ---
-        const initialPayload: Record<string, unknown> = {
-            message: "Hello!",
-            user_name: userName,
-        };
-        if (conversationId) {
-            initialPayload.conversation_id = conversationId; // reuse exact convo
-        } else {
-            initialPayload.resume_last = true;               // ask server to resume latest
-        }
-        currentWs.send(JSON.stringify(initialPayload));
-        // --- end handshake ---
-
-        // --- flush any queued messages that were sent while connecting ---
-        while (pendingSends.current.length > 0) {
-            const next = pendingSends.current.shift();
-            if (next) currentWs.send(JSON.stringify(next));
-        }
-        // --- end flush ---
-    };
-
-
-    currentWs.onmessage = (event: MessageEvent) => {
-        let msg: ServerMessage;
-        try {
-            msg = JSON.parse(event.data);
-        } catch {
-            return;
-        }
-
-        // meta/system messages
-        if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
-            setConversationId(msg.id);
-            loadConversations(); // refresh sidebar
-            return;
-        }
-        if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
-            setLoadedSummary(msg.summary);
-            return;
-        }
-        if (msg.type === 'ping' || msg.type === 'pong') return;
-
-        // typing
-        if (typeof msg.sender === 'string' && typeof msg.typing === 'boolean') {
-            const key = msg.sender;
-            const val = msg.typing;
-            setIsTyping(prev => {
-                const next: TypingState = { ...prev };
-                // Ensure key is a string before using it
-                if (key) {
-                    next[key] = val;
-                }
-                return next;
-            });
-            return;
-        }
-
-        // normal chat
-        // Explicitly check that msg.sender is a truthy string value before using it as an index.
-        if (typeof msg.sender === 'string' && typeof msg.text === 'string' && msg.sender) {
-            setIsTyping(prev => {
-                const next: TypingState = { ...prev };
-                next[msg.sender] = false;
-                return next;
-            });
-            addMessageToChat({ sender: msg.sender, text: msg.text });
-            return;
-        }
-    };
-
-        // normal chat
-        // This `if` statement already confirms msg.sender is a string
-        if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
-            // You already have the correct check, but the compiler is being overly cautious.
-            // We can add a simple boolean check here to satisfy the compiler.
-            // It's functionally the same, but it removes the type error.
-            const senderExists = !!msg.sender;
-            if (senderExists) {
-                setIsTyping(prev => {
-                    const next: TypingState = { ...prev };
-                    next[msg.sender] = false;
-                    return next;
-                });
+        // don’t try to connect without a token
+        if (!userToken) {
+            if (ws.current) {
+                try { ws.current.close(); } catch {}
             }
-            addMessageToChat({ sender: msg.sender, text: msg.text });
+            ws.current = null;
+            setIsWsOpen(false);
             return;
         }
-    };
-    currentWs.onclose = (ev) => {
-        console.log('WebSocket closed. code=', ev.code, 'reason=', ev.reason, 'wasClean=', ev.wasClean);
-        setIsWsOpen(false);
-        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+        // try to top up access token if it's close to expiring (non-blocking)
+        refreshTokenIfNeeded();
 
-        // mark ref as closed
-        ws.current = null;
 
-        // compute next backoff (up to 15s)
-        const base = 1000; // 1s
-        const max = 15000; // 15s
-        const tries = reconnectRef.current.tries;
-        const nextDelay = Math.min(max, base * Math.pow(2, tries)) + Math.floor(Math.random() * 250);
-        reconnectRef.current.tries = tries + 1;
-
-        // clear any previous timer and schedule a reconnect attempt
-        if (reconnectRef.current.timer) {
-            window.clearTimeout(reconnectRef.current.timer);
+        // Build the URL safely
+        const base = process.env.NEXT_PUBLIC_WS_URL ?? 'http://localhost:8000';
+        let u: URL;
+        try {
+            u = new URL(base); // e.g. https://api.aicolosseum.app
+        } catch {
+            u = new URL('http://localhost:8000');
         }
-        reconnectRef.current.timer = window.setTimeout(() => {
-            setWsReconnectNonce((n) => n + 1);
-        }, nextDelay);
-    };
+        u.protocol = (u.protocol === 'https:') ? 'wss:' : 'ws:';
+        u.pathname = '/ws/colosseum-chat';
+        u.search = `?token=${encodeURIComponent(localStorage.getItem('access_token') || userToken)}`;
 
-
-
-    currentWs.onerror = (event: Event) => {
-        console.error('WebSocket error:', event);
+        const socket = new WebSocket(u.toString());
+        ws.current = socket;
         setIsWsOpen(false);
-    };
 
-    return () => {
-        if (currentWs && (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING)) {
-        try { currentWs.close(); } catch {}
-        }
-    };
+        const currentWs = socket;
+
+        // --- Start of the refactored code block ---
+        Object.assign(currentWs, {
+            onopen: () => {
+                // reset reconnect backoff on successful open
+                reconnectRef.current.tries = 0;
+                if (reconnectRef.current.timer) {
+                    window.clearTimeout(reconnectRef.current.timer);
+                    reconnectRef.current.timer = null;
+                }
+        
+                setIsWsOpen(true);
+                authFailedRef.current = false;
+                reconnectBackoffRef.current = 1000;
+        
+                // --- initial handshake ---
+                const initialPayload: Record<string, unknown> = {
+                    message: "Hello!",
+                    user_name: userName,
+                };
+                if (conversationId) {
+                    initialPayload.conversation_id = conversationId; // reuse exact convo
+                } else {
+                    initialPayload.resume_last = true;               // ask server to resume latest
+                }
+                currentWs.send(JSON.stringify(initialPayload));
+                // --- end handshake ---
+        
+                // --- flush any queued messages that were sent while connecting ---
+                while (pendingSends.current.length > 0) {
+                    const next = pendingSends.current.shift();
+                    if (next) currentWs.send(JSON.stringify(next));
+                }
+                // --- end flush ---
+            },
+        
+            onmessage: (event: MessageEvent) => {
+                let msg: ServerMessage;
+                try { msg = JSON.parse(event.data); }
+                catch { return; }
+        
+                // meta/system messages
+                if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
+                    setConversationId(msg.id);
+                    loadConversations(); // refresh sidebar
+                    return;
+                }
+                if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
+                    setLoadedSummary(msg.summary);
+                    return;
+                }
+                if (msg.type === 'ping' || msg.type === 'pong') return;
+        
+                // typing
+                if (typeof msg.sender === 'string' && typeof msg.typing === 'boolean') {
+                    const key = msg.sender;
+                    const val = msg.typing;
+                    setIsTyping(prev => {
+                        const next: TypingState = { ...prev };
+                        // Ensure key is a string before using it
+                        if (key) {
+                            next[key] = val;
+                        }
+                        return next;
+                    });
+                    return;
+                }
+        
+                // normal chat
+                // Explicitly check that msg.sender is a truthy string value before using it as an index.
+                if (typeof msg.sender === 'string' && typeof msg.text === 'string' && msg.sender) {
+                    setIsTyping(prev => {
+                        const next: TypingState = { ...prev };
+                        next[msg.sender] = false;
+                        return next;
+                    });
+                    addMessageToChat({ sender: msg.sender, text: msg.text });
+                    return;
+                }
+            },
+        
+            onclose: (ev) => {
+                console.log('WebSocket closed. code=', ev.code, 'reason=', ev.reason, 'wasClean=', ev.wasClean);
+                setIsWsOpen(false);
+                setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+        
+                // mark ref as closed
+                ws.current = null;
+        
+                // compute next backoff (up to 15s)
+                const base = 1000; // 1s
+                const max = 15000; // 15s
+                const tries = reconnectRef.current.tries;
+                const nextDelay = Math.min(max, base * Math.pow(2, tries)) + Math.floor(Math.random() * 250);
+                reconnectRef.current.tries = tries + 1;
+        
+                // clear any previous timer and schedule a reconnect attempt
+                if (reconnectRef.current.timer) {
+                    window.clearTimeout(reconnectRef.current.timer);
+                }
+                reconnectRef.current.timer = window.setTimeout(() => {
+                    setWsReconnectNonce((n) => n + 1);
+                }, nextDelay);
+            },
+        
+            onerror: (event: Event) => {
+                console.error('WebSocket error:', event);
+                setIsWsOpen(false);
+            }
+        });
+        // --- End of the refactored code block ---
+
+        return () => {
+            if (currentWs && (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING)) {
+            try { currentWs.close(); } catch {}
+            }
+        };
     }, [userToken, userName, conversationId, addMessageToChat, loadConversations, wsReconnectNonce]);
 
         
