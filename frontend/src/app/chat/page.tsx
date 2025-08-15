@@ -476,7 +476,7 @@ const handleNewConversation = () => {
 
         // normal chat
         if (typeof msg.sender === 'string' && typeof msg.text === 'string') {
-            // Ensure msg.sender is a string before using it
+            // Check for msg.sender's existence and type before using it
             if (msg.sender) {
                 setIsTyping(prev => {
                     const next: TypingState = { ...prev };
