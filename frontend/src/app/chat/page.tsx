@@ -31,9 +31,6 @@ interface ConversationListItem {
   updated_at?: string;
 }
 
-// put this just after your interfaces
-type HBWebSocket = WebSocket & { _heartbeatInterval?: number };
-
 // Base REST API (same host as WS but https/http, not ws)
 const API_BASE =
   (process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '')) ||
@@ -445,7 +442,7 @@ const handleNewConversation = () => {
                 // --- end flush ---
             },
         
-            onmessage: (event: MessageEvent) => {
+            onmessage: (event: MessageEvent<string>) => {
             let msg: ServerMessage;
             try { msg = JSON.parse(event.data); }
             catch { return; }
@@ -489,7 +486,7 @@ const handleNewConversation = () => {
             },
 
         
-            onclose: (ev) => {
+            onclose: (ev: CloseEvent) => {
                 console.log('WebSocket closed. code=', ev.code, 'reason=', ev.reason, 'wasClean=', ev.wasClean);
                 setIsWsOpen(false);
                 setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
