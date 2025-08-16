@@ -1691,6 +1691,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                     user_message = data["message"]
 
+                    # Echo the user's message so the UI gets a new bubble
+                    try:
+                        await ws.send_json({"sender": safe_user_name, "text": user_message})
+                    except Exception:
+                        pass
                     # persist the user message
                     await save_message(conv_ref, role="user", sender=proxy.name, content=user_message)
 
@@ -1712,9 +1717,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     except Exception:
                         pass
 
-                    # feed into the group chat
+                    # Run ONE Autogen turn for this message against the existing groupchat state
                     await call_with_retry(
-                        lambda: proxy.a_inject_user_message(user_message),
+                        lambda: proxy.a_initiate_chat(manager, message=user_message),
                         ws,
                         retries=2,
                         base_delay=0.8,
@@ -1734,19 +1739,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         consumer_task = asyncio.create_task(
             message_consumer_task(message_output_queue, websocket, conv_ref, assistant_name_set, safe_user_name)
-        )
-        conversation_task = asyncio.create_task(
-            call_with_retry(
-                # Start the manager even if there's no initial message.
-                # It will wait for user input via the WebSocket handler.
-                lambda: user_proxy.a_initiate_chat(
-                    manager,
-                    message=(initial_config.get('message') or "")
-                ),
-                websocket,
-                retries=2,
-                base_delay=0.8,
-            )
         )
 
         input_handler_task = asyncio.create_task(
@@ -1769,7 +1761,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         try:
             await asyncio.gather(
-                conversation_task,
                 input_handler_task,
                 consumer_task,
                 ka_task,
@@ -1782,10 +1773,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             except Exception:
                 pass
         finally:
-            for t in (conversation_task, input_handler_task, consumer_task, ka_task):
+            for t in (input_handler_task, consumer_task, ka_task):
                 if not t.done():
                     t.cancel()
-            await asyncio.gather(conversation_task, input_handler_task, consumer_task, ka_task, return_exceptions=True)
+            await asyncio.gather(input_handler_task, consumer_task, ka_task, return_exceptions=True)
 
 
     except WebSocketDisconnect:
