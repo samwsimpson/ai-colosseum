@@ -183,8 +183,7 @@ async def _user_from_bearer(authorization: str | None):
     return user
 
 @app.get("/conversations")
-async def list_conversations(authorization: str = Header(default=None), limit: int = 30):
-    user = await _user_from_bearer(authorization)
+async def list_conversations(user=Depends(get_current_user), limit: int = 30):    
 
     col = db.collection("conversations")
     # newest first
@@ -201,7 +200,7 @@ async def list_conversations(authorization: str = Header(default=None), limit: i
     return {"items": items}
 
 @app.patch("/conversations/{conv_id}")
-async def rename_conversation(conv_id: str, body: dict, authorization: str = Header(default=None)):
+async def rename_conversation(conv_id: str, body: dict, user=Depends(get_current_user)):
     user = await _user_from_bearer(authorization)
     new_title = (body or {}).get("title", "")
     new_title = new_title.strip()[:120] or "Untitled"
@@ -955,14 +954,16 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             f"- USER: {user_display_name}\n"
             f"- AGENTS PRESENT: {', '.join(agent_names)}\n\n"
             "Conversation rules for all agents:\n"
-            "1) Only respond to the USER’s messages. Treat other assistants’ messages as context, not as prompts.\n"
-            "2) Do NOT address other assistants directly and do NOT ask them questions unless the USER explicitly asked for a multi-agent round (e.g., 'everyone', or named a subset).\n"
-            "3) If the USER says 'everyone', 'you all', 'all of you', or names multiple assistants, each named assistant replies ONCE with a concise answer (max ~40 words). No preamble, no apologies, no meta.\n"
-            "4) If the USER names a single assistant (e.g., 'Claude,'), only that assistant should reply first. Others stay silent.\n"
-            "5) If the USER says 'one of you' or 'any of you', exactly ONE assistant replies.\n"
-            "6) For greetings ('hi', 'hello'): reply with a short greeting only; do not ask follow-up questions unless the USER asks one.\n"
-            "7) Avoid apologies and disclaimers unless correcting a clear mistake. Be direct and brief.\n"
+            "1) Only respond to the USER’s messages. Treat other assistants’ messages as context, not prompts.\n"
+            "2) Do NOT address or summarize other assistants unless the USER asked for 'everyone' or named a subset.\n"
+            "3) In 'everyone' or subset rounds, reply ONCE with your own answer only. Do not list what others said.\n"
+            "4) If the USER asks to 'list who gave what number', report ONLY your own value as '<YourName>: <value>'. No preambles/apologies; one line.\n"
+            "5) If the USER names a single assistant, only that assistant replies first. Others stay silent.\n"
+            "6) 'one of you' / 'any of you' → exactly ONE assistant replies.\n"
+            "7) If the USER doesn’t name anyone, the last assistant who spoke should continue.\n"
+            "8) Avoid apologies/disclaimers unless correcting a clear mistake. Be concise.\n"
         )
+
 
 
         def make_agent_system(name: str) -> str:
@@ -1303,6 +1304,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self._selector = None                                     # set in attach_selector()
                 self._any_ai_ever: bool = False  # once any assistant speaks, drop pure greetings thereafter
                 self._user_display_name = re.sub(r'[_-]+', ' ', (self.name or '')).strip() or 'there'
+                # NEW: authoritative ledger for each assistant's latest number
+                self._last_number_by_sender: dict[str, int] = {}
+                self._assistant_names_list = sorted(list(self._assistant_name_set))
 
             def attach_selector(self, selector) -> None:
                 self._selector = selector     
@@ -1326,7 +1330,31 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         s = re.sub(r'^[^.!\n]*[.!\n]\s*', '', s, count=1)
                         return s or txt  # don't return empty; fallback to original
                 return txt
-        
+            def _extract_first_int(self, s: str):
+                import re
+                if not s:
+                    return None
+                m = re.search(r"\b-?\d+\b", s)
+                return int(m.group(0)) if m else None
+
+            def _clamp_everyone_response(self, speaker: str, txt: str) -> str:
+                """During a broadcast round, force one compact item (prefer a single integer)."""
+                if not txt:
+                    return txt
+                s = txt.strip()
+
+                # Prefer a single integer if present
+                num = self._extract_first_int(s)
+                if num is not None:
+                    return f"{speaker}: {num}"
+
+                # Otherwise keep only first sentence/line, short and labeled
+                for sep in (".", "!", "?", "\n"):
+                    if sep in s:
+                        s = s.split(sep, 1)[0].strip()
+                        break
+                return f"{speaker}: {s[:120]}"
+
             async def a_receive(self, message, sender=None, request_reply=True, silent=False):
                 """
                 Intercepts assistant->user messages, removes repetitive greetings and manager chatter,
@@ -1445,6 +1473,21 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 if prev and prev.strip() == text.strip():
                     return {"content": "", "name": speaker}
                 self._last_text_by_sender[speaker] = text
+
+                # Record the first integer as this speaker's latest value
+                try:
+                    val = self._extract_first_int(text)
+                    if val is not None:
+                        self._last_number_by_sender[speaker] = val
+                except Exception:
+                    pass
+
+                # If we are in a broadcast round, clamp to a single compact item
+                try:
+                    if self._selector and getattr(self._selector, "multi", {}).get("active"):
+                        text = self._clamp_everyone_response(speaker, text)
+                except Exception:
+                    pass
 
                 if speaker in self._assistant_name_set:
                     self._any_ai_ever = True
@@ -1653,6 +1696,21 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                     # set a title if we don't have one yet
                     await maybe_set_title(conv_ref, user_message)
+
+                    # quick, authoritative summary if the user asks "who gave what number"
+                    try:
+                        lm = (user_message or "").lower()
+                        if ("who" in lm and "gave" in lm and "number" in lm) or ("list" in lm and "who" in lm and "number" in lm):
+                            ledger = getattr(proxy, "_last_number_by_sender", {}) or {}
+                            if ledger:
+                                ordered = [f"{name}: {ledger[name]}" for name in agent_names if name in ledger]
+                                if ordered:
+                                    # send a single authoritative list (avoid LLM hallucinations)
+                                    await ws.send_json({"sender": "System", "text": "Numbers so far:\n" + "\n".join(ordered)})
+                                    # don't forward this prompt to the LLMs; we've answered already
+                                    continue
+                    except Exception:
+                        pass
 
                     # feed into the group chat
                     await call_with_retry(
