@@ -81,15 +81,7 @@ MISTRAL_SYSTEM = _env(
     "If critical details seem missing, ask the user if you'd like to retrieve details from earlier turns."    
 )
 
-GROUPCHAT_SYSTEM_MESSAGE = _env(
-    "GROUPCHAT_SYSTEM_MESSAGE",
-    (
-        "You are the group chat coordinator. Keep discussion focused, prevent loops, and ensure each agent only speaks "
-        "when it adds value. If agents repeat themselves or stall, hand control back to the user. "
-        "Do not allow repetitive salutations: agents should greet at most once at the start of a new conversation; "
-        "on follow-up turns they should answer directly without re-greeting."
-    )
-)
+
 
 # ==== end system prompts ====
 
@@ -948,24 +940,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             print("[opening greeting] skipped:", e)
         # --- end greeting ---
 
-        # ---- system prompts ----                                                                                          
-        roster_text = (
-            "SYSTEM: Multi-agent room context\n"
-            f"- USER: {user_display_name}\n"
-            f"- AGENTS PRESENT: {', '.join(agent_names)}\n\n"
-            "Conversation rules for all agents:\n"
-            "1) Only respond to the USER’s messages. Treat other assistants’ messages as context, not prompts.\n"
-            "2) Do NOT address or summarize other assistants unless the USER asked for 'everyone' or named a subset.\n"
-            "3) In 'everyone' or subset rounds, reply ONCE with your own answer only. Do not list what others said.\n"
-            "4) If the USER asks to 'list who gave what number', report ONLY your own value as '<YourName>: <value>'. No preambles/apologies; one line.\n"
-            "5) If the USER names a single assistant, only that assistant replies first. Others stay silent.\n"
-            "6) 'one of you' / 'any of you' → exactly ONE assistant replies.\n"
-            "7) If the USER doesn’t name anyone, the last assistant who spoke should continue.\n"
-            "8) Avoid apologies/disclaimers unless correcting a clear mistake. Be concise.\n"
-            "9) In 'everyone' rounds, reply with your own content only. Do not comment on, disclaim about, or gate on other assistants.\n"
-            "10) If the USER asks for a summary, provide your own concise summary of the conversation so far.\n"
-        )
-
         def make_agent_system(name: str) -> str:
             base = {
                 "ChatGPT": CHATGPT_SYSTEM,
@@ -973,20 +947,22 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 "Gemini": GEMINI_SYSTEM,
                 "Mistral": MISTRAL_SYSTEM,
             }.get(name, "You are an assistant.")
+
+            # Use a single, simplified prompt for all agents
+            base_prompt = (
+                "You are in a group chat with a user and other AI assistants. "
+                "Your primary goal is to address the user's request. "
+                "Read and understand the full conversation history. "
+                "Speak only when you have a distinct contribution to make or when directly addressed by the user. "
+                "Be concise, direct, and avoid conversational fillers like 'As an AI...' or 'I apologize...' unless you are correcting a factual error. "
+                "Do not comment on other assistants' turns or try to hand off the conversation. "
+            )
+
             return (
                 f"{base}\n\n"
                 f"Your name is {name}. Participants: {user_display_name} (user), {', '.join(agent_names)} (assistants).\n"
-                f"{roster_text}\n"
-                "Important style:\n"
-                "- Be concise. Prefer 1–4 sentences.\n"
-                "- Do not apologize or add disclaimers unless you actually made an error.\n"
-                "- Do not greet repeatedly.\n"
-                "- Never instruct or hand off to other assistants; answer the USER directly.\n"
-                "- In 'everyone' or subset rounds, keep it to one compact answer; no prefaces.\n"
-                "Context access: You can read the full transcript above (including other assistants). Do not claim you lack access to their messages; just follow the rules about when to mention them.\n"
-
+                f"{base_prompt}"
             )
-
 
         # ---- model configs ----
         chatgpt_llm_config = {
@@ -1088,17 +1064,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     else:
                         out_text = str(result).strip()
 
-                    # Forward THROUGH the user proxy so your filters run, then UI sees it
+                    
+                    # Forward the message directly to the output queue
                     if out_text:
                         try:
-                            await self._proxy_for_forward.a_receive(
-                                {"content": out_text, "name": self.name},
-                                sender=self,
-                                request_reply=False,
-                                silent=True,
-                            )
+                            self._message_output_queue.put_nowait({"sender": self.name, "text": out_text})
                         except Exception as e:
-                            print(f"[Assistant forward -> proxy] error: {e}")
+                            print(f"[Assistant message forward] error: {e}")
                 finally:
                     # ALWAYS clear typing even if we error/return early
                     try:
@@ -1110,193 +1082,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
 
 
-        class CustomSpeakerSelector:
-            """
-            - If the user addresses an assistant by name (leading vocative like 'Claude,' or 'to Claude'), that assistant replies.
-            - If the user gives no name, the last assistant who spoke replies.
-            - If an assistant clearly hands off to another assistant, the addressee replies next.
-            - If user asks 'everyone'/'you all', run a one-pass round (each assistant once), then hand control back to the user.
-            """
-
-            def __init__(self, agents: List[autogen.Agent], user_name: str):
-                self.user_name = user_name
-                self.agent_by_name = {a.name: a for a in agents}
-                # assistants are everyone except the user/System
-                self.assistant_names = [a.name for a in agents if a.name not in (user_name, "System")]
-                self.assistant_agents = [self.agent_by_name[n] for n in self.assistant_names]
-                self.previous_assistant: "Optional[autogen.Agent]" = None
-                self.multi = {"active": False, "queue": []}
-
-                # Canonical name aliases to catch common ways users refer to agents
-                # (keys are lowercase; values are canonical assistant names present in the room)
-                self.alias_map = {
-                    "chatgpt": "ChatGPT",
-                    "chat gpt": "ChatGPT",
-                    "gpt": "ChatGPT",
-                    "gpt-4o": "ChatGPT",
-                    "openai": "ChatGPT",
-                    "claude": "Claude",        # (redundant but harmless)
-                    "anthropic": "Claude",
-                    "gemini": "Gemini",        # (redundant but harmless)
-                    "google": "Gemini",
-                    "mistral": "Mistral",      # (redundant but harmless)
-                    "mistral ai": "Mistral",
-                }
-                # only keep aliases that actually map to agents that exist in this chat
-                existing = set(self.assistant_names)
-                self.alias_map = {k: v for k, v in self.alias_map.items() if v in existing}                
-
-            def note_speaker(self, name: str) -> None:
-                """Let the proxy tell us which assistant just spoke."""
-                if name in self.assistant_names:
-                    self.previous_assistant = self.agent_by_name.get(name, self.previous_assistant)
-
-            def _broadcast_requested(self, text: str) -> bool:
-                low = (text or "").lower()
-                return any(k in low for k in (
-                    "everyone", "all of you", "both of you", "each of you",
-                    "all agents", "all ais", "you all", "@all", "all of you say"
-                ))
-
-            def _direct_addressees(self, text: str) -> list[str]:
-                """
-                Return canonical assistant names directly addressed by the USER in this text.
-                Supports:
-                - Start-of-text direct calls: "@Name", "Name:", "Name,", "hey Name", "hi Name", "ok Name"
-                - Enumerations: "ChatGPT and Claude", "ChatGPT, Claude, and Gemini", "Claude vs Gemini"
-                - Mid-sentence targets: "to Claude", "for Gemini"
-                - Aliases like "OpenAI"->ChatGPT, "Anthropic"->Claude if present in this room
-                """
-                import re
-                low = (text or "").strip().lower()
-                if not low:
-                    return []
-
-                # Canonical present assistants
-                canon = {n.lower(): n for n in self.assistant_names}
-
-                # Aliases (only those actually present)
-                alias_map = {
-                    "chatgpt": "ChatGPT", "chat gpt": "ChatGPT", "gpt": "ChatGPT", "gpt-4o": "ChatGPT", "openai": "ChatGPT",
-                    "claude": "Claude", "anthropic": "Claude",
-                    "gemini": "Gemini", "google": "Gemini",
-                    "mistral": "Mistral", "mistral ai": "Mistral",
-                }
-                alias_to_canon = {k: v for k, v in alias_map.items() if v in self.assistant_names}
-                alias_to_canon.update({k: v for k, v in canon.items()})  # include canonical tokens
-
-                tokens = sorted(alias_to_canon.keys(), key=lambda s: -len(s))  # prefer longer phrases
-                def normalize(tok: str) -> str | None:
-                    return alias_to_canon.get(tok.strip().lower())
-
-                addrs: list[str] = []
-
-                # 1) Start-of-text direct call (with optional greeting)
-                for key in tokens:
-                    pat = rf"^\s*(?:hey|hi|hello|ok|okay)?\s*@?{re.escape(key)}\b\s*[:,;\.\-–—!\?]?"
-                    if re.search(pat, low):
-                        name = normalize(key)
-                        if name and name not in addrs: addrs.append(name)
-
-                # 2) Enumerations: X and Y / X, Y, and Z / X vs Y / X & Y / X/Y
-                if len(addrs) == 0:
-                    name_group = r"(?:%s)" % "|".join(map(re.escape, tokens))
-                    if re.search(rf"{name_group}\s*(?:,|\band\b|&|/|\bvs\.?\b|\bversus\b)\s*{name_group}", low):
-                        found = re.findall(name_group, low)
-                        seen = set()
-                        for tok in found:
-                            nm = normalize(tok)
-                            if nm and nm not in seen:
-                                addrs.append(nm); seen.add(nm)
-
-                # 3) Mid-sentence “to/for Name”
-                for key in tokens:
-                    pat = rf"\b(?:to|for)\s+{re.escape(key)}\b"
-                    if re.search(pat, low):
-                        name = normalize(key)
-                        if name and name not in addrs:
-                            addrs.append(name)
-
-                return addrs
-
-
-            def __call__(self, last_speaker: autogen.Agent, groupchat: autogen.GroupChat) -> autogen.Agent:
-                # If no history at all, start with ChatGPT (or first assistant)
-                if not groupchat.messages:
-                    return random.choice(self.assistant_agents) if self.assistant_agents else self.agent_by_name.get("ChatGPT")
-
-                # Walk backwards to find the last *significant* message:
-                # - skip manager/system lines
-                # - prefer a real assistant or the user
-                idx = len(groupchat.messages) - 1
-                last_name = ""
-                last_role = ""
-                content = ""
-                while idx >= 0:
-                    msg = groupchat.messages[idx]
-                    n = str(msg.get("name") or "")
-                    r = str(msg.get("role") or "")
-                    c = str(msg.get("content") or "")
-                    if n.lower() not in ("chat_manager", "manager", "groupchatmanager") and r != "system":
-                        last_name, last_role, content = n, r, c
-                        break
-                    idx -= 1
-
-                # If we somehow found nothing usable, default to ChatGPT
-                if not last_name and not last_role:
-                    return self.agent_by_name.get("ChatGPT", self.assistant_agents[0])
-             
-                # A) Assistant spoke last → continue any active round, otherwise hand control to the user
-                if last_name in self.assistant_names:
-                    self.previous_assistant = self.agent_by_name[last_name]
-
-                    # NO assistant→assistant handoffs; we only honor user-directed routing
-                    if self.multi["active"]:
-                        if self.multi["queue"]:
-                            return self.agent_by_name[self.multi["queue"].pop(0)]
-                        self.multi["active"] = False
-                        return self.agent_by_name[self.user_name]
-
-                    return self.agent_by_name[self.user_name]
-
-                # B) User spoke last → pick addressed agent, else last assistant, else first assistant
-                if last_role == "user" or last_name == self.user_name:
-                    # everyone / you all
-                    if self._broadcast_requested(content):
-                        import random
-                        self.multi["active"] = True
-                        self.multi["queue"] = [a.name for a in self.assistant_agents]
-                        random.shuffle(self.multi["queue"])
-                        return self.agent_by_name[self.multi["queue"].pop(0)]
-
-                    # named subset (“ChatGPT and Claude”)
-                    targets = self._direct_addressees(content)
-                    if len(targets) >= 2:
-                        self.multi["active"] = True
-                        self.multi["queue"] = [t for t in targets if t in self.assistant_names]
-                        return self.agent_by_name[self.multi["queue"].pop(0)]
-                    if len(targets) == 1:
-                        return self.agent_by_name[targets[0]]
-
-                    # “one of you / any of you” → exactly one assistant
-                    import re
-                    low = (content or "").lower()
-                    if re.search(r"\b(?:one|any)\s+of\s+you\b", low):
-                        import random
-                        return random.choice(self.assistant_agents) if self.assistant_agents else self.agent_by_name[self.user_name]
-
-                    # default: reply from the last assistant who spoke (if any)
-                    if self.previous_assistant:
-                        return self.previous_assistant
-
-                    # otherwise, pick one at random
-                    import random
-                    return random.choice(self.assistant_agents) if self.assistant_agents else self.agent_by_name[self.user_name]
-
-
-
-                # C) Fallback (e.g., a stray system/manager ended up “last”): ChatGPT or first assistant
-                return self.agent_by_name.get("ChatGPT", self.assistant_agents[0])
+        
 
 
 
@@ -1316,281 +1102,39 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self._user_input_queue: asyncio.Queue[str] = asyncio.Queue()
                 self._assistant_name_set = set(assistant_name_set)
                 self._assistant_name_lower = {n.lower(): n for n in self._assistant_name_set}
-                self._utter_count: dict[str, int] = defaultdict(int)  # count messages per assistant
-                self._greeted_once: set[str] = set()  # track which assistants have already greeted                
-                self._last_text_by_sender: dict[str, str] = {}            # to drop exact repeats
-                self._last_ai_speaker: str | None = None                  # who spoke last (AI)
-                self._selector = None                                     # set in attach_selector()
-                self._any_ai_ever: bool = False  # once any assistant speaks, drop pure greetings thereafter
-                self._user_display_name = re.sub(r'[_-]+', ' ', (self.name or '')).strip() or 'there'
+                # Keep this for de-duping, but remove the rest
+                self._last_text_by_sender: dict[str, str] = {}
                 # NEW: authoritative ledger for each assistant's latest number
-                self._last_number_by_sender: dict[str, int] = {}
+                
                 self._assistant_names_list = sorted(list(self._assistant_name_set))
-                self._last_user_text: str = ""
-
-            def attach_selector(self, selector) -> None:
-                self._selector = selector     
-                                          
-            def _strip_perfunctory_openers(self, txt: str) -> str:
-                if not txt: 
-                    return txt
-                s = txt.lstrip()
-                lowers = s.lower()
-                # Drop common unnecessary openers
-                bad_starts = (
-                    "i apologize", "i'm sorry", "sorry", 
-                    "as an ai", "as a language model", 
-                    "as an ai assistant", "as a large language model"
-                )
-                for b in bad_starts:
-                    if lowers.startswith(b):
-                        # remove leading sentence or line
-                        # split on first period/newline and keep the rest
-                        import re
-                        s = re.sub(r'^[^.!\n]*[.!\n]\s*', '', s, count=1)
-                        return s or txt  # don't return empty; fallback to original
-                return txt
-            def _extract_first_int(self, s: str):
-                import re
-                if not s:
-                    return None
-                m = re.search(r"\b-?\d+\b", s)
-                return int(m.group(0)) if m else None
-
-            def _clamp_everyone_response(self, speaker: str, txt: str) -> str:
-                if not txt:
-                    return txt
-                s = txt.strip()
-
-                # If the user asked for names, normalize to just the speaker's name
-                asked_for_name = "name" in (self._last_user_text or "").lower()
-                if asked_for_name:
-                    return speaker
-
-                # Only collapse to a single integer if the *user* asked for numbers
-                asked_for_number = "number" in (self._last_user_text or "").lower()
-                num = self._extract_first_int(s) if asked_for_number else None
-                if num is not None:
-                    return str(num)
-
-                # Remove leading bullets/enumerators like "1. ", "(1) ", "-", "• "
-                import re
-                s = re.sub(r'^\s*(?:\(?\d+\)?[.)]|[-*•])\s*', '', s)
-
-                # Keep the first sentence *that contains letters*; otherwise fall back
-                parts = re.split(r'(?<=[.!?])\s+', s)
-                for part in parts:
-                    if re.search(r'[A-Za-z]', part):
-                        return part.strip()[:120]
-                return s[:120] or "Hi!"
-
-            def _strip_leading_model_label(self, s: str) -> str:
-                if not s:
-                    return s
-                # Allow leading punctuation/formatting: quotes, *, **, [, (, {, dashes
-                m = re.match(
-                    r"^\s*[\-–—\*\[\(\{\'\"`]*\s*(ChatGPT|Claude|Gemini|Mistral)\s*[:\-–—]\s*",
-                    s,
-                    flags=re.IGNORECASE
-                )
-                return s[m.end():].lstrip() if m else s
-
-
-
+               
             async def a_receive(self, message, sender=None, request_reply=True, silent=False):
                 """
-                Intercepts assistant->user messages, removes repetitive greetings and manager chatter,
-                de-dups identical repeats, and forwards to the browser.
+                Intercepts assistant->user messages and forwards them to the browser,
+                while handling termination and basic de-duplication.
                 """
-                import re
-
                 # ---- normalize the incoming payload ----
                 speaker = (
                     getattr(sender, "name", None)
                     or (message.get("name") if isinstance(message, dict) else None)
                     or "Unknown"
                 )
-
                 raw_text = (
                     (message.get("content") if isinstance(message, dict) else None)
                     or (message.get("text") if isinstance(message, dict) else None)
                     or (str(message) if not isinstance(message, dict) else "")
                 )
                 text = (raw_text or "").strip()
-                text = self._strip_perfunctory_openers(text)
-                text = self._strip_leading_model_label(text)
-                # Remember last AI speaker immediately (even if we drop later)
-                if self._selector and speaker in self._assistant_name_set:
-                    try:
-                        self._selector.note_speaker(speaker)
-                    except Exception:
-                        pass
 
                 # Never show manager/system lines
                 if speaker and speaker.lower().strip() in {"chat_manager", "manager", "orchestrator"}:
                     return {"content": "", "name": speaker}
 
-                asked_hi_again = "say hi" in (self._last_user_text or "").lower() \
-                    or "everyone say hi" in (self._last_user_text or "").lower() \
-                    or "say hello" in (self._last_user_text or "").lower() \
-                    or ("greet" in (self._last_user_text or "").lower())
-                in_broadcast = bool(self._selector and getattr(self._selector, "multi", {}).get("active"))
-                bypass_clamp = False  # keep one shared flag
-
-                # ---- greeting detection & stripping ----
-                def strip_greeting(t: str) -> tuple[bool, str]:
-                    low = (t or "").strip().lower()
-
-                    uname_full = self._user_display_name.strip()
-                    parts = uname_full.split()
-                    first = parts[0] if parts else uname_full
-                    last = parts[-1] if len(parts) > 1 else first
-
-                    name_alt = r'(?:' + '|'.join({
-                        re.escape(uname_full.lower()),
-                        re.escape(first.lower()),
-                        re.escape(last.lower()),
-                    }) + r')'
-
-                    greet_start = rf'^(?:hi|hello|hey|greetings|good (?:morning|afternoon|evening)|{name_alt}\b)'
-
-                    canned = (
-                        r'(?:how (?:can|may) i (?:help|assist)(?: you)?(?: today)?|'
-                        r'what can i (?:help|do) (?:for )?you|'
-                        r'let me know if i can help|'
-                        r'how are you(?: doing)?(?: today)?|'
-                        r'i(?:\'m| am) here to help|'
-                        r'how can i support you(?: today)?|'
-                        r'it(?:\'s)? nice to meet you|'
-                        r'great to meet you|'
-                        r'hope (?:you(?:\'re)? )?(?:doing )?(?:well|good))'
-                    )
-
-                    looks_open = bool(re.match(greet_start, low))
-                    mentions_canned = bool(re.search(canned, low))
-                    is_very_short = len(low) <= 160
-
-                    is_greeting = looks_open and (mentions_canned or is_very_short)
-                    if not is_greeting:
-                        return (False, t)
-
-                    pat = (
-                        rf'{greet_start}'
-                        rf'(?:\s*,?\s*{name_alt}\b)?'
-                        r'[\s,!\.-:–—]*'
-                        rf'(?:{canned})?'
-                        r'[\s,!\.-:–—]*'
-                    )
-                    stripped = re.sub(pat, '', t, flags=re.IGNORECASE).strip()
-                    return (True, stripped)
-
-                was_greet, stripped = strip_greeting(text)
-     
-                # Are we in a broadcast ("everyone") round?
-                in_broadcast = bool(self._selector and getattr(self._selector, "multi", {}).get("active"))
-                bypass_clamp = False  # single declaration
-
-                # 1) First time this assistant speaks in a broadcast → force a tiny greeting
-                if in_broadcast and (speaker not in self._greeted_once):
-                    self._greeted_once.add(speaker)
-                    first = self._user_display_name.split()[0]
-                    variants = {
-                        "ChatGPT": [f"Hi {first}!", f"Hey {first}!", f"Hello {first}!"],
-                        "Claude":  [f"Hi {first}!", f"Hello {first}!", f"Good to see you, {first}!"],
-                        "Gemini":  [f"Hi {first}!", f"Hello {first}!", f"Hey there, {first}!"],
-                        "Mistral": [f"Hi {first}!", f"Hey {first}!", f"Hello {first}!"],
-                    }
-                    text = random.choice(variants.get(speaker, [f"Hi {first}!"]))
-                    bypass_clamp = True
-
-                # 2) Else, if this message itself is a greeting and they haven't greeted yet
-                elif was_greet and speaker not in self._greeted_once:
-                    self._greeted_once.add(speaker)
-                    first = self._user_display_name.split()[0]
-                    text = f"Hi {first}!"
-                    bypass_clamp = True
-
-                # 3) If they’re greeting again later, strip it (or drop if nothing left)
-                elif was_greet and speaker in self._greeted_once:
-                    # If the user explicitly asked to greet again, emit a tiny hello
-                    if in_broadcast and asked_hi_again:
-                        first = self._user_display_name.split()[0]
-                        text = f"Hi {first}!"
-                        bypass_clamp = True
-                    else:
-                        leftover = (stripped or "").strip()
-                        if not leftover:
-                            return {"content": "", "name": speaker}
-                        # treat trivial leftovers as noise (e.g., "there", "hi")
-                        if len(leftover.split()) <= 2 or leftover.lower() in {"there", "hi", "hello", "hey"}:
-                            return {"content": "", "name": speaker}
-                        text = leftover
-
-
-                # Hard kill-switch for classic openers after already greeted
-                if speaker in self._greeted_once:
-                    low2 = text.lower().strip()
-                    if re.search(r'\bhow (?:can|may) i (?:help|assist)\b', low2) or \
-                       re.search(r'\bwhat can i (?:help|do) (?:for )?you\b', low2) or \
-                       re.search(r'\bhow can i assist you today\b', low2):
-                        return {"content": "", "name": speaker}
-                    
-                # Never act as a coordinator or comment on other assistants taking a turn
-                low_mgr = (text or "").lower().strip()
-                if speaker in self._assistant_name_set and re.search(
-                    r"\b(please continue|your turn|over to you|passing to|handoff to|"
-                    r"i (?:will|won(?:'|’)t|will not) (?:respond|repond|reply) as|"
-                    r"i cannot speak for|i can(?:'|’)t speak for)\b",
-                    low_mgr
-                ):
-                    return {"content": "", "name": speaker}
-
-                # Drop manager-ish handoff lines (never act as a coordinator)
-                low_mgr = text.lower().strip()
-                if speaker in self._assistant_name_set and re.search(
-                        r'\b(please continue|your turn|over to you|passing to|i will let)\b', low_mgr):
-                    return {"content": "", "name": speaker}
-
-                # Extra guard: drop generic “assist you today” even if it slipped past greeting logic
-                # Only drop generic helpers AFTER the assistant has already greeted once
-                low = text.lower()
-                if (speaker in self._assistant_name_set and speaker in self._greeted_once and
-                    any(p in low for p in (
-                        'how can i assist you', 'how may i assist you',
-                        'how can i help you', 'what can i help you with'
-                    )) and len(low) <= 80):
-                    return {"content": "", "name": speaker}
-
-                # De-dup identical consecutive messages
+                # De-dup identical consecutive messages (This is a helpful heuristic to keep)
                 prev = self._last_text_by_sender.get(speaker)
                 if prev and prev.strip() == text.strip():
                     return {"content": "", "name": speaker}
                 self._last_text_by_sender[speaker] = text
-
-                # Record the first integer as this speaker's latest value
-                try:
-                    val = self._extract_first_int(text)
-                    if val is not None:
-                        self._last_number_by_sender[speaker] = val
-                except Exception:
-                    pass
-                # If the user asked for a number and this is NOT a broadcast, reduce to the first integer
-                try:
-                    if (not in_broadcast) and ("number" in (self._last_user_text or "").lower()):
-                        num2 = self._extract_first_int(text)
-                        if num2 is not None:
-                            text = str(num2)
-                except Exception:
-                    pass
-                # If we are in a broadcast round, clamp to a single compact item
-                try:
-                    if self._selector and getattr(self._selector, "multi", {}).get("active") and not bypass_clamp:
-                        text = self._clamp_everyone_response(speaker, text)
-                except Exception:
-                    pass
-
-                if speaker in self._assistant_name_set:
-                    self._any_ai_ever = True
 
                 # Forward to browser
                 if text:
@@ -1600,19 +1144,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     except Exception:
                         await self._message_output_queue.put(payload)
 
-                    # --- NEW ADDITION ---
-                    # Send the typing-off message now that we know there's content.
+                    # Send the typing-off message
                     try:
                         self._message_output_queue.put_nowait({"sender": speaker, "typing": False, "text": ""})
                     except Exception:
                         pass
-                    # --- END NEW ADDITION ---
-                else:
-                    # NEW: if we suppressed/stripped the text, still clear any typing bubble
-                    try:
-                        self._message_output_queue.put_nowait({"sender": speaker, "typing": False, "text": ""})
-                    except Exception:
-                        pass
+
                 # Keep base behavior for Autogen bookkeeping
                 return await super().a_receive(message, sender=sender, request_reply=request_reply, silent=silent)
 
@@ -1682,53 +1219,22 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             await websocket.send_json({"sender": "System", "text": "No AIs available for your subscription."})
             return
 
-        selector = CustomSpeakerSelector(agents, user_name=safe_user_name)
-        user_proxy.attach_selector(selector)
-
-        # --- Seed messages: summary (if any) + memory primer and group rules ---
         seed_messages = []
-
-        # If you already saved a running summary on the conversation, drop it in
         if conv_doc.get("summary"):
             seed_messages.append({
                 "role": "system",
                 "content": f"Conversation summary so far:\n{conv_doc['summary']}"
             })
 
-        # Memory primer + participants and addressing rules
-        participants = ", ".join(agent_names)  # just the AIs
         seed_messages.append({
             "role": "system",
             "content": (
-                f"Participants: {participants}. User: {user_display_name}. Conversation ID: {conv_ref.id}.\n"
-                "Memory: This conversation is persistent across sessions. Use the 'Conversation summary' (above) "
-                "as ground truth for prior context. If a detail seems missing, briefly ask the user before assuming.\n\n"
-                "Addressing rules for group chat:\n"
-                "1) If the user starts with a name (e.g., 'Claude,'), that named agent should answer first.\n"
-                "2) If no name is given and the user is replying to the last speaker, that last speaker should respond.\n"
-                "3) Mentioning an agent by name in third-person does not imply that agent is being addressed.\n"
-                "4) If the user says 'you all' or 'everyone', each agent may respond once (no duplicates), then yield.\n"
-                "Keep responses concise; avoid name→name echoing."
+                f"Participants: {', '.join(agent_names)}. User: {user_display_name}. "
+                "Memory: This conversation is persistent. Rely on the 'Conversation summary' for prior context."
             )
         })
 
 
-
-        groupchat = autogen.GroupChat(
-            agents=agents,
-            messages=seed_messages,
-            max_round=999999,
-            speaker_selection_method=selector,  # <-- use your CustomSpeakerSelector
-            allow_repeat_speaker=True,
-        )
-
-
-        # Passive router only (never speaks; no coordinator persona)
-        manager = autogen.GroupChatManager(
-            groupchat=groupchat,
-            llm_config=False,
-            system_message=""  # no manager behavior
-        )
 
         # ---- tasks ----        
         async def message_consumer_task(queue: asyncio.Queue, ws: WebSocket, conv_ref, agent_name_set: set, user_internal_name: str):
@@ -1796,37 +1302,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # set a title if we don't have one yet
                     await maybe_set_title(conv_ref, user_message)
 
-                    # quick, authoritative summary if the user asks who said what number
-                    try:
-                        lm = (user_message or "").lower()
-                        asked_list = bool(
-                            # who said/gave which number(s)
-                            re.search(r"\bwho\s+(?:said|gave)\b.*\bnumber(?:s)?\b", lm)
-                            or re.search(r"\blist\b.*\bnumber(?:s)?\b.*\b(who|by)\b", lm)
-                            or re.search(r"\beach\b.*\bnumber(?:s)?\b.*\b(who|by)\b", lm)
-                            or re.search(r"\bevery(?:one| body)?\b.*\bnumber(?:s)?\b.*\b(who|by)\b", lm)
-                            # extra catch-alls
-                            or (("number" in lm or "numbers" in lm) and ("who said" in lm or "who gave" in lm or "who has" in lm))
-                            or (("who said" in lm or "who gave" in lm) and ("them" in lm or "it" in lm or "values" in lm))
-                            or ("what did each of you give" in lm)
-                        )
-                        if asked_list:
-                            # authoritative ledger is on the proxy
-                            ledger = getattr(user_proxy, "_last_number_by_sender", {}) or {}
-                            if ledger:
-                                ordered = [f"{name}: {ledger[name]}" for name in agent_names if name in ledger]
-                                if ordered:
-                                    await websocket.send_json({"sender": "System", "text": "Numbers so far:\n" + "\n".join(ordered)})
-                                    continue  # do not forward to LLMs
-                            # Fallback so the user sees *something*
-                            await websocket.send_json({
-                                "sender": "System",
-                                "text": "I don’t have any numbers recorded yet. Try: “Everyone give me a random number.”"
-                            })
-                            continue
-                    except Exception:
-                        pass
-
+                    
 
 
                     # Run ONE Autogen turn for this message against the existing groupchat state
