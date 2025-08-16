@@ -152,6 +152,29 @@ app.add_middleware(
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/google-auth")
 
+async def get_current_user(token: str = Depends(oauth2_scheme)):
+    credentials_exception = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Could not validate credentials",
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+    try:
+        payload = pyjwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("sub")
+        if not user_id:
+            raise credentials_exception
+
+        user_ref = db.collection('users').document(user_id)
+        user_doc = await user_ref.get()
+        if not user_doc.exists:
+            raise credentials_exception
+
+        user = user_doc.to_dict() or {}
+        user['id'] = user_doc.id
+        return user
+    except pyjwt.PyJWTError:
+        raise credentials_exception
+
 class ChatMessage(BaseModel):
     sender: str
     text: str
@@ -201,7 +224,7 @@ async def list_conversations(user=Depends(get_current_user), limit: int = 30):
 
 @app.patch("/conversations/{conv_id}")
 async def rename_conversation(conv_id: str, body: dict, user=Depends(get_current_user)):
-    user = await _user_from_bearer(authorization)
+    
     new_title = (body or {}).get("title", "")
     new_title = new_title.strip()[:120] or "Untitled"
 
@@ -213,29 +236,6 @@ async def rename_conversation(conv_id: str, body: dict, user=Depends(get_current
 
     await ref.update({"title": new_title, "updated_at": datetime.utcnow()})
     return {"ok": True}
-
-async def get_current_user(token: str = Depends(oauth2_scheme)):
-    credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
-    try:
-        payload = pyjwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        user_id = payload.get("sub")
-        if not user_id:
-            raise credentials_exception
-
-        user_ref = db.collection('users').document(user_id)
-        user_doc = await user_ref.get()
-        if not user_doc.exists:
-            raise credentials_exception
-
-        user = user_doc.to_dict() or {}
-        user['id'] = user_doc.id
-        return user
-    except pyjwt.PyJWTError:
-        raise credentials_exception
 
 def create_access_token(data: dict, expires_delta: Union[timedelta, None] = None):
     to_encode = data.copy()
