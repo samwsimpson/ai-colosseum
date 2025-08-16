@@ -1219,7 +1219,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             )
         )
 
-
         # ---- tasks ----        
         async def message_consumer_task(queue: asyncio.Queue, ws: WebSocket, conv_ref, agent_name_set: set, user_internal_name: str):
             while True:
@@ -1341,8 +1340,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             for t in (input_handler_task, consumer_task, ka_task, chat_run_task(user_proxy, manager)):
                 if not t.done():
                     t.cancel()
-            await asyncio.gather(input_handler_task, consumer_task, ka_task, chat_run_task(user_proxy, manager), return_exceptions=True)
-
+            await asyncio.gather(input_handler_task, consumer_task, ka_task, chat_run_task(user_proxy, manager), return_exceptions=True))
 
     except WebSocketDisconnect:
         print("WebSocket closed")
