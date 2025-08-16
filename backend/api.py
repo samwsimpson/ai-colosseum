@@ -1143,50 +1143,49 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 - Start-of-text direct calls: "@Name", "Name:", "Name,", "hey Name", "hi Name", "ok Name"
                 - Enumerations: "ChatGPT and Claude", "ChatGPT, Claude, and Gemini", "Claude vs Gemini"
                 - Mid-sentence targets: "to Claude", "for Gemini"
-                Also honors aliases (e.g., "OpenAI" -> ChatGPT, "Anthropic" -> Claude).
+                - Aliases like "OpenAI"->ChatGPT, "Anthropic"->Claude if present in this room
                 """
                 import re
                 low = (text or "").strip().lower()
                 if not low:
                     return []
 
-                # Canonical set
+                # Canonical present assistants
                 canon = {n.lower(): n for n in self.assistant_names}
 
-                # Merge aliases with canon
-                alias_to_canon = dict(self.alias_map)
-                alias_to_canon.update({k: v for k, v in canon.items()})  # allow matching canonical tokens too
+                # Aliases (only those actually present)
+                alias_map = {
+                    "chatgpt": "ChatGPT", "chat gpt": "ChatGPT", "gpt": "ChatGPT", "gpt-4o": "ChatGPT", "openai": "ChatGPT",
+                    "claude": "Claude", "anthropic": "Claude",
+                    "gemini": "Gemini", "google": "Gemini",
+                    "mistral": "Mistral", "mistral ai": "Mistral",
+                }
+                alias_to_canon = {k: v for k, v in alias_map.items() if v in self.assistant_names}
+                alias_to_canon.update({k: v for k, v in canon.items()})  # include canonical tokens
 
-                # Build ordered tokens list (longest first to prefer "mistral ai" over "mistral")
-                tokens = sorted(alias_to_canon.keys(), key=lambda s: -len(s))
-
+                tokens = sorted(alias_to_canon.keys(), key=lambda s: -len(s))  # prefer longer phrases
                 def normalize(tok: str) -> str | None:
-                    t = tok.strip().lower()
-                    return alias_to_canon.get(t)
+                    return alias_to_canon.get(tok.strip().lower())
 
                 addrs: list[str] = []
 
-                # 1) Start-of-text direct call (optionally with greeting)
+                # 1) Start-of-text direct call (with optional greeting)
                 for key in tokens:
                     pat = rf"^\s*(?:hey|hi|hello|ok|okay)?\s*@?{re.escape(key)}\b\s*[:,\-–—]?"
                     if re.search(pat, low):
                         name = normalize(key)
-                        if name and name not in addrs:
-                            addrs.append(name)
+                        if name and name not in addrs: addrs.append(name)
 
                 # 2) Enumerations: X and Y / X, Y, and Z / X vs Y / X & Y / X/Y
-                # Connectors imply multiple addressees
-                name_group = r"(?:%s)" % "|".join(map(re.escape, tokens))
-                enum_pat = rf"{name_group}\s*(?:,|\band\b|&|/|\bvs\.?\b|\bversus\b)\s*{name_group}"
-                if re.search(enum_pat, low):
-                    # capture all occurrences; dedupe but preserve user order
-                    found = re.findall(name_group, low)
-                    seen = set()
-                    for tok in found:
-                        name = normalize(tok)
-                        if name and name not in seen:
-                            addrs.append(name)
-                            seen.add(name)
+                if len(addrs) == 0:
+                    name_group = r"(?:%s)" % "|".join(map(re.escape, tokens))
+                    if re.search(rf"{name_group}\s*(?:,|\band\b|&|/|\bvs\.?\b|\bversus\b)\s*{name_group}", low):
+                        found = re.findall(name_group, low)
+                        seen = set()
+                        for tok in found:
+                            nm = normalize(tok)
+                            if nm and nm not in seen:
+                                addrs.append(nm); seen.add(nm)
 
                 # 3) Mid-sentence “to/for Name”
                 for key in tokens:
@@ -1224,18 +1223,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 # If we somehow found nothing usable, default to ChatGPT
                 if not last_name and not last_role:
                     return self.agent_by_name.get("ChatGPT", self.assistant_agents[0])
-
-                # A) Assistant spoke last → maybe handoff, else give floor back to user
+             
+                # A) Assistant spoke last → continue any active round, otherwise hand control to the user
                 if last_name in self.assistant_names:
-                    # Remember who spoke last (useful for future heuristics)
                     self.previous_assistant = self.agent_by_name[last_name]
 
-                    # NO assistant→assistant handoffs. We only honor user-directed routing.
-                    # Continue any in-progress “everyone/subset” round, otherwise hand control to the user.
+                    # NO assistant→assistant handoffs; we only honor user-directed routing
                     if self.multi["active"]:
                         if self.multi["queue"]:
                             return self.agent_by_name[self.multi["queue"].pop(0)]
-                        # end of round → back to user
                         self.multi["active"] = False
                         return self.agent_by_name[self.user_name]
 
@@ -1243,7 +1239,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 # B) User spoke last → pick addressed agent, else last assistant, else first assistant
                 if last_role == "user" or last_name == self.user_name:
-                    # 1) Explicit broadcast ("everyone", "you all", etc.)
+                    # everyone / you all
                     if self._broadcast_requested(content):
                         import random
                         self.multi["active"] = True
@@ -1251,25 +1247,23 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         random.shuffle(self.multi["queue"])
                         return self.agent_by_name[self.multi["queue"].pop(0)]
 
-                    # 2) Named addressees (may be a single name OR a list: "ChatGPT and Claude")
+                    # named subset (“ChatGPT and Claude”)
                     targets = self._direct_addressees(content)
                     if len(targets) >= 2:
-                        # subset round (only named assistants, once each)
                         self.multi["active"] = True
                         self.multi["queue"] = [t for t in targets if t in self.assistant_names]
                         return self.agent_by_name[self.multi["queue"].pop(0)]
                     if len(targets) == 1:
                         return self.agent_by_name[targets[0]]
 
-                    # 3) “one of you / any of you” → pick one at random
-                    low = (content or "").lower()
-                    if re.search(r"\b(?:one|any)\s+of\s+you\b", low):
-                        import random
-                        return random.choice(self.assistant_agents) if self.assistant_agents else self.agent_by_name[self.user_name]
+                    # default: reply from the last assistant who spoke (if any)
+                    if self.previous_assistant:
+                        return self.previous_assistant
 
-                    # 4) Default: pick a random assistant
+                    # otherwise, pick one at random
                     import random
                     return random.choice(self.assistant_agents) if self.assistant_agents else self.agent_by_name[self.user_name]
+
 
 
                 # C) Fallback (e.g., a stray system/manager ended up “last”): ChatGPT or first assistant
@@ -1386,19 +1380,17 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 was_greet, stripped = strip_greeting(text)
 
-                # First greeting: if nothing meaningful remains, swallow entirely
+                # First greeting from this assistant: keep it, but strip boilerplate if there’s more
                 if was_greet and speaker not in self._greeted_once:
                     self._greeted_once.add(speaker)
-                    if not stripped or len(stripped) <= 8:
-                        # Drop the pure greeting — do NOT call super()
-                        return {"content": "", "name": speaker}
-                    text = stripped
+                    text = stripped if stripped else (message.get("content") or message.get("text") or text)
 
-                # Subsequent greetings from same speaker
+                # Subsequent greetings: only drop if there’s truly nothing else
                 elif was_greet and speaker in self._greeted_once:
-                    if not stripped or len(stripped) <= 8:
+                    if stripped:
+                        text = stripped
+                    else:
                         return {"content": "", "name": speaker}
-                    text = stripped
 
                 # Hard kill-switch for classic openers after already greeted
                 if speaker in self._greeted_once:
