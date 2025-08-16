@@ -1028,92 +1028,86 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         # ---- agent classes ----
         class WebSocketAssistantAgent(autogen.AssistantAgent):
-            def __init__(
-                self,
-                *args,
-                message_output_queue: asyncio.Queue,
-                proxy_for_forward: "WebSocketUserProxyAgent",
-                **kwargs
-            ):
-                super().__init__(*args, **kwargs)
+            def __init__(self, name, llm_config, system_message,
+                        message_output_queue: asyncio.Queue,
+                        proxy_for_forward: "WebSocketUserProxyAgent"):
+                super().__init__(name=name, llm_config=llm_config, system_message=system_message)
                 self._message_output_queue = message_output_queue
-                # <-- keep a handle to the user proxy so we can forward replies
                 self._proxy_for_forward = proxy_for_forward
 
-            async def a_send_typing_indicator(self, is_typing: bool):
-                # (keep your typing indicators as-is)
+            async def a_receive(self, message, sender=None, request_reply=False, silent=False):
+                # show typing while we process
                 try:
-                    # using the existing helper to enqueue a typing event
-                    await asyncio.get_running_loop().run_in_executor(
-                        None, lambda: None
-                    )  # noop; just ensures we're in async context
-                finally:
-                    # your queue helper already handles backpressure, we reuse it:
-                    try:
-                        # this uses the existing closure queue_send_nowait
-                        queue_send_nowait({"sender": self.name, "typing": is_typing, "text": ""})
-                    except Exception:
-                        pass
+                    self._message_output_queue.put_nowait({"sender": self.name, "typing": True, "text": ""})
+                except Exception:
+                    pass
+                return await super().a_receive(message, sender=sender, request_reply=request_reply, silent=silent)
 
             async def a_generate_reply(self, messages=None, sender=None, **kwargs):
-                # show "is typing"
-                await self.a_send_typing_indicator(True)
+                # turn typing on for the assistant
                 try:
-                    # retry the model call and surface capacity/429 errors nicely to the UI
-                    async def _do():
-                        # use explicit super() target to avoid issues inside a nested function
-                        return await super(WebSocketAssistantAgent, self).a_generate_reply(
-                            messages=messages, sender=sender, **kwargs
-                        )
+                    self._message_output_queue.put_nowait({"sender": self.name, "typing": True, "text": ""})
+                except Exception:
+                    pass
 
-                    # 'websocket' is available from the enclosing websocket_endpoint scope
-                    result = await call_with_retry(_do, ws=websocket, retries=2, base_delay=0.8)
+                result = None
+                out_text = ""
 
-                except Exception as e:
-                    # If all retries fail (timeout/capacity/etc.), show a tiny, friendly bubble
+                try:
+                    # SIMPLE RETRY (3 attempts with backoff) to avoid silent failures
+                    delay = 0.8
+                    last_exc = None
+                    for attempt in range(3):
+                        try:
+                            result = await super().a_generate_reply(messages=messages, sender=sender, **kwargs)
+                            break
+                        except Exception as e:
+                            last_exc = e
+                            if attempt == 2:
+                                raise
+                            await asyncio.sleep(delay)
+                            delay *= 2
+                except Exception:
+                    # If all retries fail, show a small, friendly bubble instead of silence
                     try:
-                        queue_send_nowait({
+                        self._message_output_queue.put_nowait({
                             "sender": self.name,
                             "text": "I hit a temporary issue and couldn’t reply. Please ask again."
                         })
                     except Exception:
                         pass
-                    # Always clear the typing indicator
+                    result = {"content": ""}  # unify return shape for caller
+                else:
+                    # Normalize to a plain string
+                    if isinstance(result, dict):
+                        out_text = (result.get("content") or result.get("text") or "").strip()
+                    elif isinstance(result, str):
+                        out_text = result.strip()
+                    elif result is None:
+                        out_text = ""
+                    else:
+                        out_text = str(result).strip()
+
+                    # Forward THROUGH the user proxy so your filters run, then UI sees it
+                    if out_text:
+                        try:
+                            await self._proxy_for_forward.a_receive(
+                                {"content": out_text, "name": self.name},
+                                sender=self,
+                                request_reply=False,
+                                silent=True,
+                            )
+                        except Exception as e:
+                            print(f"[Assistant forward -> proxy] error: {e}")
+                finally:
+                    # ALWAYS clear typing even if we error/return early
                     try:
-                        queue_send_nowait({"sender": self.name, "typing": False, "text": ""})
+                        self._message_output_queue.put_nowait({"sender": self.name, "typing": False, "text": ""})
                     except Exception:
                         pass
-                    return {"content": ""}
 
-                # normalize to a plain string for forwarding through the proxy
-                if isinstance(result, dict):
-                    out_text = (result.get("content") or result.get("text") or "").strip()
-                elif isinstance(result, str):
-                    out_text = result.strip()
-                else:
-                    out_text = str(result).strip()
-
-                if out_text:
-                    # Forward THROUGH the user proxy so your greeting/dup filters run
-                    # (this is what ultimately writes to message_output_queue)
-                    try:
-                        await self._proxy_for_forward.a_receive(
-                            {"content": out_text, "name": self.name},
-                            sender=self,
-                            request_reply=False,
-                            silent=True,
-                        )
-                    except Exception as e:
-                        print(f"[Assistant forward -> proxy] error: {e}")
-
-                # return the original result to the manager
                 return result
-            finally:
-                # Ensure typing bubble is cleared even when nothing was forwarded
-                try:
-                    queue_send_nowait({"sender": self.name, "typing": False, "text": ""})
-                except Exception:
-                    pass
+
 
 
         class CustomSpeakerSelector:
