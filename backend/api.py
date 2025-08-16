@@ -1059,8 +1059,31 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 # show "is typing"
                 await self.a_send_typing_indicator(True)
                 try:
-                    # let the model produce the reply
-                    result = await super().a_generate_reply(messages=messages, sender=sender, **kwargs)
+                    # retry the model call and surface capacity/429 errors nicely to the UI
+                    async def _do():
+                        # use explicit super() target to avoid issues inside a nested function
+                        return await super(WebSocketAssistantAgent, self).a_generate_reply(
+                            messages=messages, sender=sender, **kwargs
+                        )
+
+                    # 'websocket' is available from the enclosing websocket_endpoint scope
+                    result = await call_with_retry(_do, ws=websocket, retries=2, base_delay=0.8)
+
+                except Exception as e:
+                    # If all retries fail (timeout/capacity/etc.), show a tiny, friendly bubble
+                    try:
+                        queue_send_nowait({
+                            "sender": self.name,
+                            "text": "I hit a temporary issue and couldn’t reply. Please ask again."
+                        })
+                    except Exception:
+                        pass
+                    # Always clear the typing indicator
+                    try:
+                        queue_send_nowait({"sender": self.name, "typing": False, "text": ""})
+                    except Exception:
+                        pass
+                    return {"content": ""}
 
                     # normalize to a plain string for forwarding through the proxy
                     if isinstance(result, dict):
@@ -1176,7 +1199,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 # 1) Start-of-text direct call (with optional greeting)
                 for key in tokens:
-                    pat = rf"^\s*(?:hey|hi|hello|ok|okay)?\s*@?{re.escape(key)}\b\s*[:,\-–—]?"
+                    pat = rf"^\s*(?:hey|hi|hello|ok|okay)?\s*@?{re.escape(key)}\b\s*[:,;\.\-–—!\?]?"
                     if re.search(pat, low):
                         name = normalize(key)
                         if name and name not in addrs: addrs.append(name)
@@ -1557,7 +1580,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         self._last_number_by_sender[speaker] = val
                 except Exception:
                     pass
-
+                # If the user asked for a number and this is NOT a broadcast, reduce to the first integer
+                try:
+                    if (not in_broadcast) and ("number" in (self._last_user_text or "").lower()):
+                        num2 = self._extract_first_int(text)
+                        if num2 is not None:
+                            text = str(num2)
+                except Exception:
+                    pass
                 # If we are in a broadcast round, clamp to a single compact item
                 try:
                     if self._selector and getattr(self._selector, "multi", {}).get("active") and not bypass_clamp:
@@ -1781,22 +1811,21 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             or re.search(r"\blist\b.*\bnumber(?:s)?\b.*\b(who|by)\b", lm)
                             or re.search(r"\beach\b.*\bnumber(?:s)?\b.*\b(who|by)\b", lm)
                             or re.search(r"\bevery(?:one| body)?\b.*\bnumber(?:s)?\b.*\b(who|by)\b", lm)
-                            # common paraphrases
-                            or ("who" in lm and "number" in lm and ("gave" in lm or "said" in lm or "list" in lm))
-                            # extra catch-alls: “numbers and who said them”, “who said them/it”, “what numbers did each of you give”
+                            # extra catch-alls
                             or (("number" in lm or "numbers" in lm) and ("who said" in lm or "who gave" in lm or "who has" in lm))
                             or (("who said" in lm or "who gave" in lm) and ("them" in lm or "it" in lm or "values" in lm))
-                            or ("what did each of you give" in lm)                            
+                            or ("what did each of you give" in lm)
                         )
                         if asked_list:
-                            ledger = getattr(proxy, "_last_number_by_sender", {}) or {}
+                            # authoritative ledger is on the proxy
+                            ledger = getattr(user_proxy, "_last_number_by_sender", {}) or {}
                             if ledger:
                                 ordered = [f"{name}: {ledger[name]}" for name in agent_names if name in ledger]
                                 if ordered:
-                                    await ws.send_json({"sender": "System", "text": "Numbers so far:\n" + "\n".join(ordered)})
-                                    continue  # we already answered
-                            # Fallback so the user sees a response even if ledger empty/partial
-                            await ws.send_json({
+                                    await websocket.send_json({"sender": "System", "text": "Numbers so far:\n" + "\n".join(ordered)})
+                                    continue  # do not forward to LLMs
+                            # Fallback so the user sees *something*
+                            await websocket.send_json({
                                 "sender": "System",
                                 "text": "I don’t have any numbers recorded yet. Try: “Everyone give me a random number.”"
                             })
