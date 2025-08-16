@@ -1065,12 +1065,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         out_text = str(result).strip()
 
                     
-                    # Forward the message directly to the output queue
-                    if out_text:
-                        try:
-                            self._message_output_queue.put_nowait({"sender": self.name, "text": out_text})
-                        except Exception as e:
-                            print(f"[Assistant message forward] error: {e}")
+
                 finally:
                     # ALWAYS clear typing even if we error/return early
                     try:
@@ -1155,15 +1150,16 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
 
 
+            # REPLACE the entire body of a_generate_reply with this code:
             async def a_generate_reply(
                 self,
                 messages: List[Dict[str, Any]] | None = None,
                 sender: autogen.ConversableAgent | None = None,
                 **kwargs,
             ) -> Union[str, Dict, None]:
-                # Do not block for input inside a running turn. When the group
-                # tries to hand control back to the user, immediately end the run.
-                return {"content": "TERMINATE"}
+                # Block until a user message is received
+                user_input = await self._user_input_queue.get()
+                return {"content": user_input, "role": "user", "name": self.name}
 
             async def a_inject_user_message(self, message: str):
                 await self._user_input_queue.put(message)
@@ -1233,7 +1229,28 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 "Memory: This conversation is persistent. Rely on the 'Conversation summary' for prior context."
             )
         })
+        # Add this block right after the seed_messages block
+        groupchat = autogen.GroupChat(
+            agents=agents,
+            messages=seed_messages,
+            max_round=999999,
+            speaker_selection_method="auto",
+            allow_repeat_speaker=True,
+        )
 
+        manager = autogen.GroupChatManager(
+            groupchat=groupchat,
+            llm_config=chatgpt_llm_config,
+            system_message=(
+                "You are the group chat manager. Your role is to determine the next speaker based on the conversation history. "
+                "The last message was from {last_speaker}. The content was: '{last_content}'. "
+                "Choose the agent most relevant to the user's last request. "
+                "If the user addressed a specific agent by name, select that agent. "
+                "If the user asked 'everyone', cycle through each assistant once in a random order. "
+                "If the conversation turn is complete, select the 'User' to signal for their next input. "
+                "Output only the name of the next speaker, for example, 'User' or 'ChatGPT'."
+            )
+        )
 
 
         # ---- tasks ----        
@@ -1300,18 +1317,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     await save_message(conv_ref, role="user", sender=proxy.name, content=user_message)
 
                     # set a title if we don't have one yet
-                    await maybe_set_title(conv_ref, user_message)
+                    await maybe_set_title(conv_ref, user_message)         
 
-                    
-
-
-                    # Run ONE Autogen turn for this message against the existing groupchat state
-                    await call_with_retry(
-                        lambda: proxy.a_initiate_chat(manager, message=user_message),
-                        ws,
-                        retries=2,
-                        base_delay=0.8,
-                    )
+                    await proxy.a_inject_user_message(user_message)
 
                 except WebSocketDisconnect:
                     break
@@ -1329,10 +1337,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             message_consumer_task(message_output_queue, websocket, conv_ref, assistant_name_set, safe_user_name)
         )
 
-        input_handler_task = asyncio.create_task(
-            user_input_handler_task(websocket, user_proxy, conv_ref)
-        )
-
+        # ADD this function right before the final `asyncio.gather` block
+        async def chat_run_task(proxy: WebSocketUserProxyAgent, manager):
+            # This is the main chat loop. It runs continuously until the chat is terminated.
+            await proxy.a_initiate_chat(manager, message=proxy.human_input)
 
 
         async def keepalive_task(ws: WebSocket):
@@ -1347,11 +1355,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         ka_task = asyncio.create_task(keepalive_task(websocket))
 
+        # REPLACE the entire final try...except...finally block with this:
         try:
             await asyncio.gather(
                 input_handler_task,
                 consumer_task,
                 ka_task,
+                chat_run_task(user_proxy, manager)
             )
         except Exception as e:
             tb = traceback.format_exc()
@@ -1361,10 +1371,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             except Exception:
                 pass
         finally:
-            for t in (input_handler_task, consumer_task, ka_task):
+            for t in (input_handler_task, consumer_task, ka_task, chat_run_task(user_proxy, manager)):
                 if not t.done():
                     t.cancel()
-            await asyncio.gather(input_handler_task, consumer_task, ka_task, return_exceptions=True)
+            await asyncio.gather(input_handler_task, consumer_task, ka_task, chat_run_task(user_proxy, manager), return_exceptions=True)
 
 
     except WebSocketDisconnect:
