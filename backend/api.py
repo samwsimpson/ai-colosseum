@@ -28,7 +28,7 @@ OPENAI_SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 3.0 - FIRESTORE) <<")
+print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 3.1 - FIRESTORE) <<")
 load_dotenv()
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
@@ -80,9 +80,6 @@ MISTRAL_SYSTEM = _env(
     "rely on the 'Conversation summary' system message that may be provided at the start. "
     "If critical details seem missing, ask the user if you'd like to retrieve details from earlier turns."    
 )
-
-
-
 # ==== end system prompts ====
 
 # ===== Retry & fallback helpers for LLM calls =====
@@ -119,7 +116,6 @@ async def call_with_retry(op_coro_factory, ws, *, retries: int = 2, base_delay: 
             # jittered backoff
             delay = base_delay * (2 ** attempt) + random.random() * 0.3
             await asyncio.sleep(delay)
-
 
 app = FastAPI()
 
@@ -241,8 +237,6 @@ def create_refresh_token(*, data: dict, expires_delta: timedelta = timedelta(day
     to_encode.update({"exp": expire, "type": "refresh"})
     return pyjwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
 
-
-
 # --- Conversation persistence helpers ---
 
 async def get_or_create_conversation(user_id: str, initial_config: dict):
@@ -294,8 +288,6 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
     )
     doc = await conv_ref.get()
     return conv_ref, (doc.to_dict() or {})
-
-
 
 async def save_message(conv_ref, role: str, sender: str, content: str):
     """
@@ -400,7 +392,6 @@ async def list_conversations(user=Depends(get_current_user)):
         })
     return {"items": items}
 
-
 @app.get("/api/conversations/{conv_id}/messages")
 async def list_messages(conv_id: str, limit: int = 50, user=Depends(get_current_user)):
     conv_ref = db.collection("conversations").document(conv_id)
@@ -423,7 +414,6 @@ async def list_messages(conv_id: str, limit: int = 50, user=Depends(get_current_
         })
     msgs.reverse()
     return {"items": msgs}
-
 
 @app.patch("/api/conversations/{conv_id}")
 async def rename_conversation(conv_id: str, body: RenameBody, user=Depends(get_current_user)):
@@ -484,9 +474,7 @@ async def export_conversation(conv_id: str, user=Depends(get_current_user)):
         "updated_at": _ts_iso(conv.get("updated_at")),
         "messages": msgs,
     }
-
 # === end Conversations REST ===
-
 
 @app.get("/api/users/me/usage")
 async def get_user_usage(current_user: dict = Depends(get_current_user)):
@@ -601,8 +589,6 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
         print(f"Google auth failed: {e}")
         raise HTTPException(status_code=401, detail="Google authentication failed")
 
-
-
 # === STRIPE IMPLEMENTATION ===
 stripe.api_key = os.getenv("STRIPE_SECRET_KEY")
 stripe_webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
@@ -635,8 +621,6 @@ async def refresh_access_token(request: Request):
     )
     expires_at = int(datetime.now(timezone.utc).timestamp()) + access_expires_in
     return {"token": new_access, "expires_at": expires_at}
-
-
 
 @app.post("/api/create-checkout-session")
 async def create_checkout_session(request: SubscriptionRequest, current_user: dict = Depends(get_current_user)):
@@ -769,8 +753,6 @@ async def maybe_refresh_summary(conv_ref, threshold: int = 10, window: int = 40)
         })
     except Exception as e:
         print(f"[maybe_refresh_summary] skipped due to error: {e}")
-
-
 
 @app.post("/api/stripe-webhook")
 async def stripe_webhook(request: Request):
@@ -1075,14 +1057,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 return result
 
-
-
-        
-
-
-
-        
-     
         class WebSocketUserProxyAgent(autogen.UserProxyAgent):
             """
             User proxy that:
@@ -1102,7 +1076,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 # NEW: authoritative ledger for each assistant's latest number
                 
                 self._assistant_names_list = sorted(list(self._assistant_name_set))
-               
+            
             async def a_receive(self, message, sender=None, request_reply=True, silent=False):
                 """
                 Intercepts assistant->user messages and forwards them to the browser,
@@ -1148,9 +1122,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 # Keep base behavior for Autogen bookkeeping
                 return await super().a_receive(message, sender=sender, request_reply=request_reply, silent=silent)
 
-
-
-            # REPLACE the entire body of a_generate_reply with this code:
             async def a_generate_reply(
                 self,
                 messages: List[Dict[str, Any]] | None = None,
@@ -1162,11 +1133,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 return {"content": user_input, "role": "user", "name": self.name}
 
             async def a_inject_user_message(self, message: str):
-                await self._user_input_queue.put(message)
-
-
-
-        
+                await self._user_input_queue.put(message)        
 
         # ---- build roster ----
         user_proxy = WebSocketUserProxyAgent(
