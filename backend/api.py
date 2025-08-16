@@ -1346,14 +1346,17 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 # Prefer a single integer if present
                 num = self._extract_first_int(s)
                 if num is not None:
-                    return f"{speaker}: {num}"
+                    return str(num)
 
-                # Otherwise keep only first sentence/line, short and labeled
+                # Otherwise keep only first sentence/line
                 for sep in (".", "!", "?", "\n"):
                     if sep in s:
                         s = s.split(sep, 1)[0].strip()
                         break
-                return f"{speaker}: {s[:120]}"
+
+                # If greeting got stripped to nothing, still show a tiny greeting
+                return s or "Hi!"
+
 
             async def a_receive(self, message, sender=None, request_reply=True, silent=False):
                 """
@@ -1436,10 +1439,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 was_greet, stripped = strip_greeting(text)
 
-                # First greeting from this assistant: keep it, but strip boilerplate if there’s more
+                # First greeting from this assistant: show a short greeting only
+                bypass_clamp = False  # add this variable near the top of a_receive
+                ...
                 if was_greet and speaker not in self._greeted_once:
                     self._greeted_once.add(speaker)
-                    text = stripped if stripped else (message.get("content") or message.get("text") or text)
+                    first = self._user_display_name.split()[0]
+                    text = f"Hi {first}!"
+                    bypass_clamp = True
 
                 # Subsequent greetings: only drop if there’s truly nothing else
                 elif was_greet and speaker in self._greeted_once:
@@ -1457,16 +1464,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         return {"content": "", "name": speaker}
 
                 # Extra guard: drop generic “assist you today” even if it slipped past greeting logic
+                # Only drop generic helpers AFTER the assistant has already greeted once
                 low = text.lower()
-                if speaker in self._assistant_name_set and (
-                    'how can i assist you' in low or
-                    'how may i assist you' in low or
-                    'how can i help you' in low or
-                    'what can i help you with' in low
-                ):
-                    # If that line is the whole thing, drop it
-                    if len(low) <= 80:
-                        return {"content": "", "name": speaker}
+                if (speaker in self._assistant_name_set and speaker in self._greeted_once and
+                    any(p in low for p in (
+                        'how can i assist you', 'how may i assist you',
+                        'how can i help you', 'what can i help you with'
+                    )) and len(low) <= 80):
+                    return {"content": "", "name": speaker}
 
                 # De-dup identical consecutive messages
                 prev = self._last_text_by_sender.get(speaker)
@@ -1484,7 +1489,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 # If we are in a broadcast round, clamp to a single compact item
                 try:
-                    if self._selector and getattr(self._selector, "multi", {}).get("active"):
+                    if self._selector and getattr(self._selector, "multi", {}).get("active") and not bypass_clamp:
                         text = self._clamp_everyone_response(speaker, text)
                 except Exception:
                     pass
