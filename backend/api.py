@@ -1307,6 +1307,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 # NEW: authoritative ledger for each assistant's latest number
                 self._last_number_by_sender: dict[str, int] = {}
                 self._assistant_names_list = sorted(list(self._assistant_name_set))
+                self._last_user_text: str = ""
 
             def attach_selector(self, selector) -> None:
                 self._selector = selector     
@@ -1338,24 +1339,28 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 return int(m.group(0)) if m else None
 
             def _clamp_everyone_response(self, speaker: str, txt: str) -> str:
-                """During a broadcast round, force one compact item (prefer a single integer)."""
                 if not txt:
                     return txt
                 s = txt.strip()
 
-                # Prefer a single integer if present
-                num = self._extract_first_int(s)
+                # Only collapse to a single integer if the *user* asked for numbers
+                asked_for_number = "number" in (self._last_user_text or "").lower()
+                num = self._extract_first_int(s) if asked_for_number else None
                 if num is not None:
                     return str(num)
 
-                # Otherwise keep only first sentence/line
-                for sep in (".", "!", "?", "\n"):
-                    if sep in s:
-                        s = s.split(sep, 1)[0].strip()
-                        break
+                # Remove leading bullets/enumerators like "1. ", "(1) ", "-", "• "
+                import re
+                s = re.sub(r'^\s*(?:\(?\d+\)?[.)]|[-*•])\s*', '', s)
 
-                # If greeting got stripped to nothing, still show a tiny greeting
-                return s or "Hi!"
+                # Keep the first sentence *that contains letters*; otherwise fall back
+                parts = re.split(r'(?<=[.!?])\s+', s)
+                for part in parts:
+                    if re.search(r'[A-Za-z]', part):
+                        return part.strip()[:120]
+                return s[:120] or "Hi!"
+
+
 
 
             async def a_receive(self, message, sender=None, request_reply=True, silent=False):
@@ -1438,22 +1443,32 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     return (True, stripped)
 
                 was_greet, stripped = strip_greeting(text)
+     
+                # Are we in a broadcast ("everyone") round?
+                in_broadcast = bool(self._selector and getattr(self._selector, "multi", {}).get("active"))
+                bypass_clamp = False  # single declaration
 
-                # First greeting from this assistant: show a short greeting only
-                bypass_clamp = False  # add this variable near the top of a_receive
-                ...
-                if was_greet and speaker not in self._greeted_once:
+                # 1) First time this assistant speaks in a broadcast → force a tiny greeting
+                if in_broadcast and (speaker not in self._greeted_once):
                     self._greeted_once.add(speaker)
                     first = self._user_display_name.split()[0]
                     text = f"Hi {first}!"
                     bypass_clamp = True
 
-                # Subsequent greetings: only drop if there’s truly nothing else
+                # 2) Else, if this message itself is a greeting and they haven't greeted yet
+                elif was_greet and speaker not in self._greeted_once:
+                    self._greeted_once.add(speaker)
+                    first = self._user_display_name.split()[0]
+                    text = f"Hi {first}!"
+                    bypass_clamp = True
+
+                # 3) If they’re greeting again later, strip it (or drop if nothing left)
                 elif was_greet and speaker in self._greeted_once:
                     if stripped:
                         text = stripped
                     else:
                         return {"content": "", "name": speaker}
+
 
                 # Hard kill-switch for classic openers after already greeted
                 if speaker in self._greeted_once:
@@ -1695,6 +1710,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # --- end heartbeat handling ---
 
                     user_message = data["message"]
+                    proxy._last_user_text = user_message or ""
 
                     # Echo the user's message so the UI gets a new bubble
                     try:
