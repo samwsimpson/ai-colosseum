@@ -966,8 +966,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "10) If the USER asks for a summary, provide your own concise summary of the conversation so far.\n"
         )
 
-
-
         def make_agent_system(name: str) -> str:
             base = {
                 "ChatGPT": CHATGPT_SYSTEM,
@@ -1140,7 +1138,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 low = (text or "").lower()
                 return any(k in low for k in (
                     "everyone", "all of you", "both of you", "each of you",
-                    "all agents", "all ais", "you all", "@all"
+                    "all agents", "all ais", "you all", "@all", "all of you say"
                 ))
 
             def _direct_addressees(self, text: str) -> list[str]:
@@ -1369,6 +1367,16 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         return part.strip()[:120]
                 return s[:120] or "Hi!"
 
+            def _strip_leading_model_label(self, s: str) -> str:
+                if not s:
+                    return s
+                # Allow leading punctuation/formatting: quotes, *, **, [, (, {, dashes
+                m = re.match(
+                    r"^\s*[\-–—\*\[\(\{\'\"`]*\s*(ChatGPT|Claude|Gemini|Mistral)\s*[:\-–—]\s*",
+                    s,
+                    flags=re.IGNORECASE
+                )
+                return s[m.end():].lstrip() if m else s
 
 
 
@@ -1393,6 +1401,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 )
                 text = (raw_text or "").strip()
                 text = self._strip_perfunctory_openers(text)
+                text = self._strip_leading_model_label(text)
                 # Remember last AI speaker immediately (even if we drop later)
                 if self._selector and speaker in self._assistant_name_set:
                     try:
@@ -1403,6 +1412,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 # Never show manager/system lines
                 if speaker and speaker.lower().strip() in {"chat_manager", "manager", "orchestrator"}:
                     return {"content": "", "name": speaker}
+
+                asked_hi_again = "say hi" in (self._last_user_text or "").lower() \
+                    or "everyone say hi" in (self._last_user_text or "").lower() \
+                    or "say hello" in (self._last_user_text or "").lower() \
+                    or ("greet" in (self._last_user_text or "").lower())
+                in_broadcast = bool(self._selector and getattr(self._selector, "multi", {}).get("active"))
+                bypass_clamp = False  # keep one shared flag
 
                 # ---- greeting detection & stripping ----
                 def strip_greeting(t: str) -> tuple[bool, str]:
@@ -1479,15 +1495,19 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 # 3) If they’re greeting again later, strip it (or drop if nothing left)
                 elif was_greet and speaker in self._greeted_once:
-                    # If what's left after stripping the greeting is trivial (e.g., "there"), drop it
-                    import re
-                    leftover = (stripped or "").strip()
-                    if not leftover:
-                        return {"content": "", "name": speaker}
-                    # treat as trivial if <= 2 words OR no alphanumerics OR common filler like "there"
-                    if (len(leftover.split()) <= 2 or not re.search(r'[A-Za-z0-9]', leftover) or leftover.lower() in {"there", "hi", "hello", "hey"}):
-                        return {"content": "", "name": speaker}
-                    text = leftover
+                    # If the user explicitly asked to greet again, emit a tiny hello
+                    if in_broadcast and asked_hi_again:
+                        first = self._user_display_name.split()[0]
+                        text = f"Hi {first}!"
+                        bypass_clamp = True
+                    else:
+                        leftover = (stripped or "").strip()
+                        if not leftover:
+                            return {"content": "", "name": speaker}
+                        # treat trivial leftovers as noise (e.g., "there", "hi")
+                        if len(leftover.split()) <= 2 or leftover.lower() in {"there", "hi", "hello", "hey"}:
+                            return {"content": "", "name": speaker}
+                        text = leftover
 
 
                 # Hard kill-switch for classic openers after already greeted
@@ -1497,6 +1517,16 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                        re.search(r'\bwhat can i (?:help|do) (?:for )?you\b', low2) or \
                        re.search(r'\bhow can i assist you today\b', low2):
                         return {"content": "", "name": speaker}
+                    
+                # Never act as a coordinator or comment on other assistants taking a turn
+                low_mgr = (text or "").lower().strip()
+                if speaker in self._assistant_name_set and re.search(
+                    r"\b(please continue|your turn|over to you|passing to|handoff to|"
+                    r"i (?:will|won(?:'|’)t|will not) (?:respond|repond|reply) as|"
+                    r"i cannot speak for|i can(?:'|’)t speak for)\b",
+                    low_mgr
+                ):
+                    return {"content": "", "name": speaker}
 
                 # Drop manager-ish handoff lines (never act as a coordinator)
                 low_mgr = text.lower().strip()
@@ -1742,14 +1772,21 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # set a title if we don't have one yet
                     await maybe_set_title(conv_ref, user_message)
 
-                    # quick, authoritative summary if the user asks "who gave what number"
+                    # quick, authoritative summary if the user asks who said what number
                     try:
                         lm = (user_message or "").lower()
-                        asked_list = (
-                            ("who" in lm and "gave" in lm and "number" in lm) or
-                            ("list" in lm and "who" in lm and "number" in lm) or
-                            ("each" in lm and "number" in lm and "who" in lm) or
-                            ("every" in lm and "number" in lm and "who" in lm)
+                        asked_list = bool(
+                            # who said/gave which number(s)
+                            re.search(r"\bwho\s+(?:said|gave)\b.*\bnumber(?:s)?\b", lm)
+                            or re.search(r"\blist\b.*\bnumber(?:s)?\b.*\b(who|by)\b", lm)
+                            or re.search(r"\beach\b.*\bnumber(?:s)?\b.*\b(who|by)\b", lm)
+                            or re.search(r"\bevery(?:one| body)?\b.*\bnumber(?:s)?\b.*\b(who|by)\b", lm)
+                            # common paraphrases
+                            or ("who" in lm and "number" in lm and ("gave" in lm or "said" in lm or "list" in lm))
+                            # extra catch-alls: “numbers and who said them”, “who said them/it”, “what numbers did each of you give”
+                            or (("number" in lm or "numbers" in lm) and ("who said" in lm or "who gave" in lm or "who has" in lm))
+                            or (("who said" in lm or "who gave" in lm) and ("them" in lm or "it" in lm or "values" in lm))
+                            or ("what did each of you give" in lm)                            
                         )
                         if asked_list:
                             ledger = getattr(proxy, "_last_number_by_sender", {}) or {}
@@ -1757,13 +1794,16 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                                 ordered = [f"{name}: {ledger[name]}" for name in agent_names if name in ledger]
                                 if ordered:
                                     await ws.send_json({"sender": "System", "text": "Numbers so far:\n" + "\n".join(ordered)})
-                                    # do not forward to LLMs — already answered
-                                    continue
-                            # Fallback so the user always sees *something*
-                            await ws.send_json({"sender": "System", "text": "I don’t have any numbers yet. Ask: “Everyone give me a random number.”"})
+                                    continue  # we already answered
+                            # Fallback so the user sees a response even if ledger empty/partial
+                            await ws.send_json({
+                                "sender": "System",
+                                "text": "I don’t have any numbers recorded yet. Try: “Everyone give me a random number.”"
+                            })
                             continue
                     except Exception:
                         pass
+
 
 
                     # Run ONE Autogen turn for this message against the existing groupchat state
