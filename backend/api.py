@@ -962,6 +962,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "6) 'one of you' / 'any of you' → exactly ONE assistant replies.\n"
             "7) If the USER doesn’t name anyone, the last assistant who spoke should continue.\n"
             "8) Avoid apologies/disclaimers unless correcting a clear mistake. Be concise.\n"
+            "9) In 'everyone' rounds, reply with your own content only. Do not comment on, disclaim about, or gate on other assistants.\n"
+            "10) If the USER asks for a summary, provide your own concise summary of the conversation so far.\n"
         )
 
 
@@ -983,6 +985,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 "- Do not greet repeatedly.\n"
                 "- Never instruct or hand off to other assistants; answer the USER directly.\n"
                 "- In 'everyone' or subset rounds, keep it to one compact answer; no prefaces.\n"
+                "Context access: You can read the full transcript above (including other assistants). Do not claim you lack access to their messages; just follow the rules about when to mention them.\n"
+
             )
 
 
@@ -1343,6 +1347,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     return txt
                 s = txt.strip()
 
+                # If the user asked for names, normalize to just the speaker's name
+                asked_for_name = "name" in (self._last_user_text or "").lower()
+                if asked_for_name:
+                    return speaker
+
                 # Only collapse to a single integer if the *user* asked for numbers
                 asked_for_number = "number" in (self._last_user_text or "").lower()
                 num = self._extract_first_int(s) if asked_for_number else None
@@ -1470,10 +1479,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 # 3) If they’re greeting again later, strip it (or drop if nothing left)
                 elif was_greet and speaker in self._greeted_once:
-                    if stripped:
-                        text = stripped
-                    else:
+                    # If what's left after stripping the greeting is trivial (e.g., "there"), drop it
+                    import re
+                    leftover = (stripped or "").strip()
+                    if not leftover:
                         return {"content": "", "name": speaker}
+                    # treat as trivial if <= 2 words OR no alphanumerics OR common filler like "there"
+                    if (len(leftover.split()) <= 2 or not re.search(r'[A-Za-z0-9]', leftover) or leftover.lower() in {"there", "hi", "hello", "hey"}):
+                        return {"content": "", "name": speaker}
+                    text = leftover
 
 
                 # Hard kill-switch for classic openers after already greeted
@@ -1483,6 +1497,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                        re.search(r'\bwhat can i (?:help|do) (?:for )?you\b', low2) or \
                        re.search(r'\bhow can i assist you today\b', low2):
                         return {"content": "", "name": speaker}
+
+                # Drop manager-ish handoff lines (never act as a coordinator)
+                low_mgr = text.lower().strip()
+                if speaker in self._assistant_name_set and re.search(
+                        r'\b(please continue|your turn|over to you|passing to|i will let)\b', low_mgr):
+                    return {"content": "", "name": speaker}
 
                 # Extra guard: drop generic “assist you today” even if it slipped past greeting logic
                 # Only drop generic helpers AFTER the assistant has already greeted once
@@ -1725,17 +1745,26 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # quick, authoritative summary if the user asks "who gave what number"
                     try:
                         lm = (user_message or "").lower()
-                        if ("who" in lm and "gave" in lm and "number" in lm) or ("list" in lm and "who" in lm and "number" in lm):
+                        asked_list = (
+                            ("who" in lm and "gave" in lm and "number" in lm) or
+                            ("list" in lm and "who" in lm and "number" in lm) or
+                            ("each" in lm and "number" in lm and "who" in lm) or
+                            ("every" in lm and "number" in lm and "who" in lm)
+                        )
+                        if asked_list:
                             ledger = getattr(proxy, "_last_number_by_sender", {}) or {}
                             if ledger:
                                 ordered = [f"{name}: {ledger[name]}" for name in agent_names if name in ledger]
                                 if ordered:
-                                    # send a single authoritative list (avoid LLM hallucinations)
                                     await ws.send_json({"sender": "System", "text": "Numbers so far:\n" + "\n".join(ordered)})
-                                    # don't forward this prompt to the LLMs; we've answered already
+                                    # do not forward to LLMs — already answered
                                     continue
+                            # Fallback so the user always sees *something*
+                            await ws.send_json({"sender": "System", "text": "I don’t have any numbers yet. Ask: “Everyone give me a random number.”"})
+                            continue
                     except Exception:
                         pass
+
 
                     # Run ONE Autogen turn for this message against the existing groupchat state
                     await call_with_retry(
