@@ -956,18 +956,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             f"- USER: {user_display_name}\n"
             f"- AGENTS PRESENT: {', '.join(agent_names)}\n\n"
             "Conversation rules for all agents:\n"
-            "1) You are in a shared room with ALL listed agents. Treat their messages as visible context.\n"
-            "2) If the user addresses someone by name at the START of their message (e.g., 'Claude,', 'hey Gemini', 'mistral' or 'ChatGPT:'), "
-            "that named agent should respond first. Ignore other agents' responses.\n"
-            "3) If the user says 'you all', 'everyone', 'all agents', 'both of you', 'each of you', or similar, "
-            "each agent should respond ONCE, concisely, with their own unique answer. Do not defer to other agents.\n"
-            "4) If one assistant clearly addresses another assistant, let the addressee reply next.\n"
-            "5) Mentioning an assistant’s name does NOT always mean addressing them (it might be a reference). Prefer direct-address cues (leading name, or 'to <name>').\n"
-            "6) If the user replies without naming anyone, assume they’re talking to the last assistant who spoke.\n"
-            "7) When addressing another assistant directly, start with their name (e.g., 'Claude, ...'). "
-            "When addressing the user, use natural language (e.g., 'Sam, ...'), not arrows or labels.\n"
-            "8) Do not lecture about roles/identities unless the user asks. No meta: do not write lines like 'Sam → Claude:' or 'Claude → chat_manager:'.\n"
-            "9) Keep replies helpful and concise. If greeted (e.g., 'Hi everyone'), reply with a short greeting and one clarifying question to move forward.\n"
+            "1) You are in a shared room with ALL listed assistants. Treat other assistants’ messages as visible context, not as human messages.\n"
+            "2) When the USER directly addresses an assistant by name at the start of their message (e.g., 'Claude,', 'hey Gemini', 'ChatGPT:'), ONLY that named assistant should reply first.\n"
+            "3) If the USER says 'you all', 'everyone', 'all agents', 'both of you', or 'each of you', then each assistant replies ONCE with a concise, non-redundant answer. After you’ve answered, stay silent unless addressed again.\n"
+            "4) If the USER names a SUBSET (e.g., 'ChatGPT and Claude'), ONLY those named assistants reply once each. Others remain silent.\n"
+            "5) If the USER says 'one of you' or 'any of you', a single assistant should answer. Do NOT all reply.\n"
+            "6) Do NOT treat other assistants as people. Refer to them explicitly as assistants if needed (e.g., 'Claude (assistant)'). Do NOT apologize to, debate with, or hand off to other assistants unless the USER asked for a panel/roundtable.\n"
+            "7) Do NOT ask other assistants questions or wait for their responses unless the USER requested a multi-agent round. Focus on answering the USER.\n"
+            "8) Avoid repeated greetings. Greet at most once at the very beginning of a new conversation; otherwise answer directly.\n"
         )
 
         def make_agent_system(name: str) -> str:
@@ -979,10 +975,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             }.get(name, "You are an assistant.")
             return (
                 f"{base}\n\n"
-                f"Your name is {name}. Participants: {user_display_name} (user), {', '.join(agent_names)} (AIs).\n"
+                f"Your name is {name}. Participants: {user_display_name} (user), {', '.join(agent_names)} (assistants).\n"
                 f"{roster_text}\n"
-                "Etiquette: Do not repeat greetings on every turn. Greet at most once when the conversation is new; "
-                "for follow-up questions answer directly without re-greeting."
+                "Important:\n"
+                "- Address the human USER directly as 'you'.\n"
+                "- Refer to other listed agents explicitly as assistants when needed; they are not the user.\n"
+                "- Do not instruct, hand off to, or wait on other assistants unless the USER asked for 'everyone' or named a subset.\n"
+                "- If the USER names multiple assistants, reply once if you are named; otherwise stay silent.\n"
+                "- Keep replies concise and non-overlapping.\n"
             )
 
 
@@ -1105,6 +1105,25 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self.previous_assistant: "Optional[autogen.Agent]" = None
                 self.multi = {"active": False, "queue": []}
 
+                # Canonical name aliases to catch common ways users refer to agents
+                # (keys are lowercase; values are canonical assistant names present in the room)
+                self.alias_map = {
+                    "chatgpt": "ChatGPT",
+                    "chat gpt": "ChatGPT",
+                    "gpt": "ChatGPT",
+                    "gpt-4o": "ChatGPT",
+                    "openai": "ChatGPT",
+                    "claude": "Claude",        # (redundant but harmless)
+                    "anthropic": "Claude",
+                    "gemini": "Gemini",        # (redundant but harmless)
+                    "google": "Gemini",
+                    "mistral": "Mistral",      # (redundant but harmless)
+                    "mistral ai": "Mistral",
+                }
+                # only keep aliases that actually map to agents that exist in this chat
+                existing = set(self.assistant_names)
+                self.alias_map = {k: v for k, v in self.alias_map.items() if v in existing}                
+
             def note_speaker(self, name: str) -> None:
                 """Let the proxy tell us which assistant just spoke."""
                 if name in self.assistant_names:
@@ -1117,44 +1136,67 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     "all agents", "all ais", "you all", "@all"
                 ))
 
-            def _direct_addressees(self, text: str):
+            def _direct_addressees(self, text: str) -> list[str]:
                 """
-                Returns a list of assistant names that the user directly addressed.
-                Much more permissive:
-                - "Name ..."  (no punctuation required)
-                - "@Name", "Name:", "Name —", "Name -", "Name,"
-                - "hey Name", "hi Name", "ok Name" at start
-                - "over to Name", "hand to Name", "pass to Name" anywhere
+                Return canonical assistant names directly addressed by the USER in this text.
+                Supports:
+                - Start-of-text direct calls: "@Name", "Name:", "Name,", "hey Name", "hi Name", "ok Name"
+                - Enumerations: "ChatGPT and Claude", "ChatGPT, Claude, and Gemini", "Claude vs Gemini"
+                - Mid-sentence targets: "to Claude", "for Gemini"
+                Also honors aliases (e.g., "OpenAI" -> ChatGPT, "Anthropic" -> Claude).
                 """
-                low = (text or "").lower()
-                addressees = []
+                import re
+                low = (text or "").strip().lower()
+                if not low:
+                    return []
 
-                # Accept either self.assistant_names or a cached set
-                names = getattr(self, "assistant_names", None) or list(getattr(self, "_assistant_name_set", [])) or []
-                name_set = {n for n in names}
+                # Canonical set
+                canon = {n.lower(): n for n in self.assistant_names}
 
-                # 1) Pure at-start vocative, no punctuation required
-                #    e.g. "mistral where did that come from?"
-                for name in names:
-                    nl = name.lower()
-                    if re.match(rf"^\s*@?{re.escape(nl)}\b", low):
-                        addressees.append(name)
+                # Merge aliases with canon
+                alias_to_canon = dict(self.alias_map)
+                alias_to_canon.update({k: v for k, v in canon.items()})  # allow matching canonical tokens too
 
-                # 2) Friendly openers at the very beginning: "hey name", "hi name", "ok name"
-                if not addressees:
-                    for name in names:
-                        nl = name.lower()
-                        if re.match(rf"^\s*(?:hey|hi|hello|ok|okay)\s+@?{re.escape(nl)}\b", low):
-                            addressees.append(name)
+                # Build ordered tokens list (longest first to prefer "mistral ai" over "mistral")
+                tokens = sorted(alias_to_canon.keys(), key=lambda s: -len(s))
 
-                # 3) Handoff phrases anywhere
-                for name in names:
-                    nl = name.lower()
-                    if re.search(rf"(?:over\s+to|hand\s+to|pass(?:\s+it)?\s+to)\s+{re.escape(nl)}\b", low):
-                        if name not in addressees:
-                            addressees.append(name)
+                def normalize(tok: str) -> str | None:
+                    t = tok.strip().lower()
+                    return alias_to_canon.get(t)
 
-                return addressees
+                addrs: list[str] = []
+
+                # 1) Start-of-text direct call (optionally with greeting)
+                for key in tokens:
+                    pat = rf"^\s*(?:hey|hi|hello|ok|okay)?\s*@?{re.escape(key)}\b\s*[:,\-–—]?"
+                    if re.search(pat, low):
+                        name = normalize(key)
+                        if name and name not in addrs:
+                            addrs.append(name)
+
+                # 2) Enumerations: X and Y / X, Y, and Z / X vs Y / X & Y / X/Y
+                # Connectors imply multiple addressees
+                name_group = r"(?:%s)" % "|".join(map(re.escape, tokens))
+                enum_pat = rf"{name_group}\s*(?:,|\band\b|&|/|\bvs\.?\b|\bversus\b)\s*{name_group}"
+                if re.search(enum_pat, low):
+                    # capture all occurrences; dedupe but preserve user order
+                    found = re.findall(name_group, low)
+                    seen = set()
+                    for tok in found:
+                        name = normalize(tok)
+                        if name and name not in seen:
+                            addrs.append(name)
+                            seen.add(name)
+
+                # 3) Mid-sentence “to/for Name”
+                for key in tokens:
+                    pat = rf"\b(?:to|for)\s+{re.escape(key)}\b"
+                    if re.search(pat, low):
+                        name = normalize(key)
+                        if name and name not in addrs:
+                            addrs.append(name)
+
+                return addrs
 
 
             def __call__(self, last_speaker: autogen.Agent, groupchat: autogen.GroupChat) -> autogen.Agent:
@@ -1185,42 +1227,50 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 # A) Assistant spoke last → maybe handoff, else give floor back to user
                 if last_name in self.assistant_names:
+                    # Remember who spoke last (useful for future heuristics)
                     self.previous_assistant = self.agent_by_name[last_name]
 
-                    # Did that assistant explicitly hand off to someone?
-                    targets = self._direct_addressees(content)
-                    if targets:
-                        self.previous_assistant = self.agent_by_name[targets[0]]
-                        return self.previous_assistant
-
-                    # If we were mid “everyone” round, continue it
+                    # NO assistant→assistant handoffs. We only honor user-directed routing.
+                    # Continue any in-progress “everyone/subset” round, otherwise hand control to the user.
                     if self.multi["active"]:
                         if self.multi["queue"]:
                             return self.agent_by_name[self.multi["queue"].pop(0)]
-                        # end of broadcast → back to user
+                        # end of round → back to user
                         self.multi["active"] = False
                         return self.agent_by_name[self.user_name]
 
-                    # Normal case after an assistant: hand back to the user
                     return self.agent_by_name[self.user_name]
 
                 # B) User spoke last → pick addressed agent, else last assistant, else first assistant
                 if last_role == "user" or last_name == self.user_name:
-                    if self._broadcast_requested(content):                        
+                    # 1) Explicit broadcast ("everyone", "you all", etc.)
+                    if self._broadcast_requested(content):
                         import random
                         self.multi["active"] = True
                         self.multi["queue"] = [a.name for a in self.assistant_agents]
                         random.shuffle(self.multi["queue"])
-                        return self.agent_by_name[self.multi["queue"].pop(0)]                        
+                        return self.agent_by_name[self.multi["queue"].pop(0)]
 
+                    # 2) Named addressees (may be a single name OR a list: "ChatGPT and Claude")
                     targets = self._direct_addressees(content)
-                    if targets:
+                    if len(targets) >= 2:
+                        # subset round (only named assistants, once each)
+                        self.multi["active"] = True
+                        self.multi["queue"] = [t for t in targets if t in self.assistant_names]
+                        return self.agent_by_name[self.multi["queue"].pop(0)]
+                    if len(targets) == 1:
                         return self.agent_by_name[targets[0]]
 
+                    # 3) “one of you / any of you” → pick one at random
+                    low = (content or "").lower()
+                    if re.search(r"\b(?:one|any)\s+of\s+you\b", low):
+                        import random
+                        return random.choice(self.assistant_agents) if self.assistant_agents else self.agent_by_name[self.user_name]
+
+                    # 4) Default: pick a random assistant
                     import random
                     return random.choice(self.assistant_agents) if self.assistant_agents else self.agent_by_name[self.user_name]
 
-                    return self.assistant_agents[0] if self.assistant_agents else self.agent_by_name[self.user_name]
 
                 # C) Fallback (e.g., a stray system/manager ended up “last”): ChatGPT or first assistant
                 return self.agent_by_name.get("ChatGPT", self.assistant_agents[0])
@@ -1514,10 +1564,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         )
 
 
+        # Passive router only (never speaks; no coordinator persona)
         manager = autogen.GroupChatManager(
             groupchat=groupchat,
             llm_config=False,
-            system_message=GROUPCHAT_SYSTEM_MESSAGE
+            system_message=""  # no manager behavior
         )
 
         # ---- tasks ----        
