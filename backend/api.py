@@ -1452,7 +1452,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 if in_broadcast and (speaker not in self._greeted_once):
                     self._greeted_once.add(speaker)
                     first = self._user_display_name.split()[0]
-                    text = f"Hi {first}!"
+                    variants = {
+                        "ChatGPT": [f"Hi {first}!", f"Hey {first}!", f"Hello {first}!"],
+                        "Claude":  [f"Hi {first}!", f"Hello {first}!", f"Good to see you, {first}!"],
+                        "Gemini":  [f"Hi {first}!", f"Hello {first}!", f"Hey there, {first}!"],
+                        "Mistral": [f"Hi {first}!", f"Hey {first}!", f"Hello {first}!"],
+                    }
+                    text = random.choice(variants.get(speaker, [f"Hi {first}!"]))
                     bypass_clamp = True
 
                 # 2) Else, if this message itself is a greeting and they haven't greeted yet
@@ -1538,19 +1544,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
 
 
-
-
-
-
             async def a_generate_reply(
                 self,
                 messages: List[Dict[str, Any]] | None = None,
                 sender: autogen.ConversableAgent | None = None,
                 **kwargs,
             ) -> Union[str, Dict, None]:
-                # Wait for next user input injected from the websocket handler
-                new_user_message = await self._user_input_queue.get()
-                return new_user_message
+                # Do not block for input inside a running turn. When the group
+                # tries to hand control back to the user, immediately end the run.
+                return {"content": "TERMINATE"}
 
             async def a_inject_user_message(self, message: str):
                 await self._user_input_queue.put(message)
@@ -1671,22 +1673,19 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 # persist (only if there's text) — but remember who spoke regardless
                 sender = (msg or {}).get("sender") or "System"
-                text = (msg or {}).get("text") or ""
+                text = (msg or {}).get("text") or (msg or {}).get("content") or ""
 
-                # who spoke (for speaker selection on next turn)
-                if sender in agent_name_set:
-                    try:
-                        selector.previous_assistant = selector.agent_by_name.get(sender, selector.previous_assistant)
-                    except Exception:
-                        pass
+                # If this is the user's echoed bubble, don't persist it here.
+                # It was already saved in user_input_handler_task.
+                if sender == user_internal_name:
+                    continue
 
                 if not text:
                     continue  # nothing to save
 
+                # Role mapping for storage
                 if sender in agent_name_set:
                     role = "assistant"
-                elif sender == user_internal_name:
-                    role = "user"
                 else:
                     role = "system"
 
