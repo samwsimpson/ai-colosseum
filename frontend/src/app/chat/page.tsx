@@ -521,8 +521,10 @@ const handleNewConversation = () => {
 
             // meta/system messages
             if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
-                setConversationId(msg.id);
-                loadConversations(); // refresh sidebar
+                if (msg.id !== conversationId) {
+                    setConversationId(msg.id);
+                    loadConversations(); // refresh sidebar
+                }
                 return;
             }
             if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
@@ -602,7 +604,7 @@ const handleNewConversation = () => {
             try { currentWs.close(); } catch {}
             }
         };
-    }, [userToken, userName, conversationId, addMessageToChat, loadConversations, wsReconnectNonce]);
+    }, [userToken, userName, addMessageToChat, wsReconnectNonce]);
 
         
 

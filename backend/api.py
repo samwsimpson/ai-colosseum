@@ -36,8 +36,13 @@ if not SECRET_KEY:
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
-# ==== System prompts (define once, before websocket handler) ====
 
+# Prevent duplicate greetings on rapid reconnects for the same (user, conversation)
+import time
+RECENT_GREETS = {}  # key: (user_id, conversation_id) -> monotonic timestamp
+GREETING_TTL_SECONDS = 10
+
+# ==== System prompts (define once, before websocket handler) ====
 def _env(name: str, default: str) -> str:
     # Use env var if present; otherwise fallback to a sane default
     val = os.getenv(name)
@@ -910,29 +915,41 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         # Keep this list in one place
         agent_names = ["ChatGPT", "Claude", "Gemini", "Mistral"]
 
-        # --- randomized opening greeting (always greet on websocket connect) ---
+        # --- randomized opening greeting (guarded: once per WS; skip if recently greeted) ---
         try:
             import random
 
-            greeter = random.choice(agent_names)  # e.g. "ChatGPT", "Claude", "Gemini", "Mistral"
-            greeting_text = f"Hi {user_display_name}, what can we help you with?"
+            # Only greet if this conversation has no messages yet (prevents greeting on resumes/reconnects)
+            has_any = False
+            async for _ in (conv_ref.collection("messages").limit(1).stream()):
+                has_any = True
+                break
 
-            # Show typing ON → send message → typing OFF
-            queue_send_nowait({"sender": greeter, "typing": True, "text": ""})
-            queue_send_nowait({"sender": greeter, "text": greeting_text})
-            queue_send_nowait({"sender": greeter, "typing": False, "text": ""})
+            # Also skip if we greeted this (user, conversation) very recently (e.g., quick reconnect)
+            key = (user['id'], conv_ref.id)
+            now = time.monotonic()
+            last = RECENT_GREETS.get(key)
 
-            # Persist so your history shows the opener
-            await save_message(conv_ref, role="assistant", sender=greeter, content=greeting_text)
+            if (not has_any) and (last is None or (now - last) > GREETING_TTL_SECONDS):
+                greeter = random.choice(agent_names)  # e.g. "ChatGPT", "Claude", "Gemini", "Mistral"
+                greeting_text = f"Hi {user_display_name}, what can we help you with?"
 
-            # Track last speaker for the selector (optional)
-            try:
-                pass
-            except Exception:
-                pass
+                # Show typing ON → send message → typing OFF
+                queue_send_nowait({"sender": greeter, "typing": True, "text": ""})
+                queue_send_nowait({"sender": greeter, "text": greeting_text})
+                queue_send_nowait({"sender": greeter, "typing": False, "text": ""})
+
+                # Persist so your history shows the opener
+                await save_message(conv_ref, role="assistant", sender=greeter, content=greeting_text)
+
+                RECENT_GREETS[key] = now
+
+            # (Optional: prune stale entries occasionally)
         except Exception as e:
             print("[opening greeting] skipped:", e)
         # --- end greeting ---
+
+        # ---- system prompts ----                                                                                          
 
         roster_text = (
             "SYSTEM: Multi-agent room context\n"
