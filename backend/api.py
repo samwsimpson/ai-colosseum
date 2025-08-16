@@ -1085,35 +1085,35 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         pass
                     return {"content": ""}
 
-                    # normalize to a plain string for forwarding through the proxy
-                    if isinstance(result, dict):
-                        out_text = (result.get("content") or result.get("text") or "").strip()
-                    elif isinstance(result, str):
-                        out_text = result.strip()
-                    else:
-                        out_text = str(result).strip()
+                # normalize to a plain string for forwarding through the proxy
+                if isinstance(result, dict):
+                    out_text = (result.get("content") or result.get("text") or "").strip()
+                elif isinstance(result, str):
+                    out_text = result.strip()
+                else:
+                    out_text = str(result).strip()
 
-                    if out_text:
-                        # Forward THROUGH the user proxy so your greeting/dup filters run
-                        # (this is what ultimately writes to message_output_queue)
-                        try:
-                            await self._proxy_for_forward.a_receive(
-                                {"content": out_text, "name": self.name},
-                                sender=self,
-                                request_reply=False,
-                                silent=True,
-                            )
-                        except Exception as e:
-                            print(f"[Assistant forward -> proxy] error: {e}")
-
-                    # return the original result to the manager
-                    return result
-                finally:
-                    # Ensure typing bubble is cleared even when nothing was forwarded
+                if out_text:
+                    # Forward THROUGH the user proxy so your greeting/dup filters run
+                    # (this is what ultimately writes to message_output_queue)
                     try:
-                        queue_send_nowait({"sender": self.name, "typing": False, "text": ""})
-                    except Exception:
-                        pass
+                        await self._proxy_for_forward.a_receive(
+                            {"content": out_text, "name": self.name},
+                            sender=self,
+                            request_reply=False,
+                            silent=True,
+                        )
+                    except Exception as e:
+                        print(f"[Assistant forward -> proxy] error: {e}")
+
+                # return the original result to the manager
+                return result
+            finally:
+                # Ensure typing bubble is cleared even when nothing was forwarded
+                try:
+                    queue_send_nowait({"sender": self.name, "typing": False, "text": ""})
+                except Exception:
+                    pass
 
 
         class CustomSpeakerSelector:
