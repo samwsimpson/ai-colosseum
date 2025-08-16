@@ -950,21 +950,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         # --- end greeting ---
 
         # ---- system prompts ----                                                                                          
-
         roster_text = (
             "SYSTEM: Multi-agent room context\n"
             f"- USER: {user_display_name}\n"
             f"- AGENTS PRESENT: {', '.join(agent_names)}\n\n"
             "Conversation rules for all agents:\n"
-            "1) You are in a shared room with ALL listed assistants. Treat other assistants’ messages as visible context, not as human messages.\n"
-            "2) When the USER directly addresses an assistant by name at the start of their message (e.g., 'Claude,', 'hey Gemini', 'ChatGPT:'), ONLY that named assistant should reply first.\n"
-            "3) If the USER says 'you all', 'everyone', 'all agents', 'both of you', or 'each of you', then each assistant replies ONCE with a concise, non-redundant answer. After you’ve answered, stay silent unless addressed again.\n"
-            "4) If the USER names a SUBSET (e.g., 'ChatGPT and Claude'), ONLY those named assistants reply once each. Others remain silent.\n"
-            "5) If the USER says 'one of you' or 'any of you', a single assistant should answer. Do NOT all reply.\n"
-            "6) Do NOT treat other assistants as people. Refer to them explicitly as assistants if needed (e.g., 'Claude (assistant)'). Do NOT apologize to, debate with, or hand off to other assistants unless the USER asked for a panel/roundtable.\n"
-            "7) Do NOT ask other assistants questions or wait for their responses unless the USER requested a multi-agent round. Focus on answering the USER.\n"
-            "8) Avoid repeated greetings. Greet at most once at the very beginning of a new conversation; otherwise answer directly.\n"
+            "1) Only respond to the USER’s messages. Treat other assistants’ messages as context, not as prompts.\n"
+            "2) Do NOT address other assistants directly and do NOT ask them questions unless the USER explicitly asked for a multi-agent round (e.g., 'everyone', or named a subset).\n"
+            "3) If the USER says 'everyone', 'you all', 'all of you', or names multiple assistants, each named assistant replies ONCE with a concise answer (max ~40 words). No preamble, no apologies, no meta.\n"
+            "4) If the USER names a single assistant (e.g., 'Claude,'), only that assistant should reply first. Others stay silent.\n"
+            "5) If the USER says 'one of you' or 'any of you', exactly ONE assistant replies.\n"
+            "6) For greetings ('hi', 'hello'): reply with a short greeting only; do not ask follow-up questions unless the USER asks one.\n"
+            "7) Avoid apologies and disclaimers unless correcting a clear mistake. Be direct and brief.\n"
         )
+
 
         def make_agent_system(name: str) -> str:
             base = {
@@ -977,12 +976,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 f"{base}\n\n"
                 f"Your name is {name}. Participants: {user_display_name} (user), {', '.join(agent_names)} (assistants).\n"
                 f"{roster_text}\n"
-                "Important:\n"
-                "- Address the human USER directly as 'you'.\n"
-                "- Refer to other listed agents explicitly as assistants when needed; they are not the user.\n"
-                "- Do not instruct, hand off to, or wait on other assistants unless the USER asked for 'everyone' or named a subset.\n"
-                "- If the USER names multiple assistants, reply once if you are named; otherwise stay silent.\n"
-                "- Keep replies concise and non-overlapping.\n"
+                "Important style:\n"
+                "- Be concise. Prefer 1–4 sentences.\n"
+                "- Do not apologize or add disclaimers unless you actually made an error.\n"
+                "- Do not greet repeatedly.\n"
+                "- Never instruct or hand off to other assistants; answer the USER directly.\n"
+                "- In 'everyone' or subset rounds, keep it to one compact answer; no prefaces.\n"
             )
 
 
@@ -1084,8 +1083,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # return the original result to the manager
                     return result
                 finally:
-                    # We'll handle the "typing off" from the user proxy now.
-                    pass
+                    # Ensure typing bubble is cleared even when nothing was forwarded
+                    try:
+                        queue_send_nowait({"sender": self.name, "typing": False, "text": ""})
+                    except Exception:
+                        pass
 
 
         class CustomSpeakerSelector:
@@ -1256,6 +1258,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     if len(targets) == 1:
                         return self.agent_by_name[targets[0]]
 
+                    # “one of you / any of you” → exactly one assistant
+                    import re
+                    low = (content or "").lower()
+                    if re.search(r"\b(?:one|any)\s+of\s+you\b", low):
+                        import random
+                        return random.choice(self.assistant_agents) if self.assistant_agents else self.agent_by_name[self.user_name]
+
                     # default: reply from the last assistant who spoke (if any)
                     if self.previous_assistant:
                         return self.previous_assistant
@@ -1298,7 +1307,26 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             def attach_selector(self, selector) -> None:
                 self._selector = selector     
                                           
-            
+            def _strip_perfunctory_openers(self, txt: str) -> str:
+                if not txt: 
+                    return txt
+                s = txt.lstrip()
+                lowers = s.lower()
+                # Drop common unnecessary openers
+                bad_starts = (
+                    "i apologize", "i'm sorry", "sorry", 
+                    "as an ai", "as a language model", 
+                    "as an ai assistant", "as a large language model"
+                )
+                for b in bad_starts:
+                    if lowers.startswith(b):
+                        # remove leading sentence or line
+                        # split on first period/newline and keep the rest
+                        import re
+                        s = re.sub(r'^[^.!\n]*[.!\n]\s*', '', s, count=1)
+                        return s or txt  # don't return empty; fallback to original
+                return txt
+        
             async def a_receive(self, message, sender=None, request_reply=True, silent=False):
                 """
                 Intercepts assistant->user messages, removes repetitive greetings and manager chatter,
@@ -1319,7 +1347,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     or (str(message) if not isinstance(message, dict) else "")
                 )
                 text = (raw_text or "").strip()
-
+                text = self._strip_perfunctory_openers(text)
                 # Remember last AI speaker immediately (even if we drop later)
                 if self._selector and speaker in self._assistant_name_set:
                     try:
