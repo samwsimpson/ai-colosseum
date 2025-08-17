@@ -573,7 +573,7 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
             key="refresh_token",
             value=refresh_token,
             max_age=14 * 24 * 60 * 60,
-            httponly=True,
+            httpy_only=True,
             secure=True,
             samesite="none",
         )
