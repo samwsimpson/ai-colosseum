@@ -541,24 +541,27 @@ const handleNewConversation = () => {
 
             // NEW: server-pushed minimal metadata for immediate sidebar display
             if (msg.type === 'conversation_meta' && typeof msg.id === 'string') {
-            setConversations(prev => {
-                const rest = prev.filter(c => c.id !== msg.id);
-                return [
-                {
-                    id: msg.id,
-                    title: (typeof msg.title === 'string' && msg.title.trim()) ? msg.title : 'New conversation',
-                    updated_at: (typeof msg.updated_at === 'string' && msg.updated_at.trim())
+                const id: string = msg.id;
+                const title: string =
+                    typeof msg.title === 'string' && msg.title.trim()
+                    ? msg.title
+                    : 'New conversation';
+                const updated_at: string =
+                    typeof msg.updated_at === 'string' && msg.updated_at.trim()
                     ? msg.updated_at
-                    : new Date().toISOString(),
-                },
-                ...rest,
-                ];
-            });
+                    : new Date().toISOString();
 
-            // ensure we have an id set even if it was already present
-            setConversationId(curr => curr || msg.id);
-            return;
+                setConversations(prev => {
+                    const rest = prev.filter(c => c.id !== id);
+                    const conv: ConversationListItem = { id, title, updated_at };
+                    return [conv, ...rest];
+                });
+
+                // ensure we have an id set even if it was already present
+                setConversationId(curr => curr || id);
+                return;
             }
+
 
             if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
                 setLoadedSummary(msg.summary);
