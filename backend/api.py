@@ -500,16 +500,16 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
     ).where(
         'created_at', '>=', first_day_of_month
     )
-    
+
     monthly_usage = 0
     async for _ in monthly_usage_query.stream():
-        conversation_count += 1
-
+        monthly_usage += 1
 
     return {
         "monthly_usage": monthly_usage,
         "monthly_limit": subscription_data['monthly_limit']
     }
+
 
 @app.post("/api/google-auth", response_model=Token)
 async def google_auth(auth_code: GoogleAuthCode, response: Response):
@@ -1033,6 +1033,29 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     else:
                         out_text = str(result).strip()
 
+                    # DEBUG: log when the model produced nothing (helps confirm the root cause)
+                    if not out_text:
+                        print(f"[{self.name}] empty model output (result={repr(result)[:300]})")
+
+                    # Guard: show a short message instead of pure silence
+                    if not out_text:
+                        out_text = "…(no content returned; please ask again or address me by name)"                        
+
+                    # NEW: proactively forward the assistant's reply to the browser
+                    if out_text:
+                        try:
+                            self._message_output_queue.put_nowait({
+                                "sender": self.name,
+                                "text": out_text
+                            })
+                        except Exception:
+                            # best-effort fallback
+                            await self._message_output_queue.put({
+                                "sender": self.name,
+                                "text": out_text
+                            })
+
+
                     
 
                 finally:
@@ -1256,13 +1279,25 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     
         # This task sends AI messages from the output queue to the WebSocket
         async def message_consumer_task(queue: asyncio.Queue, ws: WebSocket, conv_ref, agent_name_set: set, user_internal_name: str):
+            # NEW: track last non-empty text per sender to avoid duplicates
+            last_text_by_sender: dict[str, str] = {}
+
             while True:
                 try:
                     msg = await asyncio.wait_for(queue.get(), timeout=120)
-                    await ws.send_json(msg)
 
                     sender = (msg or {}).get("sender") or "System"
                     text = (msg or {}).get("text") or (msg or {}).get("content") or ""
+
+                    # NEW: skip duplicate non-empty messages from the same sender
+                    if text and last_text_by_sender.get(sender) == text:
+                        continue
+
+                    await ws.send_json(msg)
+
+                    if text:
+                        last_text_by_sender[sender] = text
+
 
                     if sender == user_internal_name or not text:
                         continue
