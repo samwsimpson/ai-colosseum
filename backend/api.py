@@ -392,26 +392,54 @@ async def list_conversations(user=Depends(get_current_user)):
         })
     return {"items": items}
 
+from typing import List, Dict
+from google.cloud import firestore
+
 @app.get("/api/conversations/by_token")
-async def list_conversations_by_token(token: str):
+async def list_conversations_by_token(token: str, limit: int = 100):
     user = await get_current_user(token=token)
-    items: List[dict] = []
-    q = (
-        db.collection("conversations")
-        .where("user_id", "==", user["id"])
-        .order_by("updated_at", direction=firestore.Query.DESCENDING)
-        .limit(100)
-    )
-    async for d in q.stream():
+    items_by_id: Dict[str, dict] = {}
+
+    base = db.collection("conversations")
+
+    # Primary: current stable doc id
+    q1 = (base.where("user_id", "==", user["id"])
+               .order_by("updated_at", direction=firestore.Query.DESCENDING)
+               .limit(limit))
+    async for d in q1.stream():
         c = d.to_dict() or {}
-        items.append({
+        items_by_id[d.id] = {
             "id": d.id,
             "title": c.get("title") or "New conversation",
             "updated_at": _ts_iso(c.get("updated_at")),
             "message_count": c.get("message_count", 0),
             "summary": c.get("summary", ""),
-        })
-    return {"items": items}
+        }
+
+    # Secondary: legacy keys via array_contains (e.g., email)
+    legacy_keys = []
+    if user.get("email"):
+        legacy_keys.append(user["email"].lower())
+
+    for key in legacy_keys:
+        q2 = (base.where("owner_keys", "array_contains", key)
+                  .order_by("updated_at", direction=firestore.Query.DESCENDING)
+                  .limit(limit))
+        async for d in q2.stream():
+            c = d.to_dict() or {}
+            items_by_id[d.id] = {
+                "id": d.id,
+                "title": c.get("title") or "New conversation",
+                "updated_at": _ts_iso(c.get("updated_at")),
+                "message_count": c.get("message_count", 0),
+                "summary": c.get("summary", ""),
+            }
+
+    merged = list(items_by_id.values())
+    merged.sort(key=lambda r: (r.get("updated_at") or ""), reverse=True)
+    return {"items": merged[:limit]}
+
+
 
 @app.get("/api/conversations/{conv_id}/messages")
 async def list_messages(conv_id: str, limit: int = 50, user=Depends(get_current_user)):
@@ -869,6 +897,17 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             **(initial_config or {}),
             "subscription_id": user_data.get("subscription_id"),
         })
+        # NEW: ensure owner_keys are present so listing can find legacy/alternate keys
+        try:
+            safe_keys = [user["id"]]
+            if user.get("email"):
+                safe_keys.append(user["email"].lower())
+            await conv_ref.set({
+                "user_id": user["id"],                      # keep single owner field
+                "owner_keys": firestore.ArrayUnion(safe_keys)
+            }, merge=True)
+        except Exception as e:
+            print("[ws] owner_keys upsert failed:", e)
 
         # Tell the client which conversation id we’re using
         await websocket.send_json({
