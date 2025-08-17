@@ -876,6 +876,19 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "type": "conversation_id",
             "id": conv_ref.id,
         })
+        # NEW: also send conversation meta so the sidebar can show it immediately
+        try:
+            snap = await conv_ref.get()
+            doc = snap.to_dict() or {}
+            await websocket.send_json({
+                "sender": "System",
+                "type": "conversation_meta",
+                "id": conv_ref.id,
+                "title": (doc.get("title") or "New conversation"),
+                "updated_at": _ts_iso(doc.get("updated_at") or doc.get("created_at")),
+            })
+        except Exception as e:
+            print("[ws] conversation_meta send failed:", e)
 
         message_output_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
         user_input_queue: asyncio.Queue = asyncio.Queue()
@@ -1289,6 +1302,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     await ws.send_json({"sender": proxy.name, "text": user_message})
                     await save_message(conv_ref, role="user", sender=proxy.name, content=user_message)
                     await maybe_set_title(conv_ref, user_message)
+                    # NEW: push updated title/updated_at to the client
+                    try:
+                        snap = await conv_ref.get()
+                        doc = snap.to_dict() or {}
+                        await websocket.send_json({
+                            "sender": "System",
+                            "type": "conversation_meta",
+                            "id": conv_ref.id,
+                            "title": (doc.get("title") or "New conversation"),
+                            "updated_at": _ts_iso(doc.get("updated_at") or doc.get("created_at")),
+                        })
+                    except Exception as e:
+                        print("[ws] conversation_meta (post-title) send failed:", e)
+
                     # If the user addressed everyone, give the manager a gentle, explicit hint
                     EVERYONE_PAT = re.compile(r"\b(everyone|all of you|each of you|all|y['’]all|you guys|all the models)\b", re.I)
                     if EVERYONE_PAT.search(user_message or ""):

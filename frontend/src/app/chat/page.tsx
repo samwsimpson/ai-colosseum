@@ -251,9 +251,11 @@ export default function ChatPage() {
     if (!userToken) return;
         try {
             setIsLoadingConvs(true);
-            const res = await apiFetch(`${API_BASE}/api/conversations?limit=100`, {            
-            cache: 'no-store',
+            const token = (typeof window !== 'undefined' && localStorage.getItem('access_token')) || userToken || '';
+            const res = await apiFetch(`${API_BASE}/api/conversations/by_token?token=${encodeURIComponent(token)}&limit=100`, {
+                cache: 'no-store',
             });
+
             if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
             const data = await res.json();
             // Support either {items:[...]} or [...] responses
@@ -521,12 +523,45 @@ const handleNewConversation = () => {
 
             // meta/system messages
             if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
-                if (msg.id !== conversationId) {
-                    setConversationId(msg.id);
-                    loadConversations(); // refresh sidebar
-                }
-                return;
+            const id = msg.id;
+
+            if (id !== conversationId) {
+                setConversationId(id);
+
+                // OPTIONAL POLISH: seed the sidebar immediately with this new convo
+                setConversations(prev => {
+                if (prev.some(c => c.id === id)) return prev;
+                return [
+                    { id, title: 'New conversation', updated_at: new Date().toISOString() },
+                    ...prev,
+                ];
+                });
+
+                loadConversations(); // still refresh from the server when ready
             }
+            return;
+            }
+
+            // NEW: immediate sidebar hydrate/update from the server
+            if (msg.type === 'conversation_meta' && typeof msg.id === 'string') {
+            setConversations(prev => {
+                const rest = prev.filter(c => c.id !== msg.id);
+                return [
+                {
+                    id: msg.id,
+                    title: (typeof msg.title === 'string' && msg.title.trim()) ? msg.title : 'New conversation',
+                    updated_at: (typeof msg.updated_at === 'string' && msg.updated_at.trim())
+                    ? msg.updated_at
+                    : new Date().toISOString(),
+                },
+                ...rest,
+                ];
+            });
+            // also store the id if we don't have it yet
+            setConversationId((curr) => curr || msg.id);
+            return;
+            }
+
             if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
                 setLoadedSummary(msg.summary);
                 return;
