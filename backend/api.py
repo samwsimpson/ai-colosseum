@@ -289,24 +289,24 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
     doc = await conv_ref.get()
     return conv_ref, (doc.to_dict() or {})
 
-async def save_message(conv_ref, role: str, sender: str, content: str):
-    """
-    role: 'user' | 'assistant' | 'system'
-    """
-    if not content:
-        return
-    now = datetime.now(timezone.utc)
+async def save_message(conv_ref, *, role: str, sender: str, content: str):
+    from google.cloud import firestore
+    now = firestore.SERVER_TIMESTAMP
+
+    # save the message
     await conv_ref.collection("messages").add({
         "role": role,
         "sender": sender,
         "content": content,
-        "timestamp": now
+        "created_at": now,
     })
-    # atomic increment; also advances updated_at
-    await conv_ref.update({
+
+    # update parent conversation
+    await conv_ref.set({
         "updated_at": now,
-        "message_count": Increment(1),
-    })
+        "message_count": firestore.Increment(1),
+    }, merge=True)
+
 
 # --- End Conversation persistence helpers ---
 
@@ -392,51 +392,48 @@ async def list_conversations(user=Depends(get_current_user)):
         })
     return {"items": items}
 
-from typing import List, Dict
+from typing import Dict
 from google.cloud import firestore
 
 @app.get("/api/conversations/by_token")
 async def list_conversations_by_token(token: str, limit: int = 100):
     user = await get_current_user(token=token)
+    base = db.collection("conversations")
     items_by_id: Dict[str, dict] = {}
 
-    base = db.collection("conversations")
-
-    # Primary: current stable doc id
-    q1 = (base.where("user_id", "==", user["id"])
-               .order_by("updated_at", direction=firestore.Query.DESCENDING)
-               .limit(limit))
+    # 1) primary by user_id (no order_by to avoid index requirements)
+    q1 = base.where("user_id", "==", user["id"]).limit(limit)
     async for d in q1.stream():
         c = d.to_dict() or {}
         items_by_id[d.id] = {
             "id": d.id,
             "title": c.get("title") or "New conversation",
-            "updated_at": _ts_iso(c.get("updated_at")),
+            # prefer updated_at; fallback to created_at
+            "updated_at": _ts_iso(c.get("updated_at") or c.get("created_at")),
             "message_count": c.get("message_count", 0),
             "summary": c.get("summary", ""),
         }
 
-    # Secondary: legacy keys via array_contains (e.g., email)
+    # 2) secondary by legacy keys (e.g., email) using array_contains
     legacy_keys = []
     if user.get("email"):
         legacy_keys.append(user["email"].lower())
 
     for key in legacy_keys:
-        q2 = (base.where("owner_keys", "array_contains", key)
-                  .order_by("updated_at", direction=firestore.Query.DESCENDING)
-                  .limit(limit))
+        q2 = base.where("owner_keys", "array_contains", key).limit(limit)
         async for d in q2.stream():
             c = d.to_dict() or {}
             items_by_id[d.id] = {
                 "id": d.id,
                 "title": c.get("title") or "New conversation",
-                "updated_at": _ts_iso(c.get("updated_at")),
+                "updated_at": _ts_iso(c.get("updated_at") or c.get("created_at")),
                 "message_count": c.get("message_count", 0),
                 "summary": c.get("summary", ""),
             }
 
-    merged = list(items_by_id.values())
-    merged.sort(key=lambda r: (r.get("updated_at") or ""), reverse=True)
+    # merge & sort (desc) without depending on Firestore indexes
+    merged = [v for v in items_by_id.values() if v.get("updated_at")]
+    merged.sort(key=lambda r: r["updated_at"], reverse=True)
     return {"items": merged[:limit]}
 
 
@@ -450,7 +447,7 @@ async def list_messages(conv_id: str, limit: int = 50, user=Depends(get_current_
 
     msgs = []
     q = (conv_ref.collection("messages")
-         .order_by("timestamp", direction=firestore.Query.DESCENDING)
+         .order_by("created_at", direction=firestore.Query.DESCENDING)  # ← was 'timestamp'
          .limit(limit))
     async for m in q.stream():
         d = m.to_dict() or {}
@@ -459,7 +456,7 @@ async def list_messages(conv_id: str, limit: int = 50, user=Depends(get_current_
             "role": d.get("role"),
             "sender": d.get("sender"),
             "content": d.get("content"),
-            "timestamp": _ts_iso(d.get("timestamp")),
+            "timestamp": _ts_iso(d.get("created_at")),  # ← was d.get("timestamp")
         })
     msgs.reverse()
     return {"items": msgs}
@@ -504,14 +501,14 @@ async def export_conversation(conv_id: str, user=Depends(get_current_user)):
     conv = snap.to_dict() or {}
 
     msgs = []
-    q = conv_ref.collection("messages").order_by("timestamp")
+    q = conv_ref.collection("messages").order_by("created_at")  # ← was 'timestamp'
     async for m in q.stream():
         d = m.to_dict() or {}
         msgs.append({
             "role": d.get("role"),
             "sender": d.get("sender"),
             "content": d.get("content"),
-            "timestamp": _ts_iso(d.get("timestamp")),
+            "timestamp": _ts_iso(d.get("created_at")),  # ← was 'timestamp'
         })
 
     return {
@@ -762,7 +759,7 @@ async def maybe_refresh_summary(conv_ref, threshold: int = 10, window: int = 40)
         # pull last `window` messages, newest first
         msgs = []
         q = (conv_ref.collection("messages")
-             .order_by("timestamp", direction=firestore.Query.DESCENDING)
+             .order_by("created_at", direction=firestore.Query.DESCENDING)  # ← was 'timestamp'
              .limit(window))
         async for doc in q.stream():
             d = doc.to_dict() or {}
@@ -897,6 +894,36 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             **(initial_config or {}),
             "subscription_id": user_data.get("subscription_id"),
         })
+        # --- Ensure conversation doc is materialized & listable ---
+        from google.cloud import firestore
+
+        try:
+            snap = await conv_ref.get()
+            doc = snap.to_dict() or {}
+
+            # server-side timestamps
+            now = firestore.SERVER_TIMESTAMP
+
+            # stable owner keys (doc id; also email if you have it)
+            owner_keys = [user["id"]]
+            if user.get("email"):
+                owner_keys.append(user["email"].lower())
+
+            seed = {
+                "user_id": user["id"],
+                "subscription_id": user_data.get("subscription_id"),
+                "owner_keys": firestore.ArrayUnion(owner_keys),
+                "title": doc.get("title") or "New conversation",
+                "created_at": doc.get("created_at") or now,
+                "updated_at": now if not doc.get("updated_at") else doc.get("updated_at"),
+                "message_count": doc.get("message_count", 0),
+            }
+
+            await conv_ref.set(seed, merge=True)
+
+        except Exception as e:
+            print("[ws] ensure conversation materialized failed:", e)
+
         # NEW: ensure owner_keys are present so listing can find legacy/alternate keys
         try:
             safe_keys = [user["id"]]
