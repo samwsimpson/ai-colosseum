@@ -503,7 +503,7 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
     
     monthly_usage = 0
     async for _ in monthly_usage_query.stream():
-        monthly_usage += 1
+        conversation_count += 1
 
 
     return {
@@ -1211,9 +1211,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         async def main_chat_loop(ws: WebSocket, proxy: WebSocketUserProxyAgent, manager, conv_ref):
             is_first_message = True
             
-            # This is the task that will run the Autogen chat.
-            autogen_task = None
-            
             # We first handle the greeting
             try:
                 import random
@@ -1254,20 +1251,16 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     await maybe_set_title(conv_ref, user_message)
 
                     if is_first_message:
-                        autogen_task = asyncio.create_task(proxy.a_initiate_chat(manager, message=user_message))
+                        await proxy.a_initiate_chat(manager, message=user_message)
                         is_first_message = False
                     else:
                         await proxy.a_inject_user_message(user_message)
 
                 except WebSocketDisconnect:
                     print("main_chat_loop: WebSocket disconnected.")
-                    if autogen_task:
-                        autogen_task.cancel()
                     break
                 except Exception as e:
                     print(f"main_chat_loop error: {e}")
-                    if autogen_task:
-                        autogen_task.cancel()
                     break
                     
         # This task sends AI messages from the output queue to the WebSocket
