@@ -970,6 +970,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 f"Attribution: When asked to list who said what, use EXACT speaker names from the transcript "
                 f"(ChatGPT, Claude, Gemini, Mistral, {safe_user_name}). "
                 f"Do not merge, alias, or infer names."
+                f"When directly addressing the user, call them '{user_display_name}'. Use the exact transcript name '{safe_user_name}' only for literal speaker tags or attribution lists."
             )
 
         # ---- model configs ----
@@ -1332,13 +1333,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         except Exception as _:
                             pass
 
-                    if is_first_message:
-                        # Kick off the manager loop in the background so we never block WS reads
+                    # Kick off or feed the manager loop
+                    if chat_task is None or chat_task.done():
+                        # (Re)start the manager loop in the background
                         chat_task = asyncio.create_task(proxy.a_initiate_chat(manager, message=user_message))
-                        is_first_message = False
                     else:
-                        # Feed subsequent user turns into the running manager loop
+                        # Feed subsequent user turns into the running loop
                         await proxy.a_inject_user_message(user_message)
+
 
 
                 except WebSocketDisconnect:
@@ -1365,7 +1367,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             last_text_by_sender: dict[str, str] = {}
 
             while True:
-                msg = await asyncio.wait_for(queue.get(), timeout=120)
+                msg = await queue.get()
 
                 sender = (msg or {}).get("sender") or "System"
                 text = (msg or {}).get("text") or (msg or {}).get("content") or ""
