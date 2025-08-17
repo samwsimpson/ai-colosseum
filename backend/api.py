@@ -1297,13 +1297,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         break
 
        
-        assistant_name_set = set(agent_names)
-
-        consumer_task = asyncio.create_task(
-            message_consumer_task(message_output_queue, websocket, conv_ref, assistant_name_set, safe_user_name)
-        )
-
-        # ADD this function right before the final `asyncio.gather` block
         async def chat_run_task(proxy: WebSocketUserProxyAgent, manager):
             # This is the main chat loop. It runs continuously until the chat is terminated.
             await proxy.a_initiate_chat(manager, message=proxy.human_input)
@@ -1319,15 +1312,27 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             except Exception as e:
                 print(f"keepalive_task error: {e}")
 
-        ka_task = asyncio.create_task(keepalive_task(websocket))
+        # --- Corrected Final Block to run all tasks concurrently ---
+        
+        # We create all tasks and then gather them. This ensures they all run in parallel.
+        consumer_task_coro = asyncio.create_task(
+            message_consumer_task(message_output_queue, websocket, conv_ref, assistant_name_set, safe_user_name)
+        )
+        input_handler_task_coro = asyncio.create_task(
+            user_input_handler_task(websocket, user_proxy, conv_ref)
+        )
+        chat_runner_task_coro = asyncio.create_task(
+            user_proxy.a_initiate_chat(manager, message=user_proxy.human_input)
+        )
+        keepalive_task_coro = asyncio.create_task(keepalive_task(websocket))
 
-        # REPLACE the entire final try...except...finally block with this:
         try:
+            # We must await the gathering of all tasks to ensure they run until completion
             await asyncio.gather(
-                input_handler_task,
-                consumer_task,
-                ka_task,
-                chat_run_task(user_proxy, manager)
+                input_handler_task_coro,
+                consumer_task_coro,
+                chat_runner_task_coro,
+                keepalive_task_coro,
             )
         except Exception as e:
             tb = traceback.format_exc()
@@ -1337,10 +1342,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             except Exception:
                 pass
         finally:
-            for t in (input_handler_task, consumer_task, ka_task, chat_run_task(user_proxy, manager)):
+            # Ensure all tasks are properly cancelled upon disconnection or error
+            for t in (input_handler_task_coro, consumer_task_coro, chat_runner_task_coro, keepalive_task_coro):
                 if not t.done():
                     t.cancel()
-            await asyncio.gather(input_handler_task, consumer_task, ka_task, chat_run_task(user_proxy, manager), return_exceptions=True)
+            # Await the cancellation of all tasks
+            await asyncio.gather(input_handler_task_coro, consumer_task_coro, chat_runner_task_coro, keepalive_task_coro, return_exceptions=True)
 
     except WebSocketDisconnect:
         print("WebSocket closed")
@@ -1351,3 +1358,4 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             await websocket.send_json({"sender": "System", "text": f"Error: {e}"})
         except WebSocketDisconnect:
             pass
+
