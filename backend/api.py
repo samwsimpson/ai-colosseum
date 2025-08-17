@@ -573,7 +573,7 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
             key="refresh_token",
             value=refresh_token,
             max_age=14 * 24 * 60 * 60,
-            httpy_only=True,
+            httponly=True,  # Corrected typo: httpy_only -> httponly
             secure=True,
             samesite="none",
         )
@@ -1247,6 +1247,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         
         # This task handles the main chat loop logic, receiving user messages and driving the AI conversation.
         async def main_chat_loop(ws: WebSocket, proxy: WebSocketUserProxyAgent, manager, conv_ref):
+            # We first initiate the chat with an empty message, to allow the AI to start the conversation if needed.
+            # This is non-blocking and the task will then proceed to receive user input.
+            autogen_task = asyncio.create_task(proxy.a_initiate_chat(manager, message=""))
+            
             while True:
                 try:
                     data = await ws.receive_json()
@@ -1280,15 +1284,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     except WebSocketDisconnect:
                         break
         
-        # This task will start and run the Autogen chat once a user message is received.
-        async def autogen_runner_task(proxy: WebSocketUserProxyAgent, manager):
-            # This is a one-time initiation call. It blocks until the conversation is over,
-            # which is why it needs to be a separate task.
-            try:
-                await proxy.a_initiate_chat(manager, message=proxy.human_input)
-            except Exception as e:
-                print(f"autogen_runner_task error: {e}")
-        
         async def keepalive_task(ws: WebSocket):
             try:
                 while True:
@@ -1301,23 +1296,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         # --- Final execution block ---
         
-        # These are the tasks that will run continuously in parallel
         consumer_task_coro = asyncio.create_task(
             message_consumer_task(message_output_queue, websocket, conv_ref, agent_names, safe_user_name)
         )
-        user_input_task_coro = asyncio.create_task(
+        main_loop_task_coro = asyncio.create_task(
             main_chat_loop(websocket, user_proxy, manager, conv_ref)
-        )
-        autogen_task_coro = asyncio.create_task(
-            autogen_runner_task(user_proxy, manager)
         )
         keepalive_task_coro = asyncio.create_task(keepalive_task(websocket))
 
         try:
             await asyncio.gather(
                 consumer_task_coro,
-                user_input_task_coro,
-                autogen_task_coro,
+                main_loop_task_coro,
                 keepalive_task_coro,
             )
         except WebSocketDisconnect:
@@ -1330,10 +1320,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             except Exception:
                 pass
         finally:
-            for t in (consumer_task_coro, user_input_task_coro, autogen_task_coro, keepalive_task_coro):
+            for t in (consumer_task_coro, main_loop_task_coro, keepalive_task_coro):
                 if not t.done():
                     t.cancel()
-            await asyncio.gather(consumer_task_coro, user_input_task_coro, autogen_task_coro, keepalive_task_coro, return_exceptions=True)
+            await asyncio.gather(consumer_task_coro, main_loop_task_coro, keepalive_task_coro, return_exceptions=True)
 
     except WebSocketDisconnect:
         print("Outer WebSocketDisconnect caught.")
