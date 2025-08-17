@@ -1,28 +1,29 @@
 import sys
 import traceback
-print("TOP OF api.py: Script starting...", file=sys.stderr)
-from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request
+import time
+import random
+import re
+import asyncio
+import jwt as pyjwt
+import os
+from datetime import datetime, timedelta, timezone
+from collections import defaultdict
+from typing import List, Dict, Any, Union, Optional
+from pydantic import BaseModel, constr
+
+from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
-from fastapi import Request, Response
-from pydantic import BaseModel
-from dotenv import load_dotenv
-import os
-import autogen
-import asyncio
-import re
-from typing import List, Dict, Any, Union, Optional
-import jwt as pyjwt
-from datetime import datetime, timedelta, timezone
 from google.auth.transport import requests as google_requests
 from google.oauth2.id_token import verify_oauth2_token
+from google.cloud import firestore
 from google.cloud.firestore_v1 import Increment
-from google.cloud import firestore  # for Query.DESCENDING
 import stripe
 from google_auth_oauthlib.flow import Flow
 from openai import AsyncOpenAI
-from collections import defaultdict
-from fastapi import Header, HTTPException
+import autogen
+
+print("TOP OF api.py: Script starting...", file=sys.stderr)
 
 OPENAI_SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -37,14 +38,10 @@ if not SECRET_KEY:
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 
-# Prevent duplicate greetings on rapid reconnects for the same (user, conversation)
-import time
-RECENT_GREETS = {}  # key: (user_id, conversation_id) -> monotonic timestamp
+RECENT_GREETS = {}
 GREETING_TTL_SECONDS = 10
 
-# ==== System prompts (define once, before websocket handler) ====
 def _env(name: str, default: str) -> str:
-    # Use env var if present; otherwise fallback to a sane default
     val = os.getenv(name)
     return val if (val is not None and val.strip() != "") else default
 
@@ -54,7 +51,6 @@ CHATGPT_SYSTEM = _env(
     "Memory: This conversation is persistent across sessions. When the user references earlier sessions, "
     "rely on the 'Conversation summary' system message that may be provided at the start. "
     "If critical details seem missing, ask the user if you'd like to retrieve details from earlier turns."
-
 )
 
 CLAUDE_SYSTEM = _env(
@@ -62,7 +58,7 @@ CLAUDE_SYSTEM = _env(
     "You are Claude. Provide careful reasoning and clear explanations. Avoid hallucinations.\n\n"
     "Memory: This conversation is persistent across sessions. When the user references earlier sessions, "
     "rely on the 'Conversation summary' system message that may be provided at the start. "
-    "If critical details seem missing, ask the user if you'd like to retrieve details from earlier turns."    
+    "If critical details seem missing, ask the user if you'd like to retrieve details from earlier turns."
 )
 
 GEMINI_SYSTEM = _env(
@@ -70,7 +66,7 @@ GEMINI_SYSTEM = _env(
     "You are Gemini. Answer succinctly, cite assumptions, and highlight uncertainties.\n\n"
     "Memory: This conversation is persistent across sessions. When the user references earlier sessions, "
     "rely on the 'Conversation summary' system message that may be provided at the start. "
-    "If critical details seem missing, ask the user if you'd like to retrieve details from earlier turns."    
+    "If critical details seem missing, ask the user if you'd like to retrieve details from earlier turns."
 )
 
 MISTRAL_SYSTEM = _env(
@@ -78,18 +74,10 @@ MISTRAL_SYSTEM = _env(
     "You are Mistral. Give practical, straightforward answers with minimal fluff.\n\n"
     "Memory: This conversation is persistent across sessions. When the user references earlier sessions, "
     "rely on the 'Conversation summary' system message that may be provided at the start. "
-    "If critical details seem missing, ask the user if you'd like to retrieve details from earlier turns."    
+    "If critical details seem missing, ask the user if you'd like to retrieve details from earlier turns."
 )
-# ==== end system prompts ====
-
-# ===== Retry & fallback helpers for LLM calls =====
-import random
 
 async def call_with_retry(op_coro_factory, ws, *, retries: int = 2, base_delay: float = 0.8):
-    """
-    Run an awaitable produced by op_coro_factory() with exponential backoff on 429 / capacity errors.
-    Sends lightweight status updates to the websocket so the UI isn't blank.
-    """
     for attempt in range(retries + 1):
         try:
             return await op_coro_factory()
@@ -97,23 +85,17 @@ async def call_with_retry(op_coro_factory, ws, *, retries: int = 2, base_delay: 
             msg = str(e)
             is_429 = "429" in msg or "service_tier_capacity_exceeded" in msg or "capacity" in msg.lower()
             if not is_429:
-                raise  # not a capacity issue, bubble up
-
-            # Tell the UI what's going on
+                raise
             try:
                 await ws.send_json({"sender": "System", "text": "Provider is under heavy load, retrying..."})
             except Exception:
                 pass
-
             if attempt == retries:
-                # Give a final friendly message then re-raise so logs show it
                 try:
                     await ws.send_json({"sender": "System", "text": "Still busy. Please try again in a moment."})
                 except Exception:
                     pass
                 raise
-
-            # jittered backoff
             delay = base_delay * (2 ** attempt) + random.random() * 0.3
             await asyncio.sleep(delay)
 
@@ -123,7 +105,6 @@ app = FastAPI()
 async def health_check():
     return {"status": "ok"}
 
-# Re-added CORS middleware for local development
 origins = [
     "http://localhost:3000",
     "https://aicolosseum.app",
@@ -151,12 +132,10 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
         user_id = payload.get("sub")
         if not user_id:
             raise credentials_exception
-
         user_ref = db.collection('users').document(user_id)
         user_doc = await user_ref.get()
         if not user_doc.exists:
             raise credentials_exception
-
         user = user_doc.to_dict() or {}
         user['id'] = user_doc.id
         return user
@@ -177,88 +156,20 @@ class Token(BaseModel):
     user_name: str
     user_id: str
 
-# Initialize Firestore DB client without explicit credentials
 db = firestore.AsyncClient()
 print("FIRESTORE_CLIENT_INITIALIZED: db = firestore.AsyncClient()", file=sys.stderr)
 
-# --- Conversations API ---
-
-async def _user_from_bearer(authorization: str | None):
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    token = authorization.split(" ", 1)[1]
-    # <-- use your existing JWT verify function here -->
-    user = await verify_and_get_user(token)  # if your helper is sync, remove await
-    if not user or not user.get("id"):
-        raise HTTPException(status_code=401, detail="Invalid token")
-    return user
-
-@app.get("/conversations")
-async def list_conversations(user=Depends(get_current_user), limit: int = 30):    
-
-    col = db.collection("conversations")
-    # newest first
-    q = col.where("user_id", "==", user["id"]).order_by("updated_at", direction=firestore.Query.DESCENDING).limit(limit)
-
-    items = []
-    async for doc in q.stream():
-        d = doc.to_dict() or {}
-        items.append({
-            "id": doc.id,
-            "title": d.get("title") or "New conversation",
-            "updated_at": (d.get("updated_at") or d.get("created_at")),
-        })
-    return {"items": items}
-
-@app.patch("/conversations/{conv_id}")
-async def rename_conversation(conv_id: str, body: dict, user=Depends(get_current_user)):
-    
-    new_title = (body or {}).get("title", "")
-    new_title = new_title.strip()[:120] or "Untitled"
-
-    ref = db.collection("conversations").document(conv_id)
-    # enforce ownership
-    snap = await ref.get()
-    if not snap.exists or (snap.to_dict() or {}).get("user_id") != user["id"]:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-    await ref.update({"title": new_title, "updated_at": datetime.utcnow()})
-    return {"ok": True}
-
-def create_access_token(data: dict, expires_delta: Union[timedelta, None] = None):
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=15))
-    to_encode.update({"exp": expire})
-    return pyjwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-def create_refresh_token(*, data: dict, expires_delta: timedelta = timedelta(days=14)) -> str:
-    to_encode = data.copy()
-    expire = datetime.now(timezone.utc) + expires_delta
-    to_encode.update({"exp": expire, "type": "refresh"})
-    return pyjwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
-# --- Conversation persistence helpers ---
-
 async def get_or_create_conversation(user_id: str, initial_config: dict):
-    """
-    Returns (conv_ref, conv_doc_dict).
-    If initial_config['conversation_id'] is present -> reuse it.
-    Else if initial_config['resume_last'] is truthy -> resume user's most recent conversation.
-    Else create a new conversation.
-    """
     cfg = initial_config or {}
     conv_id = cfg.get("conversation_id")
     resume_last = bool(cfg.get("resume_last"))
     now = datetime.utcnow()
-
     conversations = db.collection("conversations")
-
     if conv_id:
         conv_ref = conversations.document(conv_id)
         await conv_ref.set({"user_id": user_id, "updated_at": now}, merge=True)
         doc = await conv_ref.get()
         return conv_ref, (doc.to_dict() or {})
-
     if resume_last:
         try:
             q = (
@@ -274,7 +185,6 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
                 return conv_ref, (doc.to_dict() or {})
         except Exception as e:
             print("Resume-last query failed; creating new conversation. Error:", e)
-
     conv_ref = conversations.document()
     await conv_ref.set(
         {
@@ -290,9 +200,6 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
     return conv_ref, (doc.to_dict() or {})
 
 async def save_message(conv_ref, role: str, sender: str, content: str):
-    """
-    role: 'user' | 'assistant' | 'system'
-    """
     if not content:
         return
     now = datetime.now(timezone.utc)
@@ -302,13 +209,10 @@ async def save_message(conv_ref, role: str, sender: str, content: str):
         "content": content,
         "timestamp": now
     })
-    # atomic increment; also advances updated_at
     await conv_ref.update({
         "updated_at": now,
         "message_count": Increment(1),
     })
-
-# --- End Conversation persistence helpers ---
 
 @app.on_event("startup")
 async def startup_event():
@@ -323,7 +227,6 @@ async def startup_event():
             'Enterprise': {'monthly_limit': None, 'price_id': 'enterprise_price_id_placeholder'},
         }
         print("STARTUP EVENT: Plans defined")
-        
         for name, data in plans.items():
             print(f"STARTUP EVENT: Checking for subscription plan: {name}")
             doc_ref = subscriptions_ref.document(name)
@@ -346,22 +249,14 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
     user_doc = await db.collection('users').document(current_user['id']).get()
     if not user_doc.exists:
         raise HTTPException(status_code=404, detail="User not found")
-
     user_data = user_doc.to_dict() or {}
-
     subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
     subscription_data = subscription_doc.to_dict()
-
     return {
         "user_name": user_data['name'],
-        "user_id": user_doc.id,              # use doc id, not a field
+        "user_id": user_doc.id,
         "user_plan_name": subscription_doc.id
     }
-
-# === Conversations REST ===
-from typing import Optional, List
-from pydantic import BaseModel, constr
-from google.cloud import firestore
 
 def _ts_iso(v):
     try:
@@ -398,7 +293,6 @@ async def list_messages(conv_id: str, limit: int = 50, user=Depends(get_current_
     conv = await conv_ref.get()
     if (not conv.exists) or ((conv.to_dict() or {}).get("user_id") != user["id"]):
         raise HTTPException(status_code=404, detail="Conversation not found")
-
     msgs = []
     q = (conv_ref.collection("messages")
          .order_by("timestamp", direction=firestore.Query.DESCENDING)
@@ -431,7 +325,6 @@ async def delete_conversation(conv_id: str, user=Depends(get_current_user)):
     snap = await conv_ref.get()
     if (not snap.exists) or ((snap.to_dict() or {}).get("user_id") != user["id"]):
         raise HTTPException(status_code=404, detail="Conversation not found")
-
     while True:
         batch = db.batch()
         count = 0
@@ -441,7 +334,6 @@ async def delete_conversation(conv_id: str, user=Depends(get_current_user)):
         if count == 0:
             break
         await batch.commit()
-
     await conv_ref.delete()
     return {"ok": True}
 
@@ -453,7 +345,6 @@ async def export_conversation(conv_id: str, user=Depends(get_current_user)):
     if (not snap.exists) or ((snap.to_dict() or {}).get("user_id") != user["id"]):
         raise HTTPException(status_code=404, detail="Conversation not found")
     conv = snap.to_dict() or {}
-
     msgs = []
     q = conv_ref.collection("messages").order_by("timestamp")
     async for m in q.stream():
@@ -464,7 +355,7 @@ async def export_conversation(conv_id: str, user=Depends(get_current_user)):
             "content": d.get("content"),
             "timestamp": _ts_iso(d.get("timestamp")),
         })
-
+    msgs.reverse()
     return {
         "id": conv_id,
         "title": conv.get("title") or "Conversation",
@@ -474,25 +365,19 @@ async def export_conversation(conv_id: str, user=Depends(get_current_user)):
         "updated_at": _ts_iso(conv.get("updated_at")),
         "messages": msgs,
     }
-# === end Conversations REST ===
 
 @app.get("/api/users/me/usage")
 async def get_user_usage(current_user: dict = Depends(get_current_user)):
     user_doc = await db.collection('users').document(current_user['id']).get()
     user_data = user_doc.to_dict()
-    
     subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
     subscription_data = subscription_doc.to_dict()
-    
     if subscription_data['monthly_limit'] is None:
         return {
             "monthly_usage": 0,
             "monthly_limit": None
         }
-
-    # in /api/users/me/usage and in the WS handler where you count conversations
     first_day_of_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-
     monthly_usage_query = db.collection('conversations').where(
         'user_id', '==', current_user['id']
     ).where(
@@ -500,12 +385,9 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
     ).where(
         'created_at', '>=', first_day_of_month
     )
-    
     monthly_usage = 0
     async for _ in monthly_usage_query.stream():
-        conversation_count += 1
-
-
+        monthly_usage += 1
     return {
         "monthly_usage": monthly_usage,
         "monthly_limit": subscription_data['monthly_limit']
@@ -539,14 +421,11 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
         )
         flow.fetch_token(code=auth_code.code)
         credentials = flow.credentials
-
         idinfo = verify_oauth2_token(credentials.id_token, google_requests.Request(), credentials.client_id)
         google_id = idinfo["sub"]
-
         users_ref = db.collection("users")
         q = users_ref.where("google_id", "==", google_id).limit(1).stream()
         docs = [doc async for doc in q]
-
         if not docs:
             free_plan_doc = await db.collection("subscriptions").document("Free").get()
             new_user_ref = users_ref.document()
@@ -563,28 +442,22 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
             user_id = docs[0].id
             data = docs[0].to_dict() or {}
             user_name = data.get("name") or "User"
-
-        # Access token (front-end uses this)
         access_token = create_access_token({"sub": user_id}, timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES))
-
-        # Refresh token cookie (silent refresh later)
         refresh_token = create_refresh_token(data={"sub": user_id})
         response.set_cookie(
             key="refresh_token",
             value=refresh_token,
             max_age=14 * 24 * 60 * 60,
-            httponly=True,  # Corrected typo: httpy_only -> httponly
+            httponly=True,
             secure=True,
             samesite="none",
         )
-
         return Token(
             access_token=access_token,
             token_type="bearer",
             user_name=user_name,
             user_id=user_id,
         )
-
     except Exception as e:
         print(f"Google auth failed: {e}")
         raise HTTPException(status_code=401, detail="Google authentication failed")
@@ -601,7 +474,6 @@ async def refresh_access_token(request: Request):
     rt = request.cookies.get("refresh_token")
     if not rt:
         raise HTTPException(status_code=401, detail="No refresh token")
-
     try:
         payload = pyjwt.decode(rt, SECRET_KEY, algorithms=[ALGORITHM])
         if payload.get("type") != "refresh":
@@ -613,7 +485,6 @@ async def refresh_access_token(request: Request):
         raise HTTPException(status_code=401, detail="Refresh token expired")
     except pyjwt.PyJWTError:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
-
     access_expires_in = 60 * 60
     new_access = create_access_token(
         data={"sub": user_id},
@@ -644,7 +515,7 @@ async def create_checkout_session(request: SubscriptionRequest, current_user: di
 
 async def cheap_summarize(prompt: str) -> str:
     if openai_client is None:
-        return ""   # silently skip if not configured
+        return ""
     try:
         resp = await openai_client.chat.completions.create(
             model=OPENAI_SUMMARY_MODEL,
@@ -660,14 +531,9 @@ async def cheap_summarize(prompt: str) -> str:
         print(f"[cheap_summarize] error: {e}")
         return ""
 
-# --- Conversation title helper ---
 TITLE_DEFAULT = "New conversation"
 
 async def maybe_set_title(conv_ref, user_text: str):
-    """
-    If the conversation does not have a real title yet, derive one from the user's text.
-    Fast path uses the user's first short utterance; fallback asks cheap_summarize.
-    """
     if not user_text:
         return
     try:
@@ -675,42 +541,30 @@ async def maybe_set_title(conv_ref, user_text: str):
         doc = snap.to_dict() or {}
         current = (doc.get("title") or "").strip()
         if current and current != TITLE_DEFAULT:
-            return  # already titled
-
+            return
         trimmed = user_text.strip().replace("\n", " ")
-        # quick heuristic: short inputs become the title directly (no trailing punctuation)
         if 0 < len(trimmed) <= 60:
             title = trimmed.rstrip(".?!")
         else:
-            # cheap model to generate a concise 6–8 word title
             prompt = (
                 "Make a short chat title (max 8 words) for this user's request. "
                 "Only output the title, no quotes or extra text.\n\n"
                 f"Request: {user_text}"
             )
             title = await cheap_summarize(prompt)
-
         title = (title or "").strip()[:80] or TITLE_DEFAULT
         await conv_ref.update({"title": title})
     except Exception as e:
         print(f"maybe_set_title error: {e}")
 
-
 async def maybe_refresh_summary(conv_ref, threshold: int = 10, window: int = 40):
-    """
-    Refresh the running summary only if at least `threshold` new messages
-    have arrived since the last summary. Summarize only the latest `window` messages.
-    """
     try:
         conv_snap = await conv_ref.get()
         conv = conv_snap.to_dict() or {}
         mc = int(conv.get("message_count", 0))
         lsc = int(conv.get("last_summary_count", 0))
-
         if (mc - lsc) < threshold:
-            return  # nothing to do
-
-        # pull last `window` messages, newest first
+            return
         msgs = []
         q = (conv_ref.collection("messages")
              .order_by("timestamp", direction=firestore.Query.DESCENDING)
@@ -718,9 +572,7 @@ async def maybe_refresh_summary(conv_ref, threshold: int = 10, window: int = 40)
         async for doc in q.stream():
             d = doc.to_dict() or {}
             msgs.append(d)
-        msgs.reverse()  # chronological (oldest -> newest)
-
-        # build a compact text for summarization
+        msgs.reverse()
         lines = []
         for m in msgs:
             role = m.get("role") or "assistant"
@@ -730,20 +582,14 @@ async def maybe_refresh_summary(conv_ref, threshold: int = 10, window: int = 40)
                 continue
             lines.append(f"{sender} ({role}): {content}")
         transcript = "\n".join(lines)
-
         if not transcript:
             return
-
-        # --- call your cheapest summarizer (you can swap models here) ---
         prompt = (
             "Summarize this chat so far in 8-12 concise bullet points, "
             "capture decisions, to-dos, names, and key facts. Keep neutral tone.\n\n"
             f"{transcript}"
         )
-
-        # Example using your OpenAI client safely (adjust to your client var)
         summary_text = await cheap_summarize(prompt)
-
         now = datetime.now(timezone.utc)
         await conv_ref.update({
             "summary": summary_text,
@@ -759,69 +605,54 @@ async def stripe_webhook(request: Request):
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
     event = None
-
     try:
         event = stripe.Webhook.construct_event(
             payload, sig_header, stripe_webhook_secret
         )
     except ValueError:
-        # Invalid payload
         raise HTTPException(status_code=400, detail="Invalid payload")
     except stripe.error.SignatureVerificationError:
-        # Invalid signature
         raise HTTPException(status_code=400, detail="Invalid signature")
-
-    # ← IMPORTANT: this must be OUTSIDE the except blocks
     if event["type"] == "checkout.session.completed":
         sess_obj = event["data"]["object"]
         customer_email = sess_obj.get("customer_email")
-
-        # Re-retrieve with expand to access line_items safely
         session = stripe.checkout.Session.retrieve(
             sess_obj["id"],
             expand=["line_items"]
         )
-
         price_id = None
         try:
             price_id = session.line_items.data[0].price.id
         except Exception:
-            # Optional: fall back to metadata if you set it during checkout
             price_id = (session.get("metadata") or {}).get("price_id")
-
         if not (customer_email and price_id):
             return {"status": "ignored", "reason": "missing email or price_id"}
-
         users_ref = db.collection('users')
         user_doc_query = users_ref.where('email', '==', customer_email).limit(1).stream()
         user_docs = [doc async for doc in user_doc_query]
-
         subscriptions_ref = db.collection('subscriptions')
         new_subscription_doc_query = subscriptions_ref.where('price_id', '==', price_id).limit(1).stream()
         new_subscription_list = [doc async for doc in new_subscription_doc_query]
-
         if user_docs and new_subscription_list:
             user_ref = users_ref.document(user_docs[0].id)
             await user_ref.update({'subscription_id': new_subscription_list[0].id})
             print(f"User {customer_email} successfully subscribed to the {new_subscription_list[0].id} plan.")
-
     return {"status": "success"}
+
+# --- Main WebSocket Endpoint (Completely Rewritten) ---
 @app.websocket("/ws/colosseum-chat")
 async def websocket_endpoint(websocket: WebSocket, token: str):
+    await websocket.accept()
+
     try:
-        await websocket.accept()
-
-        # ---- auth & monthly limit ----
         user = await get_current_user(token=token)
-
         user_doc = await db.collection('users').document(user['id']).get()
         user_data = user_doc.to_dict()
-
         user_subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
         user_subscription_data = user_subscription_doc.to_dict()
 
         if user_subscription_data['monthly_limit'] is not None:
-            first_day_of_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)          
+            first_day_of_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             conversation_count_query = (
                 db.collection('conversations')
                 .where('user_id', '==', user['id'])
@@ -831,7 +662,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             conversation_count = 0
             async for _ in conversation_count_query.stream():
                 conversation_count += 1
-
             if conversation_count >= user_subscription_data['monthly_limit']:
                 await websocket.send_json({
                     "sender": "System",
@@ -840,430 +670,183 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Limit reached")
                 return
 
-        # ---- init from client ----
         initial_config = await websocket.receive_json()
-
-        # Create or reuse a conversation (persists across reconnects)
         conv_ref, conv_doc = await get_or_create_conversation(user['id'], {
             **(initial_config or {}),
             "subscription_id": user_data.get("subscription_id"),
         })
-
-        # Tell the client which conversation id we’re using
-        await websocket.send_json({
-            "sender": "System",
-            "type": "conversation_id",
-            "id": conv_ref.id,
-        })
-
-        message_output_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
-        user_input_queue: asyncio.Queue = asyncio.Queue()
-
-        def queue_send_nowait(payload: dict):
-            try:
-                message_output_queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                try:
-                    _ = message_output_queue.get_nowait()  # drop oldest
-                except Exception:
-                    pass
-                try:
-                    message_output_queue.put_nowait(payload)
-                except Exception:
-                    pass
+        await websocket.send_json({"sender": "System", "type": "conversation_id", "id": conv_ref.id})
+        
+        message_output_queue = asyncio.Queue(maxsize=100)
+        user_input_queue = asyncio.Queue()
 
         raw_user_name = (initial_config.get('user_name') or 'User').strip()
-        safe_user_name = re.sub(r'[^A-Za-z0-9_-]', '_', raw_user_name) or 'User'  # <-- no spaces/specials for the LLM API
-        user_display_name = raw_user_name.replace('_', ' ').strip()               # <-- pretty name for your UI
-
-        # Keep this list in one place
+        safe_user_name = re.sub(r'[^A-Za-z0-9_-]', '_', raw_user_name) or 'User'
+        user_display_name = raw_user_name.replace('_', ' ').strip()
         agent_names = ["ChatGPT", "Claude", "Gemini", "Mistral"]
-
-        # --- randomized opening greeting (guarded: once per WS; skip if recently greeted) ---
+        
+        # --- Randomized opening greeting ---
         try:
-            import random
-
-            # Only greet if this conversation has no messages yet (prevents greeting on resumes/reconnects)
             has_any = False
             async for _ in (conv_ref.collection("messages").limit(1).stream()):
                 has_any = True
                 break
-
-            # Also skip if we greeted this (user, conversation) very recently (e.g., quick reconnect)
             key = (user['id'], conv_ref.id)
             now = time.monotonic()
             last = RECENT_GREETS.get(key)
-
             if (not has_any) and (last is None or (now - last) > GREETING_TTL_SECONDS):
-                greeter = random.choice(agent_names)  # e.g. "ChatGPT", "Claude", "Gemini", "Mistral"
+                greeter = random.choice(agent_names)
                 greeting_text = f"Hi {user_display_name}, what can we help you with?"
-
-                # Send greeting message without a typing indicator
-                queue_send_nowait({"sender": greeter, "text": greeting_text})
-                
-                # Persist so your history shows the opener
+                await websocket.send_json({"sender": greeter, "text": greeting_text})
                 await save_message(conv_ref, role="assistant", sender=greeter, content=greeting_text)
-
                 RECENT_GREETS[key] = now
-
         except Exception as e:
-            print("[opening greeting] skipped:", e)
-        # --- end greeting ---
+            print(f"[opening greeting] skipped due to error: {e}")
 
-        def make_agent_system(name: str) -> str:
-            base = {
-                "ChatGPT": CHATGPT_SYSTEM,
-                "Claude": CLAUDE_SYSTEM,
-                "Gemini": GEMINI_SYSTEM,
-                "Mistral": MISTRAL_SYSTEM,
-            }.get(name, "You are an assistant.")
+        # --- Agent setup ---
+        def get_all_agents():
+            return [a for a in agents if a.name in agent_names]
+            
+        def last_speaker_selection(last_speaker, groupchat):
+            messages = groupchat.messages
+            last_message_content = messages[-1]['content'].lower() if messages else ""
+            
+            # Check for "everyone"
+            if "everyone" in last_message_content:
+                eligible_agents = [a for a in get_all_agents() if a.name != last_speaker.name]
+                random.shuffle(eligible_agents)
+                return eligible_agents
+            
+            # Check for specific agent mention
+            for agent_name in agent_names:
+                if agent_name.lower() in last_message_content:
+                    for agent in get_all_agents():
+                        if agent.name == agent_name:
+                            return agent
+            
+            # Default to last speaker, or a random agent if no last speaker
+            if last_speaker and last_speaker.name in agent_names:
+                return last_speaker
+            
+            return random.choice(get_all_agents())
 
-            # Use a single, simplified prompt for all agents
-            base_prompt = (
-                "You are in a group chat with a user and other AI assistants. "
-                "Your primary goal is to address the user's request. "
-                "Read and understand the full conversation history. "
-                "Speak only when you have a distinct contribution to make or when directly addressed by the user. "
-                "Be concise, direct, and avoid conversational fillers like 'As an AI...' or 'I apologize...' unless you are correcting a factual error. "
-                "Do not comment on other assistants' turns or try to hand off the conversation. "
-            )
+        chatgpt_llm_config = {"config_list": [{"model": "gpt-4o", "api_key": os.getenv("OPENAI_API_KEY")}], "temperature": 0.5, "timeout": 90}
+        claude_llm_config = {"config_list": [{"model": "claude-3-5-sonnet-20240620", "api_key": os.getenv("ANTHROPIC_API_KEY")}], "temperature": 0.7, "timeout": 90}
+        gemini_llm_config = {"config_list": [{"model": "gemini-1.5-pro", "api_key": os.getenv("GEMINI_API_KEY")}], "temperature": 0.7, "timeout": 90}
+        mistral_llm_config = {"config_list": [{"model": "mistral-large-latest", "api_key": os.getenv("MISTRAL_API_KEY")}], "temperature": 0.7, "timeout": 90}
 
-            return (
-                f"{base}\n\n"
-                f"Your name is {name}. Participants: {user_display_name} (user), {', '.join(agent_names)} (assistants).\n"
-                f"{base_prompt}"
-            )
-
-        # ---- model configs ----
-        chatgpt_llm_config = {
-            "config_list": [{
-                "model": "gpt-4o",
-                "api_key": os.getenv("OPENAI_API_KEY"),
-                "api_type": "openai"
-            }],
-            "temperature": 0.5,
-            "timeout": 90
-        }
-        claude_llm_config = {
-            "config_list": [{
-                "model": "claude-3-5-sonnet-20240620",
-                "api_key": os.getenv("ANTHROPIC_API_KEY"),
-                "api_type": "anthropic"
-            }],
-            "temperature": 0.7,
-            "timeout": 90
-        }
-        gemini_llm_config = {
-            "config_list": [{
-                "model": "gemini-1.5-pro",
-                "api_key": os.getenv("GEMINI_API_KEY"),
-                "api_type": "google"
-            }],
-            "temperature": 0.7,
-            "timeout": 90
-        }
-        mistral_llm_config = {
-            "config_list": [{
-                "model": "mistral-large-latest",
-                "api_key": os.getenv("MISTRAL_API_KEY"),
-                "api_type": "mistral"
-            }],
-            "temperature": 0.7,
-            "timeout": 90
-        }
-
-        # ---- agent classes ----
         class WebSocketAssistantAgent(autogen.AssistantAgent):
-            def __init__(self, name, llm_config, system_message,
-                        message_output_queue: asyncio.Queue,
-                        proxy_for_forward: "WebSocketUserProxyAgent"):
+            def __init__(self, name, llm_config, system_message, message_output_queue: asyncio.Queue):
                 super().__init__(name=name, llm_config=llm_config, system_message=system_message)
                 self._message_output_queue = message_output_queue
-                self._proxy_for_forward = proxy_for_forward
-
-            async def a_receive(self, message, sender=None, request_reply=False, silent=False):
-                # show typing while we process
-                try:
-                    self._message_output_queue.put_nowait({"sender": self.name, "typing": True, "text": ""})
-                except Exception:
-                    pass
-                return await super().a_receive(message, sender=sender, request_reply=request_reply, silent=silent)
-
-            async def a_generate_reply(self, messages=None, sender=None, **kwargs):
-                # turn typing on for the assistant
-                try:
-                    self._message_output_queue.put_nowait({"sender": self.name, "typing": True, "text": ""})
-                except Exception:
-                    pass
-
-                result = None
-                out_text = ""
-
-                try:
-                    # SIMPLE RETRY (3 attempts with backoff) to avoid silent failures
-                    delay = 0.8
-                    last_exc = None
-                    for attempt in range(3):
-                        try:
-                            result = await super().a_generate_reply(messages=messages, sender=sender, **kwargs)
-                            break
-                        except Exception as e:
-                            last_exc = e
-                            if attempt == 2:
-                                raise
-                            await asyncio.sleep(delay)
-                            delay *= 2
-                except Exception:
-                    # If all retries fail, show a small, friendly bubble instead of silence
-                    try:
-                        self._message_output_queue.put_nowait({
-                            "sender": self.name,
-                            "text": "I hit a temporary issue and couldn’t reply. Please ask again."
-                        })
-                    except Exception:
-                        pass
-                    result = {"content": ""}  # unify return shape for caller
-                else:
-                    # Normalize to a plain string
-                    if isinstance(result, dict):
-                        out_text = (result.get("content") or result.get("text") or "").strip()
-                    elif isinstance(result, str):
-                        out_text = result.strip()
-                    elif result is None:
-                        out_text = ""
-                    else:
-                        out_text = str(result).strip()
-
-                    
-
-                finally:
-                    # ALWAYS clear typing even if we error/return early
-                    try:
-                        self._message_output_queue.put_nowait({"sender": self.name, "typing": False, "text": ""})
-                    except Exception:
-                        pass
-
-                return result
+            
+            async def a_send(self, message, recipient, request_reply=None, silent=False, **kwargs):
+                if not silent and message.get("content"):
+                    await self._message_output_queue.put({"sender": self.name, "typing": True, "text": ""})
+                    await asyncio.sleep(1) # simulate typing
+                    await self._message_output_queue.put({"sender": self.name, "text": message["content"]})
+                    await self._message_output_queue.put({"sender": self.name, "typing": False, "text": ""})
+                
+                return await super().a_send(message, recipient, request_reply=request_reply, silent=silent, **kwargs)
 
         class WebSocketUserProxyAgent(autogen.UserProxyAgent):
-            """
-            User proxy that:
-            - forwards every visible assistant message to the browser
-            - suppresses repeated greeting spam (allow exactly one greeting per assistant per conversation)
-            - lets us inject user text asynchronously
-            - robustly determines the real speaker (ChatGPT/Claude/Gemini/Mistral)
-            """
-            def __init__(self, *args, message_output_queue: asyncio.Queue, assistant_name_set: set[str], **kwargs):
-                super().__init__(*args, **kwargs)
+            def __init__(self, name, message_output_queue, user_input_queue, assistant_name_set):
+                super().__init__(name=name, human_input_mode="NEVER", is_termination_msg=lambda x: isinstance(x, dict) and x.get("content", "").endswith("TERMINATE"))
                 self._message_output_queue = message_output_queue
-                self._user_input_queue: asyncio.Queue[str] = asyncio.Queue()
-                self._assistant_name_set = set(assistant_name_set)
-                self._assistant_name_lower = {n.lower(): n for n in self._assistant_name_set}
-                # Keep this for de-duping, but remove the rest
-                self._last_text_by_sender: dict[str, str] = {}
-                # NEW: authoritative ledger for each assistant's latest number
+                self._user_input_queue = user_input_queue
+                self._assistant_name_set = assistant_name_set
+
+            async def a_get_human_input(self, prompt, **kwargs):
+                return await self._user_input_queue.get()
                 
-                self._assistant_names_list = sorted(list(self._assistant_name_set))
-            
-            async def a_receive(self, message, sender=None, request_reply=True, silent=False):
-                """
-                Intercepts assistant->user messages and forwards them to the browser,
-                while handling termination and basic de-duplication.
-                """
-                # ---- normalize the incoming payload ----
-                speaker = (
-                    getattr(sender, "name", None)
-                    or (message.get("name") if isinstance(message, dict) else None)
-                    or "Unknown"
-                )
-                raw_text = (
-                    (message.get("content") if isinstance(message, dict) else None)
-                    or (message.get("text") if isinstance(message, dict) else None)
-                    or (str(message) if not isinstance(message, dict) else "")
-                )
-                text = (raw_text or "").strip()
+            async def a_send(self, message, recipient, request_reply=None, silent=False, **kwargs):
+                if not silent and message.get("content"):
+                    # This echoes the user's message back to the UI.
+                    # It's not a real AI response, but it completes the local message loop.
+                    await self._message_output_queue.put({"sender": self.name, "text": message["content"]})
+                return await super().a_send(message, recipient, request_reply=request_reply, silent=silent, **kwargs)
 
-                # Never show manager/system lines
-                if speaker and speaker.lower().strip() in {"chat_manager", "manager", "orchestrator"}:
-                    return {"content": "", "name": speaker}
-
-                # De-dup identical consecutive messages (This is a helpful heuristic to keep)
-                prev = self._last_text_by_sender.get(speaker)
-                if prev and prev.strip() == text.strip():
-                    return {"content": "", "name": speaker}
-                self._last_text_by_sender[speaker] = text
-
-                # Forward to browser
-                if text:
-                    payload = {"sender": speaker, "text": text}
-                    try:
-                        self._message_output_queue.put_nowait(payload)
-                    except Exception:
-                        await self._message_output_queue.put(payload)
-
-                    # Send the typing-off message
-                    try:
-                        self._message_output_queue.put_nowait({"sender": speaker, "typing": False, "text": ""})
-                    except Exception:
-                        pass
-
-                # Keep base behavior for Autogen bookkeeping
-                return await super().a_receive(message, sender=sender, request_reply=request_reply, silent=silent)
-
-            async def a_generate_reply(
-                self,
-                messages: List[Dict[str, Any]] | None = None,
-                sender: autogen.ConversableAgent | None = None,
-                **kwargs,
-            ) -> Union[str, Dict, None]:
-                # Block until a user message is received
-                user_input = await self._user_input_queue.get()
-                return {"content": user_input, "role": "user", "name": self.name}
-
-            async def a_inject_user_message(self, message: str):
-                await self._user_input_queue.put(message)        
-
-        # ---- build roster ----
+        agents = []
         user_proxy = WebSocketUserProxyAgent(
-            name=safe_user_name,  # <-- use the safe internal name
-            human_input_mode="NEVER",
+            name=safe_user_name,
             message_output_queue=message_output_queue,
-            assistant_name_set=set(agent_names), 
-            code_execution_config={"use_docker": False},
-            is_termination_msg=lambda x: isinstance(x, dict) and x.get("content", "").endswith("TERMINATE")
+            user_input_queue=user_input_queue,
+            assistant_name_set=set(agent_names)
         )
-     
-        agents = [user_proxy]
-        agents.append(WebSocketAssistantAgent(
-            "ChatGPT",
-            llm_config=chatgpt_llm_config,
-            system_message=make_agent_system("ChatGPT"),
-            message_output_queue=message_output_queue,
-            proxy_for_forward=user_proxy,
-        ))
-        agents.append(WebSocketAssistantAgent(
-            "Claude",
-            llm_config=claude_llm_config,
-            system_message=make_agent_system("Claude"),
-            message_output_queue=message_output_queue,
-            proxy_for_forward=user_proxy,
-        ))
-        agents.append(WebSocketAssistantAgent(
-            "Gemini",
-            llm_config=gemini_llm_config,
-            system_message=make_agent_system("Gemini"),
-            message_output_queue=message_output_queue,
-            proxy_for_forward=user_proxy,
-        ))
-        agents.append(WebSocketAssistantAgent(
-            "Mistral",
-            llm_config=mistral_llm_config,
-            system_message=make_agent_system("Mistral"),
-            message_output_queue=message_output_queue,
-            proxy_for_forward=user_proxy,
-        ))
+        agents.append(user_proxy)
+        
+        for name, system_prompt, llm_config in [
+            ("ChatGPT", make_agent_system("ChatGPT"), chatgpt_llm_config),
+            ("Claude", make_agent_system("Claude"), claude_llm_config),
+            ("Gemini", make_agent_system("Gemini"), gemini_llm_config),
+            ("Mistral", make_agent_system("Mistral"), mistral_llm_config),
+        ]:
+            agents.append(WebSocketAssistantAgent(
+                name=name,
+                llm_config=llm_config,
+                system_message=system_prompt,
+                message_output_queue=message_output_queue
+            ))
 
         print("AGENTS IN GROUPCHAT:")
         for a in agents:
             print(f" - {a.name}")
         if len(agents) < 2:
             await websocket.send_json({"sender": "System", "text": "No AIs available for your subscription."})
+            await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="No agents")
             return
 
-        seed_messages = []
-        if conv_doc.get("summary"):
-            seed_messages.append({
-                "role": "system",
-                "content": f"Conversation summary so far:\n{conv_doc['summary']}"
-            })
-
-        seed_messages.append({
-            "role": "system",
-            "content": (
-                f"Participants: {', '.join(agent_names)}. User: {user_display_name}. "
-                "Memory: This conversation is persistent. Rely on the 'Conversation summary' for prior context."
-            )
-        })
-        # Add this block right after the seed_messages block
         groupchat = autogen.GroupChat(
             agents=agents,
             messages=seed_messages,
             max_round=999999,
-            speaker_selection_method="auto",
+            speaker_selection_method=last_speaker_selection,
             allow_repeat_speaker=True,
         )
 
         manager = autogen.GroupChatManager(
             groupchat=groupchat,
             llm_config=chatgpt_llm_config,
-            system_message=(
-                "You are the group chat manager. Your role is to determine the next speaker based on the conversation history. "
-                "Choose the agent most relevant to the user's last request. "
-                "If the user addressed a specific agent by name, select that agent. "
-                "If the user asked 'everyone', cycle through each assistant once in a random order. "
-                "If the conversation turn is complete, select the 'User' to signal for their next input. "
-                "Output only the name of the next speaker, for example, 'User' or 'ChatGPT'."
-            )
+            system_message="You are the group chat manager. Your goal is to manage the conversation flow.",
         )
         
         # --- NEW CODE: Redesigned chat loop to prevent deadlock ---
-        
         async def main_chat_loop(ws: WebSocket, proxy: WebSocketUserProxyAgent, manager, conv_ref):
+            autogen_task = None
             is_first_message = True
             
-            # We first handle the greeting
-            try:
-                import random
-
-                has_any = False
-                async for _ in (conv_ref.collection("messages").limit(1).stream()):
-                    has_any = True
-                    break
-
-                key = (user['id'], conv_ref.id)
-                now = time.monotonic()
-                last = RECENT_GREETS.get(key)
-
-                if (not has_any) and (last is None or (now - last) > GREETING_TTL_SECONDS):
-                    greeter = random.choice(agent_names)
-                    greeting_text = f"Hi {user_display_name}, what can we help you with?"
-
-                    await ws.send_json({"sender": greeter, "text": greeting_text})
-                    await save_message(conv_ref, role="assistant", sender=greeter, content=greeting_text)
-
-                    RECENT_GREETS[key] = now
-            except Exception as e:
-                print(f"[opening greeting] skipped due to error: {e}")
-
             while True:
                 try:
                     data = await ws.receive_json()
-                    
                     if isinstance(data, dict) and data.get("type") in ("ping", "pong"):
                         if data.get("type") == "ping":
                             await ws.send_json({"type": "pong"})
                         continue
-                        
-                    user_message = data["message"]
+                    
+                    user_message = data.get("message", "")
+                    if not user_message:
+                        continue
 
-                    await ws.send_json({"sender": proxy.name, "text": user_message})
                     await save_message(conv_ref, role="user", sender=proxy.name, content=user_message)
                     await maybe_set_title(conv_ref, user_message)
 
                     if is_first_message:
-                        await proxy.a_initiate_chat(manager, message=user_message)
+                        autogen_task = asyncio.create_task(proxy.a_initiate_chat(manager, message=user_message))
                         is_first_message = False
                     else:
                         await proxy.a_inject_user_message(user_message)
-
+                
                 except WebSocketDisconnect:
                     print("main_chat_loop: WebSocket disconnected.")
+                    if autogen_task and not autogen_task.done():
+                        autogen_task.cancel()
                     break
                 except Exception as e:
                     print(f"main_chat_loop error: {e}")
+                    if autogen_task and not autogen_task.done():
+                        autogen_task.cancel()
                     break
-                    
-        # This task sends AI messages from the output queue to the WebSocket
+
         async def message_consumer_task(queue: asyncio.Queue, ws: WebSocket, conv_ref, agent_name_set: set, user_internal_name: str):
             while True:
                 try:
@@ -1314,6 +897,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 main_chat_loop_coro,
                 keepalive_task_coro
             )
+        except asyncio.CancelledError:
+            print("Tasks were cancelled, shutting down.")
         except WebSocketDisconnect:
             print("WebSocket closed normally.")
         except Exception as e:
@@ -1338,3 +923,4 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             await websocket.send_json({"sender": "System", "text": f"Error: {e}"})
         except WebSocketDisconnect:
             pass
+
