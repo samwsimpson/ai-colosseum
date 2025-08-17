@@ -392,29 +392,6 @@ async def list_conversations(user=Depends(get_current_user)):
         })
     return {"items": items}
 
-@app.get("/api/conversations/{conv_id}/messages")
-async def list_messages(conv_id: str, limit: int = 50, user=Depends(get_current_user)):
-    conv_ref = db.collection("conversations").document(conv_id)
-    conv = await conv_ref.get()
-    if (not conv.exists) or ((conv.to_dict() or {}).get("user_id") != user["id"]):
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-    msgs = []
-    q = (conv_ref.collection("messages")
-         .order_by("timestamp", direction=firestore.Query.DESCENDING)
-         .limit(limit))
-    async for m in q.stream():
-        d = m.to_dict() or {}
-        msgs.append({
-            "id": m.id,
-            "role": d.get("role"),
-            "sender": d.get("sender"),
-            "content": d.get("content"),
-            "timestamp": _ts_iso(d.get("timestamp")),
-        })
-    msgs.reverse()
-    return {"items": msgs}
-
 @app.patch("/api/conversations/{conv_id}")
 async def rename_conversation(conv_id: str, body: RenameBody, user=Depends(get_current_user)):
     conv_ref = db.collection("conversations").document(conv_id)
@@ -1211,6 +1188,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         async def main_chat_loop(ws: WebSocket, proxy: WebSocketUserProxyAgent, manager, conv_ref):
             is_first_message = True
             
+            # This is the task that will run the Autogen chat.
+            autogen_task = None
+            
             # We first handle the greeting
             try:
                 import random
@@ -1258,9 +1238,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 except WebSocketDisconnect:
                     print("main_chat_loop: WebSocket disconnected.")
+                    if autogen_task:
+                        autogen_task.cancel()
                     break
                 except Exception as e:
                     print(f"main_chat_loop error: {e}")
+                    if autogen_task:
+                        autogen_task.cancel()
                     break
                     
         # This task sends AI messages from the output queue to the WebSocket
