@@ -1358,4 +1358,3 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             await websocket.send_json({"sender": "System", "text": f"Error: {e}"})
         except WebSocketDisconnect:
             pass
-
