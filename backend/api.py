@@ -930,8 +930,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
             return (
                 f"{base}\n\n"
-                f"Your name is {name}. Participants: {user_display_name} (user), {', '.join(agent_names)} (assistants).\n"
+                f"Your name is {name}. Participants: {safe_user_name} (user), ChatGPT, Claude, Gemini, Mistral (assistants).\n"
                 f"{base_prompt}"
+                f"Attribution: When asked to list who said what, use EXACT speaker names from the transcript "
+                f"(ChatGPT, Claude, Gemini, Mistral, {safe_user_name}). Do not merge, alias, or infer names."
             )
 
         # ---- model configs ----
@@ -1202,10 +1204,17 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         seed_messages.append({
             "role": "system",
             "content": (
-                f"Participants: {', '.join(agent_names)}. User: {user_display_name}. "
+                f"Participants: ChatGPT (assistant), Claude (assistant), Gemini (assistant), Mistral (assistant). "
+                f"User: {safe_user_name} (human).\n"
+                f"Speaker map (USE EXACT STRINGS): ChatGPT, Claude, Gemini, Mistral, {safe_user_name}.\n"
+                f"Attribution rules:\n"
+                f"• When listing who said what, copy the exact speaker names from the transcript; do not infer or rename.\n"
+                f"• Never attribute any assistant's message to {safe_user_name}.\n"
+                f"• If an assistant did not provide a number, say 'not provided' for that assistant only.\n"
                 "Memory: This conversation is persistent. Rely on the 'Conversation summary' for prior context."
             )
         })
+
         # Add this block right after the seed_messages block
         groupchat = autogen.GroupChat(
             agents=agents,
@@ -1225,10 +1234,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 f"- ChatGPT\n- Claude\n- Gemini\n- Mistral\n\n"
                 f"Rules:\n"
                 f"1) If the user directly addresses an assistant by name, select that assistant.\n"
-                f"2) If the user asks 'everyone', schedule answers from ChatGPT, Claude, Gemini, Mistral "
-                f"(one per round, in any sensible order), then select {safe_user_name}.\n"
+                f"2) If the user asks 'everyone' (or uses phrases like 'all of you', 'each of you', 'all', 'y'all', 'guys'), "
+                f"schedule answers from ChatGPT, Claude, Gemini, Mistral (one per round, any sensible order), then select {safe_user_name}.\n"
                 f"3) If the user doesn’t specify anyone, prefer the last assistant who replied; otherwise choose the most relevant assistant.\n"
-                f"4) When you want more input from the human, select {safe_user_name} (do NOT output 'User').\n\n"
+                f"4) When you want more input from the human, select {safe_user_name} (do NOT output 'User').\n"
+                f"5) NEVER attribute an assistant's message to {safe_user_name}. Use exact names.\n\n"
                 f"Output only one of these exact names: {safe_user_name}, ChatGPT, Claude, Gemini, or Mistral."
             )
         )
