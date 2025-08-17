@@ -1209,12 +1209,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             )
         )
         
-        # --- NEW CODE: Redesigned chat loop to prevent deadlock ---
-        # A queue to hold incoming user messages
-        chat_message_queue: asyncio.Queue = asyncio.Queue()
-
-        # This task handles receiving messages from the WebSocket and pushing them to a queue.
-        async def websocket_receiver_task(ws: WebSocket):
+        # --- Final execution block ---
+        
+        # A task to continuously receive messages from the WebSocket and inject them into the chat
+        async def websocket_receiver_and_injector_task(ws: WebSocket):
+            is_first_message = True
             while True:
                 try:
                     data = await ws.receive_json()
@@ -1222,47 +1221,32 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         if data.get("type") == "ping":
                             await ws.send_json({"type": "pong"})
                         continue
-                    await chat_message_queue.put(data)
-                except WebSocketDisconnect:
-                    print("websocket_receiver_task: client disconnected.")
-                    break
-                except Exception as e:
-                    print(f"websocket_receiver_task error: {e}")
-                    break
-
-        # This task processes messages from the queue and feeds them to the AI agents.
-        async def autogen_handler_task(proxy: WebSocketUserProxyAgent, manager, conv_ref):
-            is_first_message = True
-            while True:
-                try:
-                    # Wait for a message from the user
-                    data = await asyncio.wait_for(chat_message_queue.get(), timeout=120)
-
-                    user_message = data["message"]
                     
+                    user_message = data["message"]
+
                     # Echo the user's message back to the UI immediately
-                    await websocket.send_json({"sender": proxy.name, "text": user_message})
+                    await ws.send_json({"sender": proxy.name, "text": user_message})
 
                     # Persist the user message
                     await save_message(conv_ref, role="user", sender=proxy.name, content=user_message)
-
-                    # Set a title if one doesn't exist
                     await maybe_set_title(conv_ref, user_message)
 
+                    # Now, inject the message to the AI chat system
                     if is_first_message:
-                        # Initiate chat for the very first message
+                        # The first message starts the entire chat flow
                         await proxy.a_initiate_chat(manager, message=user_message)
                         is_first_message = False
                     else:
-                        # Inject subsequent messages to continue the conversation
+                        # Subsequent messages continue the existing chat
                         await proxy.a_inject_user_message(user_message)
-                        
-                except asyncio.TimeoutError:
-                    continue
-                except Exception as e:
-                    print(f"autogen_handler_task error: {e}")
-                    break
 
+                except WebSocketDisconnect:
+                    print("websocket_receiver_and_injector_task: client disconnected.")
+                    break
+                except Exception as e:
+                    print(f"websocket_receiver_and_injector_task error: {e}")
+                    break
+                    
         # This task sends AI messages from the output queue to the WebSocket
         async def message_consumer_task(queue: asyncio.Queue, ws: WebSocket, conv_ref, agent_name_set: set, user_internal_name: str):
             while True:
@@ -1301,23 +1285,21 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         # --- Final execution block ---
         
+        # We start the tasks that are truly independent and long-running
         consumer_task_coro = asyncio.create_task(
             message_consumer_task(message_output_queue, websocket, conv_ref, agent_names, safe_user_name)
         )
-        receiver_task_coro = asyncio.create_task(
-            websocket_receiver_task(websocket)
-        )
-        handler_task_coro = asyncio.create_task(
-            autogen_handler_task(user_proxy, manager, conv_ref)
+        receiver_injector_task_coro = asyncio.create_task(
+            websocket_receiver_and_injector_task(websocket)
         )
         keepalive_task_coro = asyncio.create_task(keepalive_task(websocket))
-
+        
+        # Run these tasks concurrently
         try:
             await asyncio.gather(
                 consumer_task_coro,
-                receiver_task_coro,
-                handler_task_coro,
-                keepalive_task_coro,
+                receiver_injector_task_coro,
+                keepalive_task_coro
             )
         except WebSocketDisconnect:
             print("WebSocket closed normally.")
@@ -1329,10 +1311,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             except Exception:
                 pass
         finally:
-            for t in (consumer_task_coro, receiver_task_coro, handler_task_coro, keepalive_task_coro):
+            for t in (consumer_task_coro, receiver_injector_task_coro, keepalive_task_coro):
                 if not t.done():
                     t.cancel()
-            await asyncio.gather(consumer_task_coro, receiver_task_coro, handler_task_coro, keepalive_task_coro, return_exceptions=True)
+            await asyncio.gather(consumer_task_coro, receiver_injector_task_coro, keepalive_task_coro, return_exceptions=True)
 
     except WebSocketDisconnect:
         print("Outer WebSocketDisconnect caught.")
