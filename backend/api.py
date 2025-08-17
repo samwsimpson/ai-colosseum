@@ -987,6 +987,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
 
             async def a_generate_reply(self, messages=None, sender=None, **kwargs):
+                print(f"[manager->assistant] speaker={self.name}")
+
                 # turn typing on for the assistant
                 try:
                     self._message_output_queue.put_nowait({"sender": self.name, "typing": True, "text": ""})
@@ -1194,12 +1196,17 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             groupchat=groupchat,
             llm_config=chatgpt_llm_config,
             system_message=(
-                "You are the group chat manager. Your role is to determine the next speaker based on the conversation history. "
-                "Choose the agent most relevant to the user's last request. "
-                "If the user addressed a specific agent by name, select that agent. "
-                "If the user asked 'everyone', cycle through each assistant once in a random order. "
-                "If the conversation turn is complete, select the 'User' to signal for their next input. "
-                "Output only the name of the next speaker, for example, 'User' or 'ChatGPT'."
+                f"You are the group chat manager. Decide the single next speaker by name.\n\n"
+                f"VALID SPEAKERS (use exact names):\n"
+                f"- {safe_user_name}  (the human user)\n"
+                f"- ChatGPT\n- Claude\n- Gemini\n- Mistral\n\n"
+                f"Rules:\n"
+                f"1) If the user directly addresses an assistant by name, select that assistant.\n"
+                f"2) If the user asks 'everyone', schedule answers from ChatGPT, Claude, Gemini, Mistral "
+                f"(one per round, in any sensible order), then select {safe_user_name}.\n"
+                f"3) If the user doesn’t specify anyone, prefer the last assistant who replied; otherwise choose the most relevant assistant.\n"
+                f"4) When you want more input from the human, select {safe_user_name} (do NOT output 'User').\n\n"
+                f"Output only one of these exact names: {safe_user_name}, ChatGPT, Claude, Gemini, or Mistral."
             )
         )
         
