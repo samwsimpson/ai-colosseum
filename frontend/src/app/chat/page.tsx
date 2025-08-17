@@ -19,9 +19,13 @@ interface ServerMessage {
   sender?: string | null;
   text?: string;
   typing?: boolean;
-  type?: 'ping' | 'pong' | 'conversation_id' | 'context_summary' | string;
+  type?: 'ping' | 'pong' | 'conversation_id' | 'context_summary' | 'conversation_meta' | string;
   id?: string;
   summary?: string;
+
+  // add these for conversation_meta payloads
+  title?: string;
+  updated_at?: string;
 }
 
 // Past-convo list item returned by the API
