@@ -272,15 +272,17 @@ export default function ChatPage() {
     }, [userToken]);
     // 1) add this helper, e.g. near loadConversations()
     const hydrateConversation = useCallback(async (id: string) => {
-    const res = await apiFetch(`/api/conversations/${id}/messages?limit=200`, { cache: 'no-store' });
-    if (!res.ok) return;
+    try {
+        const res = await apiFetch(`/api/conversations/${id}/messages?limit=200`, { cache: 'no-store' });
+        if (!res.ok) return;
         const data = await res.json();
         const items = Array.isArray(data?.items) ? data.items : [];
         setChatHistory(items.map((m: any) => ({
-            sender: m.sender,
-            model: m.sender,
-            text: m.content,
+        sender: m.sender,
+        model: m.sender,
+        text: m.content,
         })));
+    } catch {}
     }, []);
 
     // 2) call it when opening a convo
@@ -393,31 +395,6 @@ export default function ChatPage() {
             console.error('Send failed:', err);
         }
     }, [message, userName, addMessageToChat]);
-
-
-
-
-
-
-
-
-
-    // Open an existing conversation from the sidebar
-    const handleOpenConversation = async (id: string) => {
-        try { localStorage.setItem('conversationId', id); } catch {}
-        setConversationId(id);
-        setLoadedSummary(null);
-        setShowSummary(false);
-        setChatHistory([]);
-        setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
-
-        // Reconnect WS so the server seeds the prior context
-        if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
-            ws.current.close(1000, 'switch-conversation');
-        }
-        ws.current = null;
-        setTimeout(() => setWsReconnectNonce(n => n + 1), 50);
-    };
 
     // Create a brand-new conversation
 const handleNewConversation = () => {
@@ -583,7 +560,8 @@ const handleNewConversation = () => {
                     const rest = prev.filter(c => c.id !== id);
                     return [{ id, title: 'New conversation', updated_at: new Date().toISOString() }, ...rest];
                 });
-
+                // Hydrate this conversation's messages once if the view is empty
+                if (!chatHistory.length) { hydrateConversation(id); }
                 // Still refresh from the server when ready
                 loadConversations();
                 return;
@@ -591,48 +569,30 @@ const handleNewConversation = () => {
 
             // NEW: server-pushed minimal metadata for immediate sidebar display
             if (msg.type === 'conversation_meta' && typeof msg.id === 'string') {
-                const id: string = msg.id;
-                const title: string =
-                    typeof msg.title === 'string' && msg.title.trim()
-                    ? msg.title
-                    : 'New conversation';
-                const updated_at: string =
-                    typeof msg.updated_at === 'string' && msg.updated_at.trim()
-                    ? msg.updated_at
-                    : new Date().toISOString();
+            const id: string = msg.id;
+            const title: string =
+                typeof msg.title === 'string' && msg.title.trim()
+                ? msg.title
+                : 'New conversation';
+            const updated_at: string =
+                typeof msg.updated_at === 'string' && msg.updated_at.trim()
+                ? msg.updated_at
+                : new Date().toISOString();
 
-                setConversations(prev => {
-                    const rest = prev.filter(c => c.id !== id);
-                    const conv: ConversationListItem = { id, title, updated_at };
-                    return [conv, ...rest];
-                });
+            setConversations(prev => {
+                const rest = prev.filter(c => c.id !== id);
+                return [{ id, title, updated_at }, ...rest];
+            });
 
-                // ensure we have an id set even if it was already present
-                setConversationId(curr => curr || id);
-                return;
+            setConversationId(curr => {
+                const chosen = curr || id;
+                if (!chatHistory.length) { hydrateConversation(chosen); }
+                return chosen;
+            });
+            return;
             }
 
-            if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
-                const id = msg.id;
-                setConversationId(curr => curr || id);
-                setConversations(prev => [{ id, title: 'New conversation', updated_at: new Date().toISOString() }, ...prev.filter(c => c.id !== id)]);
-                loadConversations();
 
-                // If we’re looking at this convo and the view is empty, hydrate once.
-                if (!chatHistory.length) hydrateConversation(id);    // <-- NEW
-                return;
-            }
-
-            if (msg.type === 'conversation_meta' && typeof msg.id === 'string') {
-                // ...your existing code that upserts title/updated_at...
-                // If we’re looking at this convo and the view is empty, hydrate once.
-                setConversationId(curr => {
-                    const id = curr || msg.id!;
-                    if (!chatHistory.length) hydrateConversation(id);  // <-- NEW
-                    return id;
-                });
-                return;
-            }
 
             if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
                 setLoadedSummary(msg.summary);
