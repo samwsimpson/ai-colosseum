@@ -967,11 +967,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 f"{base}\n\n"
                 f"Your name is {name}. Participants: {safe_user_name} (user), ChatGPT, Claude, Gemini, Mistral (assistants).\n"
                 f"{base_prompt}"
+                f"Ground your reply only in this chat. If you reference past statements, quote or paraphrase them from the visible messages. "
+                f"If unsure, ask for a quick clarification instead of guessing.\n"
                 f"Attribution: When asked to list who said what, use EXACT speaker names from the transcript "
                 f"(ChatGPT, Claude, Gemini, Mistral, {safe_user_name}). "
                 f"Do not merge, alias, or infer names."
-                f"When directly addressing the user, call them '{user_display_name}'. Use the exact transcript name '{safe_user_name}' only for literal speaker tags or attribution lists."
             )
+
 
         # ---- model configs ----
         chatgpt_llm_config = {
@@ -1274,6 +1276,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 f"2) If the user addresses *everyone* (phrases like 'everyone', 'all of you', 'each of you', "
                 f"'all', 'y’all', 'you guys', 'all the models'), schedule answers from ChatGPT, Claude, Gemini, Mistral — "
                 f"one per round (any sensible order). After all four respond, select {safe_user_name}.\n"
+                f"   Do not skip due to redundancy — every assistant must reply once.\n"
+                f"   Keep each reply concise; overlap is acceptable when asked for everyone.\n"
                 f"3) If the user doesn’t specify anyone, prefer the last assistant who replied; otherwise choose the most relevant assistant.\n"
                 f"4) When you want more input from the human, select {safe_user_name} (never 'User').\n"
                 f"5) Use exact names only: {safe_user_name}, ChatGPT, Claude, Gemini, Mistral.\n\n"
@@ -1326,9 +1330,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                                 "role": "system",
                                 "content": (
                                     f"Manager directive: The user's last message addressed EVERYONE. "
-                                    f"Schedule replies from ChatGPT, Claude, Gemini, and Mistral (one per round). "
-                                    f"After all four respond, select {safe_user_name}."
+                                    f"Schedule one concise reply from each assistant — ChatGPT, Claude, Gemini, and Mistral — even if content overlaps; "
+                                    f"do not skip due to redundancy. After all four respond, select {safe_user_name}."
                                 )
+
                             })
                         except Exception as _:
                             pass

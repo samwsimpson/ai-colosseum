@@ -108,7 +108,7 @@ export default function ChatPage() {
 
     /** Only show bubble if the agent is still "typing" after showDelayMs.
      *  When shown, auto-clear after ttlMs unless a message/false arrives. */
-    const setTypingWithDelayAndTTL = (agent: AgentName, value: boolean, showDelayMs = 400, ttlMs = 6000) => {
+    const setTypingWithDelayAndTTL = (agent: AgentName, value: boolean, showDelayMs = 400, ttlMs = 12000) => {
         if (!value) {
             // cancel pending show + ttl, hide immediately
             clearTypingShowDelay(agent);
@@ -131,7 +131,7 @@ export default function ChatPage() {
         }, showDelayMs);
     };    
 
-    const setTypingWithTTL = (agent: AgentName, value: boolean, ttlMs = 6000) => {
+    const setTypingWithTTL = (agent: AgentName, value: boolean, ttlMs = 12000) => {
     setIsTyping(prev => ({ ...prev, [agent]: value }));
     clearTypingTimer(agent);
     if (value) {
@@ -270,6 +270,36 @@ export default function ChatPage() {
             setIsLoadingConvs(false);
         }
     }, [userToken]);
+    // 1) add this helper, e.g. near loadConversations()
+    const hydrateConversation = useCallback(async (id: string) => {
+    const res = await apiFetch(`/api/conversations/${id}/messages?limit=200`, { cache: 'no-store' });
+    if (!res.ok) return;
+        const data = await res.json();
+        const items = Array.isArray(data?.items) ? data.items : [];
+        setChatHistory(items.map((m: any) => ({
+            sender: m.sender,
+            model: m.sender,
+            text: m.content,
+        })));
+    }, []);
+
+    // 2) call it when opening a convo
+    const handleOpenConversation = async (id: string) => {
+        try { localStorage.setItem('conversationId', id); } catch {}
+        setConversationId(id);
+        setLoadedSummary(null);
+        setShowSummary(false);
+        setChatHistory([]);
+        setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+
+        await hydrateConversation(id);            // <-- NEW
+
+        if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
+            ws.current.close(1000, 'switch-conversation');
+        }
+        ws.current = null;
+        setTimeout(() => setWsReconnectNonce(n => n + 1), 50);
+    };
 
     // keep the sidebar list fresh
     useEffect(() => {
@@ -463,6 +493,22 @@ const handleNewConversation = () => {
         // try to top up access token if it's close to expiring (non-blocking)
         refreshTokenIfNeeded();
 
+        // just before building the WS URL, short-circuit once if we have a token but no conversationId:
+        if (userToken && !conversationId) {
+        (async () => {
+            const res = await apiFetch('/api/conversations?limit=1', { cache: 'no-store' });
+            if (res.ok) {
+            const data = await res.json();
+            const first = (data.items ?? [])[0];
+            if (first?.id) {
+                setConversationId(first.id);   // next render will open WS bound to this id
+                return;
+            }
+            }
+            // fall through; no prior conv — let WS create one
+        })();
+        return; // wait one tick; the effect will re-run with the id
+        }
 
         // Build the URL safely
         const base = process.env.NEXT_PUBLIC_WS_URL ?? 'http://localhost:8000';
@@ -566,6 +612,27 @@ const handleNewConversation = () => {
                 return;
             }
 
+            if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
+                const id = msg.id;
+                setConversationId(curr => curr || id);
+                setConversations(prev => [{ id, title: 'New conversation', updated_at: new Date().toISOString() }, ...prev.filter(c => c.id !== id)]);
+                loadConversations();
+
+                // If we’re looking at this convo and the view is empty, hydrate once.
+                if (!chatHistory.length) hydrateConversation(id);    // <-- NEW
+                return;
+            }
+
+            if (msg.type === 'conversation_meta' && typeof msg.id === 'string') {
+                // ...your existing code that upserts title/updated_at...
+                // If we’re looking at this convo and the view is empty, hydrate once.
+                setConversationId(curr => {
+                    const id = curr || msg.id!;
+                    if (!chatHistory.length) hydrateConversation(id);  // <-- NEW
+                    return id;
+                });
+                return;
+            }
 
             if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
                 setLoadedSummary(msg.summary);
