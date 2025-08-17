@@ -523,43 +523,35 @@ const handleNewConversation = () => {
 
             // meta/system messages
             if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
-            const id = msg.id;
-
-            if (id !== conversationId) {
-                setConversationId(id);
-
-                // OPTIONAL POLISH: seed the sidebar immediately with this new convo
-                setConversations(prev => {
-                if (prev.some(c => c.id === id)) return prev;
-                return [
-                    { id, title: 'New conversation', updated_at: new Date().toISOString() },
-                    ...prev,
-                ];
-                });
-
-                loadConversations(); // still refresh from the server when ready
-            }
-            return;
+                const id = msg.id;
+                if (id !== conversationId) {
+                    setConversationId(id);
+                    // Optimistic insert if we don't have it yet
+                    setConversations(prev => prev.some(c => c.id === id)
+                    ? prev
+                    : [{ id, title: 'New conversation', updated_at: new Date().toISOString() }, ...prev]);
+                    loadConversations(); // still refresh from server
+                }
+                return;
             }
 
-            // NEW: immediate sidebar hydrate/update from the server
+            // NEW: server-pushed minimal metadata for immediate sidebar display
             if (msg.type === 'conversation_meta' && typeof msg.id === 'string') {
-            setConversations(prev => {
-                const rest = prev.filter(c => c.id !== msg.id);
-                return [
-                {
-                    id: msg.id,
-                    title: (typeof msg.title === 'string' && msg.title.trim()) ? msg.title : 'New conversation',
-                    updated_at: (typeof msg.updated_at === 'string' && msg.updated_at.trim())
-                    ? msg.updated_at
-                    : new Date().toISOString(),
-                },
-                ...rest,
-                ];
-            });
-            // also store the id if we don't have it yet
-            setConversationId((curr) => curr || msg.id);
-            return;
+                setConversations(prev => {
+                    const rest = prev.filter(c => c.id !== msg.id);
+                    return [
+                    {
+                        id: msg.id,
+                        title: (typeof msg.title === 'string' && msg.title.trim()) ? msg.title : 'New conversation',
+                        updated_at: (typeof msg.updated_at === 'string' && msg.updated_at.trim())
+                        ? msg.updated_at
+                        : new Date().toISOString(),
+                    },
+                    ...rest,
+                    ];
+                });
+                if (!conversationId) setConversationId(msg.id);
+                return;
             }
 
             if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {

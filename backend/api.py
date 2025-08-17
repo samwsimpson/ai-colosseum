@@ -876,6 +876,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "type": "conversation_id",
             "id": conv_ref.id,
         })
+        
         # NEW: also send conversation meta so the sidebar can show it immediately
         try:
             snap = await conv_ref.get()
@@ -1352,42 +1353,51 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     break
                     
         # This task sends AI messages from the output queue to the WebSocket
-        async def message_consumer_task(queue: asyncio.Queue, ws: WebSocket, conv_ref, agent_name_set: set, user_internal_name: str):
-            # NEW: track last non-empty text per sender to avoid duplicates
+        # single, canonical version
+        async def message_consumer_task(
+            queue: asyncio.Queue,
+            ws: WebSocket,
+            conv_ref,
+            agent_name_set: set,
+            user_internal_name: str,
+            user_display_name: str,
+        ):
             last_text_by_sender: dict[str, str] = {}
 
             while True:
-                try:
-                    msg = await asyncio.wait_for(queue.get(), timeout=120)
+                msg = await asyncio.wait_for(queue.get(), timeout=120)
 
-                    sender = (msg or {}).get("sender") or "System"
-                    text = (msg or {}).get("text") or (msg or {}).get("content") or ""
+                sender = (msg or {}).get("sender") or "System"
+                text = (msg or {}).get("text") or (msg or {}).get("content") or ""
+                is_typing_event = (msg and msg.get("typing") is not None)
 
-                    # NEW: skip duplicate non-empty messages from the same sender
-                    if text and last_text_by_sender.get(sender) == text:
-                        continue
+                # Display-only cleanup: replace the internal token with the pretty name
+                if text and sender in agent_name_set and user_internal_name in text:
+                    text = text.replace(user_internal_name, user_display_name)
 
-                    await ws.send_json(msg)
+                # --- DEDUPE: skip duplicate non-empty texts from the same sender (typing still passes) ---
+                if text and last_text_by_sender.get(sender) == text and not is_typing_event:
+                    continue
 
-                    if text:
-                        last_text_by_sender[sender] = text
+                # Forward sanitized payload (and typing events) to the browser
+                if text or is_typing_event:
+                    payload = dict(msg)
+                    payload["text"] = text  # ensure sanitized text goes out
+                    await ws.send_json(payload)
+                else:
+                    # nothing to show
+                    continue
 
+                # Remember last text per sender after successful send (for future dedupe)
+                if text:
+                    last_text_by_sender[sender] = text
 
-                    if sender == user_internal_name or not text:
-                        continue
-
+                # Persist only real assistant/system messages with content (skip user + typing-only)
+                if sender != user_internal_name and text:
                     role = "assistant" if sender in agent_name_set else "system"
                     await save_message(conv_ref, role=role, sender=sender, content=text)
                     await maybe_refresh_summary(conv_ref)
 
-                except asyncio.TimeoutError:
-                    continue
-                except WebSocketDisconnect as e:
-                    print(f"message_consumer_task: client disconnected (code={getattr(e, 'code', 'unknown')})")
-                    break
-                except Exception as e:
-                    print(f"message_consumer_task error: {e}")
-                    break
         
         async def keepalive_task(ws: WebSocket):
             try:
@@ -1401,7 +1411,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         
         # We start the tasks that are truly independent and long-running
         consumer_task_coro = asyncio.create_task(
-            message_consumer_task(message_output_queue, websocket, conv_ref, agent_names, safe_user_name)
+            message_consumer_task(message_output_queue, websocket, conv_ref, agent_names, safe_user_name, user_display_name)
         )
         main_chat_loop_coro = asyncio.create_task(
             main_chat_loop(websocket, user_proxy, manager, conv_ref)
