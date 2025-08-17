@@ -244,7 +244,13 @@ export default function ChatPage() {
             if (conversationId) localStorage.setItem('conversationId', conversationId);
         } catch {}
     }, [conversationId]);
-
+    // Hydrate messages when we already have an id (e.g., page reload / return)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    useEffect(() => {
+    if (conversationId && chatHistory.length === 0) {
+        hydrateConversation(conversationId);
+    }
+    }, [conversationId]);
     // Fetch the list of conversations
     const loadConversations = useCallback(async () => {
     if (!userToken) return;

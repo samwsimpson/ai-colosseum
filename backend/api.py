@@ -364,10 +364,18 @@ from pydantic import BaseModel, constr
 from google.cloud import firestore
 
 def _ts_iso(v):
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return v
     try:
         return v.isoformat()
     except Exception:
-        return None
+        # last resort: stringify (works for Firestore Timestamp too)
+        try:
+            return str(v)
+        except Exception:
+            return None
 
 class RenameBody(BaseModel):
     title: constr(min_length=1, max_length=120)
@@ -432,8 +440,8 @@ async def list_conversations_by_token(token: str, limit: int = 100):
             }
 
     # merge & sort (desc) without depending on Firestore indexes
-    merged = [v for v in items_by_id.values() if v.get("updated_at")]
-    merged.sort(key=lambda r: r["updated_at"], reverse=True)
+    merged = list(items_by_id.values())
+    merged.sort(key=lambda r: (r.get("updated_at") or ""), reverse=True)
     return {"items": merged[:limit]}
 
 
