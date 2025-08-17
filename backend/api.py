@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from typing import List, Dict, Any, Union, Optional
 from pydantic import BaseModel, constr
+from dotenv import load_dotenv
 
 from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
