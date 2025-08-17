@@ -392,6 +392,27 @@ async def list_conversations(user=Depends(get_current_user)):
         })
     return {"items": items}
 
+@app.get("/api/conversations/by_token")
+async def list_conversations_by_token(token: str):
+    user = await get_current_user(token=token)
+    items: List[dict] = []
+    q = (
+        db.collection("conversations")
+        .where("user_id", "==", user["id"])
+        .order_by("updated_at", direction=firestore.Query.DESCENDING)
+        .limit(100)
+    )
+    async for d in q.stream():
+        c = d.to_dict() or {}
+        items.append({
+            "id": d.id,
+            "title": c.get("title") or "New conversation",
+            "updated_at": _ts_iso(c.get("updated_at")),
+            "message_count": c.get("message_count", 0),
+            "summary": c.get("summary", ""),
+        })
+    return {"items": items}
+
 @app.get("/api/conversations/{conv_id}/messages")
 async def list_messages(conv_id: str, limit: int = 50, user=Depends(get_current_user)):
     conv_ref = db.collection("conversations").document(conv_id)
@@ -933,7 +954,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 f"Your name is {name}. Participants: {safe_user_name} (user), ChatGPT, Claude, Gemini, Mistral (assistants).\n"
                 f"{base_prompt}"
                 f"Attribution: When asked to list who said what, use EXACT speaker names from the transcript "
-                f"(ChatGPT, Claude, Gemini, Mistral, {safe_user_name}). Do not merge, alias, or infer names."
+                f"(ChatGPT, Claude, Gemini, Mistral, {safe_user_name}). "
+                f"Do not merge, alias, or infer names."
             )
 
         # ---- model configs ----
@@ -1228,18 +1250,19 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             groupchat=groupchat,
             llm_config=chatgpt_llm_config,
             system_message=(
-                f"You are the group chat manager. Decide the single next speaker by name.\n\n"
-                f"VALID SPEAKERS (use exact names):\n"
+                f"You are the group chat manager. Decide the single next speaker by exact name.\n\n"
+                f"VALID SPEAKERS:\n"
                 f"- {safe_user_name}  (the human user)\n"
                 f"- ChatGPT\n- Claude\n- Gemini\n- Mistral\n\n"
                 f"Rules:\n"
                 f"1) If the user directly addresses an assistant by name, select that assistant.\n"
-                f"2) If the user asks 'everyone' (or uses phrases like 'all of you', 'each of you', 'all', 'y'all', 'guys'), "
-                f"schedule answers from ChatGPT, Claude, Gemini, Mistral (one per round, any sensible order), then select {safe_user_name}.\n"
+                f"2) If the user addresses *everyone* (phrases like 'everyone', 'all of you', 'each of you', "
+                f"'all', 'y’all', 'you guys', 'all the models'), schedule answers from ChatGPT, Claude, Gemini, Mistral — "
+                f"one per round (any sensible order). After all four respond, select {safe_user_name}.\n"
                 f"3) If the user doesn’t specify anyone, prefer the last assistant who replied; otherwise choose the most relevant assistant.\n"
-                f"4) When you want more input from the human, select {safe_user_name} (do NOT output 'User').\n"
-                f"5) NEVER attribute an assistant's message to {safe_user_name}. Use exact names.\n\n"
-                f"Output only one of these exact names: {safe_user_name}, ChatGPT, Claude, Gemini, or Mistral."
+                f"4) When you want more input from the human, select {safe_user_name} (never 'User').\n"
+                f"5) Use exact names only: {safe_user_name}, ChatGPT, Claude, Gemini, Mistral.\n\n"
+                f"Output only one of those names and nothing else."
             )
         )
         
@@ -1266,6 +1289,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     await ws.send_json({"sender": proxy.name, "text": user_message})
                     await save_message(conv_ref, role="user", sender=proxy.name, content=user_message)
                     await maybe_set_title(conv_ref, user_message)
+                    # If the user addressed everyone, give the manager a gentle, explicit hint
+                    EVERYONE_PAT = re.compile(r"\b(everyone|all of you|each of you|all|y['’]all|you guys|all the models)\b", re.I)
+                    if EVERYONE_PAT.search(user_message or ""):
+                        try:
+                            groupchat.messages.append({
+                                "role": "system",
+                                "content": (
+                                    f"Manager directive: The user's last message addressed EVERYONE. "
+                                    f"Schedule replies from ChatGPT, Claude, Gemini, and Mistral (one per round). "
+                                    f"After all four respond, select {safe_user_name}."
+                                )
+                            })
+                        except Exception as _:
+                            pass
 
                     if is_first_message:
                         # Kick off the manager loop in the background so we never block WS reads
