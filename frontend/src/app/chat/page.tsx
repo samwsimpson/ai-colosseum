@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, FormEvent, useRef, useEffect, useCallback } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { useUser } from '../../context/UserContext';
 import { usePathname, useRouter } from 'next/navigation';
 
@@ -33,6 +33,13 @@ interface ConversationListItem {
   id: string;
   title: string;
   updated_at?: string;
+}
+
+interface StoredMessage {
+  sender: string;
+  content: string;
+  role?: string;
+  created_at?: string;
 }
 
 // Base REST API (same host as WS but https/http, not ws)
@@ -131,17 +138,6 @@ export default function ChatPage() {
         }, showDelayMs);
     };    
 
-    const setTypingWithTTL = (agent: AgentName, value: boolean, ttlMs = 12000) => {
-    setIsTyping(prev => ({ ...prev, [agent]: value }));
-    clearTypingTimer(agent);
-    if (value) {
-        const id = window.setTimeout(() => {
-        setIsTyping(prev => ({ ...prev, [agent]: false }));
-        delete typingTimersRef.current[agent];
-        }, ttlMs);
-        typingTimersRef.current[agent] = id;
-    }
-    }
     const { userName, userToken } = useUser();
     const router = useRouter();
     const pathname = usePathname();
@@ -173,7 +169,6 @@ export default function ChatPage() {
 
     // A simple ref to distinguish the first render
     const isInitialRender = useRef(true);
-    const chatScrollRef = useRef<HTMLDivElement | null>(null);
     const chatEndRef = useRef<HTMLDivElement>(null);
     const ws = useRef<WebSocket | null>(null);
     const pendingSends = useRef<Array<Record<string, unknown>>>([]);
@@ -272,17 +267,19 @@ export default function ChatPage() {
     }, [userToken]);
     // 1) add this helper, e.g. near loadConversations()
     const hydrateConversation = useCallback(async (id: string) => {
-    try {
-        const res = await apiFetch(`/api/conversations/${id}/messages?limit=200`, { cache: 'no-store' });
-        if (!res.ok) return;
-        const data = await res.json();
-        const items = Array.isArray(data?.items) ? data.items : [];
-        setChatHistory(items.map((m: any) => ({
-        sender: m.sender,
-        model: m.sender,
-        text: m.content,
-        })));
-    } catch {}
+        try {
+            const res = await apiFetch(`/api/conversations/${id}/messages?limit=200`, { cache: 'no-store' });
+            if (!res.ok) return;
+            const data = await res.json();
+
+            const items: StoredMessage[] = Array.isArray(data?.items) ? (data.items as StoredMessage[]) : [];
+
+            setChatHistory(items.map((m) => ({
+            sender: m.sender,
+            model: m.sender,
+            text: m.content,
+            })));
+        } catch {}
     }, []);
 
     // 2) call it when opening a convo
@@ -455,7 +452,7 @@ const handleNewConversation = () => {
         }
     };
 
-
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     // WebSocket connection logic
     useEffect(() => {
         // don’t try to connect without a token
