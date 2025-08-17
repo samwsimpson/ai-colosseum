@@ -468,21 +468,20 @@ const handleNewConversation = () => {
         refreshTokenIfNeeded();
 
         // just before building the WS URL, short-circuit once if we have a token but no conversationId:
-        if (userToken && !conversationId) {
-        (async () => {
-            const res = await apiFetch('/api/conversations?limit=1', { cache: 'no-store' });
-            if (res.ok) {
-            const data = await res.json();
-            const first = (data.items ?? [])[0];
-            if (first?.id) {
-                setConversationId(first.id);   // next render will open WS bound to this id
-                return;
-            }
-            }
-            // fall through; no prior conv — let WS create one
-        })();
-        return; // wait one tick; the effect will re-run with the id
+        if (userToken && !conversationId && !ws.current) {
+            (async () => {
+                try {
+                    const res = await apiFetch('/api/conversations?limit=1', { cache: 'no-store' });
+                    if (res.ok) {
+                        const data = await res.json();
+                        const first = (data.items ?? [])[0];
+                        if (first?.id) setConversationId(first.id); // effect will rerun with the id
+                    }
+                } catch {}
+                // no early return; we still proceed to open a WS (server can create a fresh convo)
+            })();
         }
+
 
         // Build the URL safely
         const base = process.env.NEXT_PUBLIC_WS_URL ?? 'http://localhost:8000';
