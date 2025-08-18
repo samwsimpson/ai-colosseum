@@ -483,45 +483,44 @@ const handleNewConversation = () => {
 
         // (place this inside the effect that connects the WebSocket, before constructing the WS URL)
         if (userToken && !conversationId) {
-        (async () => {
-            try {
-            const token =
-                (typeof window !== "undefined" && localStorage.getItem("access_token")) ||
-                userToken ||
-                "";
+            (async () => {
+                try {
+                const token =
+                    (typeof window !== "undefined" && localStorage.getItem("access_token")) ||
+                    userToken ||
+                    "";
 
-            const res = await apiFetch(
-                `/api/conversations/by_token?token=${encodeURIComponent(token)}&limit=100`,
-                { cache: "no-store" }
-            );
+                const res = await apiFetch(
+                    `/api/conversations/by_token?token=${encodeURIComponent(token)}&limit=100`,
+                    { cache: "no-store" }
+                );
 
-            if (res.ok) {
-                const data = await res.json();
+                if (res.ok) {
+                    const data = await res.json();
 
-                // typed items (no 'any')
-                const items: SidebarConvo[] = Array.isArray(data)
-                ? (data as SidebarConvo[])
-                : ((data.items ?? []) as SidebarConvo[]);
+                    // typed items (no 'any')
+                    const items: SidebarConvo[] = Array.isArray(data)
+                        ? (data as SidebarConvo[])
+                        : ((data.items ?? []) as SidebarConvo[]);
 
-                // pick the newest by updated_at (fallback to created_at)
-                items.sort((a: SidebarConvo, b: SidebarConvo) => {
-                const keyA = String(a.updated_at ?? a.created_at ?? "");
-                const keyB = String(b.updated_at ?? b.created_at ?? "");
-                return keyB.localeCompare(keyA); // desc
-                });
+                    // pick the newest by updated_at (fallback to created_at)
+                    items.sort((a: SidebarConvo, b: SidebarConvo) => {
+                        const keyA = String(a.updated_at ?? a.created_at ?? "");
+                        const keyB = String(b.updated_at ?? b.created_at ?? "");
+                        return keyB.localeCompare(keyA); // desc
+                    });
 
-                if (items[0]?.id) {
-                setConversationId(items[0].id);
-                return; // next render will reconnect WS bound to this id
+                    if (items[0]?.id) {
+                        setConversationId(items[0].id);
+                        return; // next render will reconnect WS bound to this id
+                    }
                 }
-            }
             } catch {
             // ignore and let WS create a fresh conversation
             }
             // fall through; no prior conv — let WS create one
-        })();
-        return;
-        }
+        })();        
+    }
 
 
 
