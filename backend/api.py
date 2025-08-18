@@ -1281,11 +1281,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 greeter = random.choice(agent_names)  # e.g. "ChatGPT", "Claude", "Gemini", "Mistral"
                 greeting_text = f"Hi {user_display_name}, what can we help you with?"
 
-                # Send greeting message without a typing indicator
-                queue_send_nowait({"sender": greeter, "text": greeting_text})
-                
+                # Send greeting message immediately (no queue, so no risk of double-send)
+                await websocket.send_json({"sender": greeter, "text": greeting_text})
+
                 # Persist so your history shows the opener
                 await save_message(conv_ref, role="assistant", sender=greeter, content=greeting_text)
+
 
                 RECENT_GREETS[key] = now
 
@@ -1725,10 +1726,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 sender = (msg or {}).get("sender") or "System"
                 text = (msg or {}).get("text") or (msg or {}).get("content") or ""
                 is_typing_event = (msg and msg.get("typing") is not None)
+    
+                # Display-only cleanup: replace internal token with pretty name (handles markdown-escaped underscores)
+                if text and sender in agent_name_set and user_internal_name:
+                    # Build a pattern that treats '_' as possibly escaped '\_'
+                    escaped = re.escape(user_internal_name).replace(r"\_", r"\\?_")
+                    text = re.sub(escaped, user_display_name, text)
 
-                # Display-only cleanup: replace the internal token with the pretty name
-                if text and sender in agent_name_set and user_internal_name in text:
-                    text = text.replace(user_internal_name, user_display_name)
 
                 # --- DEDUPE: skip duplicate non-empty texts from the same sender (typing still passes) ---
                 if text and last_text_by_sender.get(sender) == text and not is_typing_event:
