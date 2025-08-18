@@ -556,6 +556,7 @@ const handleNewConversation = () => {
                 }
         
                 setIsWsOpen(true);
+                loadConversations();
                 authFailedRef.current = false;
                 reconnectBackoffRef.current = 1000;
         

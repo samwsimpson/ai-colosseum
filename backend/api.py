@@ -1681,12 +1681,34 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                                     f"Manager directive: The user's last message addressed EVERYONE. "
                                     f"Schedule one concise reply from each assistant — ChatGPT, Claude, Gemini, and Mistral — even if content overlaps; "
                                     f"do not skip due to redundancy. After all four respond, select {safe_user_name}."
+                                    f"If the user says only “thanks”, “thank you”, “ok”, or similar pleasantry, have the *last assistant who spoke* reply briefly."
+                                    f"When the user addresses “everyone”, schedule one concise response per assistant. Do not suppress responses due to redundancy."
+                                    f"Ground your reply only in this chat. If you reference earlier statements, quote or paraphrase them from the visible messages. If unsure, ask a brief clarification instead of guessing."
+
                                 )
 
                             })
                         except Exception as _:
                             pass
+                    # --- randomized opening greeting on brand-new conversations ---
+                    try:
+                        snap = await conv_ref.get()
+                        doc = snap.to_dict() or {}
+                        has_any = (doc.get("message_count") or 0) > 0
+                    except Exception:
+                        has_any = True
 
+                    if not has_any:
+                        opener = random.choice([a["name"] for a in agents if a.get("enabled", True)])
+                        await websocket.send_json({"sender": opener, "typing": True})
+                        await asyncio.sleep(random.uniform(0.4, 1.2))
+                        await websocket.send_json({
+                            "sender": opener,
+                            "text": random.choice([
+                                f"Hi {user_display_name}, what can I help you with today?",
+                                "Hello! Ready when you are.",
+                            ])
+                        })
                     # Kick off or feed the manager loop
                     if chat_task is None or chat_task.done():
                         # (Re)start the manager loop in the background
