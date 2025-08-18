@@ -422,6 +422,24 @@ from google.cloud import firestore
 @app.get("/api/conversations/by_token")
 async def list_conversations_by_token(token: str, limit: int = 100):
     user = await get_current_user(token=token)
+    # --- AUTO-BACKFILL-ONCE: run per-user on first visit if enabled ---
+    import os
+    if os.environ.get("AUTO_BACKFILL_ONCE", "").lower() in ("1", "true", "yes"):
+        user_doc = db.collection("users").document(user["id"])
+        snap = await user_doc.get()
+        udoc = snap.to_dict() or {}
+        if not udoc.get("backfill_convos_done"):
+            try:
+                updated = await _auto_backfill_for_user(user["id"], user.get("email"), limit=2000)
+                await user_doc.set({
+                    "backfill_convos_done": True,
+                    "backfill_convos_count": updated,
+                    "backfill_convos_ts": firestore.SERVER_TIMESTAMP,
+                }, merge=True)
+                print(f"[auto-backfill] user={user['id']} updated={updated}")
+            except Exception as e:
+                print("[auto-backfill] failed:", e)
+    # --- /AUTO-BACKFILL-ONCE ---
     base = db.collection("conversations")
     items_by_id: Dict[str, dict] = {}
 
@@ -689,6 +707,90 @@ async def admin_backfill_conversations(
         "items": results[:200],  # include first 200 for visibility
         "candidates": len(candidate_refs),
     }
+
+async def _msg_bounds_and_count(conv_ref):
+    """Return (first_created_at, last_created_at, count) with minimal reads."""
+    msgs = conv_ref.collection("messages")
+    first = last = None
+    cnt = 0
+
+    async for m in msgs.order_by("created_at", direction=firestore.Query.DESCENDING).limit(1).stream():
+        last = (m.to_dict() or {}).get("created_at")
+
+    async for m in msgs.order_by("created_at").limit(1).stream():
+        first = (m.to_dict() or {}).get("created_at")
+
+    # Lightweight count (IDs only). If datasets are huge, you can comment this out.
+    async for _ in msgs.select([]).stream():
+        cnt += 1
+
+    return first, last, cnt
+
+
+async def _auto_backfill_for_user(user_id: str, user_email: str | None, limit: int = 1000) -> int:
+    """Ensure existing conversations for this user are listable (owner_keys/timestamps/count). Returns #updated."""
+    email_lc = (user_email or "").lower()
+    base = db.collection("conversations")
+    refs = {}
+
+    # a) by user_id
+    async for d in base.where("user_id", "==", user_id).limit(limit).stream():
+        refs[d.id] = d.reference
+
+    # b) by owner_keys contains email
+    if email_lc:
+        async for d in base.where("owner_keys", "array_contains", email_lc).limit(limit).stream():
+            refs[d.id] = d.reference
+
+    updated = 0
+    for conv_id, ref in refs.items():
+        snap = await ref.get()
+        if not snap.exists:
+            continue
+        doc = snap.to_dict() or {}
+        changes = {}
+
+        # Owner fields
+        if doc.get("user_id") != user_id:
+            changes["user_id"] = user_id
+
+        keys = set((doc.get("owner_keys") or []))
+        need = set()
+        if user_id and user_id not in keys:
+            need.add(user_id)
+        if email_lc and email_lc not in {k.lower() for k in keys}:
+            need.add(email_lc)
+        if need:
+            changes["owner_keys"] = sorted({*(k.lower() for k in keys), *need})
+
+        # Title baseline
+        if not (doc.get("title") and str(doc.get("title")).strip()):
+            changes["title"] = "New conversation"
+
+        # Timestamps & count (fill if missing)
+        created_at = doc.get("created_at")
+        updated_at = doc.get("updated_at")
+        msg_count = doc.get("message_count")
+
+        if created_at is None or updated_at is None or msg_count in (None, 0):
+            first, last, cnt = await _msg_bounds_and_count(ref)
+            created_at = created_at or first
+            updated_at = updated_at or last or created_at
+            if msg_count in (None, 0) and cnt is not None:
+                msg_count = cnt
+
+        if doc.get("created_at") is None and created_at is not None:
+            changes["created_at"] = created_at
+        if doc.get("updated_at") is None and updated_at is not None:
+            changes["updated_at"] = updated_at
+        if msg_count is not None and doc.get("message_count") != msg_count:
+            changes["message_count"] = msg_count
+
+        if changes:
+            await ref.set(changes, merge=True)
+            updated += 1
+
+    return updated
 # ---------- /ADMIN BACKFILL ----------
 
     return {
