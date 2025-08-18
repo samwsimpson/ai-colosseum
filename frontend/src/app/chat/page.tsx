@@ -473,19 +473,27 @@ const handleNewConversation = () => {
         // try to top up access token if it's close to expiring (non-blocking)
         refreshTokenIfNeeded();
 
-        // just before building the WS URL, short-circuit once if we have a token but no conversationId:
-        if (userToken && !conversationId && !ws.current) {
-            (async () => {
-                try {
-                    const res = await apiFetch('/api/conversations?limit=1', { cache: 'no-store' });
-                    if (res.ok) {
-                        const data = await res.json();
-                        const first = (data.items ?? [])[0];
-                        if (first?.id) setConversationId(first.id); // effect will rerun with the id
-                    }
-                } catch {}
-                // no early return; we still proceed to open a WS (server can create a fresh convo)
-            })();
+        // short-circuit once if we have a token but no conversationId:
+        // (place this inside the effect that connects the WebSocket, before constructing the WS URL)
+        if (userToken && !conversationId) {
+        (async () => {
+            const token = (typeof window !== 'undefined' && localStorage.getItem('access_token')) || userToken || '';
+            const res = await apiFetch(`/api/conversations/by_token?token=${encodeURIComponent(token)}&limit=100`, { cache: 'no-store' });
+            if (res.ok) {
+            const data = await res.json();
+            const items = Array.isArray(data) ? data : (data.items ?? []);
+            // pick the newest by updated_at (fallback to created_at)
+            items.sort((a: any, b: any) =>
+                String(b.updated_at || b.created_at || '').localeCompare(String(a.updated_at || a.created_at || ''))
+            );
+            if (items[0]?.id) {
+                setConversationId(items[0].id);
+                return; // next render will reconnect WS bound to this id
+            }
+            }
+            // fall through; no prior conv — let WS create one
+        })();
+        return;
         }
 
 

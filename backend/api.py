@@ -261,19 +261,35 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
 
     if resume_last:
         try:
-            q = (
-                conversations.where("user_id", "==", user_id)
-                .order_by("updated_at", direction=firestore.Query.DESCENDING)
-                .limit(1)
-            )
-            last = [doc async for doc in q.stream()]
+            # your preferred ordered query (may require index)
+            last = None
+            q = (db.collection('conversations')
+                .where('user_id', '==', user_id)
+                .order_by('updated_at', direction=firestore.Query.DESCENDING)
+                .limit(1))
+            async for d in q.stream():
+                last = d
+                break
             if last:
-                conv_ref = conversations.document(last[0].id)
-                await conv_ref.update({"updated_at": now})
-                doc = await conv_ref.get()
-                return conv_ref, (doc.to_dict() or {})
+                return last.reference, (last.to_dict() or {})
         except Exception as e:
-            print("Resume-last query failed; creating new conversation. Error:", e)
+            print('[resume_last] ordered query failed; falling back:', e)
+            # Fallback: scan a reasonable number without order_by and pick newest in Python
+            last_id, last_ts = None, None
+            q = (db.collection('conversations')
+                .where('user_id', '==', user_id)
+                .limit(200))
+            async for d in q.stream():
+                doc = d.to_dict() or {}
+                ts = doc.get('updated_at') or doc.get('created_at')
+                if (last_ts is None) or (ts and ts > last_ts):
+                    last_ts = ts
+                    last_id = d.id
+            if last_id:
+                ref = db.collection('conversations').document(last_id)
+                snap = await ref.get()
+                return ref, (snap.to_dict() or {})
+        # otherwise create a fresh conversation
 
     conv_ref = conversations.document()
     await conv_ref.set(
@@ -409,26 +425,21 @@ async def list_conversations_by_token(token: str, limit: int = 100):
     base = db.collection("conversations")
     items_by_id: Dict[str, dict] = {}
 
-    # 1) primary by user_id (no order_by to avoid index requirements)
+    # query by user_id
     q1 = base.where("user_id", "==", user["id"]).limit(limit)
     async for d in q1.stream():
         c = d.to_dict() or {}
         items_by_id[d.id] = {
             "id": d.id,
             "title": c.get("title") or "New conversation",
-            # prefer updated_at; fallback to created_at
             "updated_at": _ts_iso(c.get("updated_at") or c.get("created_at")),
             "message_count": c.get("message_count", 0),
             "summary": c.get("summary", ""),
         }
 
-    # 2) secondary by legacy keys (e.g., email) using array_contains
-    legacy_keys = []
+    # legacy/email key fallback
     if user.get("email"):
-        legacy_keys.append(user["email"].lower())
-
-    for key in legacy_keys:
-        q2 = base.where("owner_keys", "array_contains", key).limit(limit)
+        q2 = base.where("owner_keys", "array_contains", user["email"].lower()).limit(limit)
         async for d in q2.stream():
             c = d.to_dict() or {}
             items_by_id[d.id] = {
@@ -439,10 +450,10 @@ async def list_conversations_by_token(token: str, limit: int = 100):
                 "summary": c.get("summary", ""),
             }
 
-    # merge & sort (desc) without depending on Firestore indexes
-    merged = list(items_by_id.values())
-    merged.sort(key=lambda r: (r.get("updated_at") or ""), reverse=True)
-    return {"items": merged[:limit]}
+    items = list(items_by_id.values())
+    # sort newest first; fall back to empty string
+    items.sort(key=lambda x: (x.get("updated_at") or ""), reverse=True)
+    return {"items": items[:limit]}
 
 
 
