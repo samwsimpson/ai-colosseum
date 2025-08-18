@@ -530,6 +530,167 @@ async def export_conversation(conv_id: str, user=Depends(get_current_user)):
             "timestamp": _ts_iso(d.get("created_at")),  # ← was 'timestamp'
         })
 
+# ---------- ADMIN BACKFILL (one-off) ----------
+from typing import Dict, List, Optional, Tuple
+from pydantic import BaseModel
+from fastapi import Header
+
+class BackfillRequest(BaseModel):
+    user_id: str
+    user_email: Optional[str] = None
+    human_senders: Optional[List[str]] = None  # e.g., ["Sam_Simpson", "Sam Simpson"]
+    limit: int = 500
+    apply: bool = False
+    recompute_count: bool = False
+    verbose: bool = False
+
+def _iso_any(v):
+    # tolerant ISO/str helper for logging
+    if v is None: return None
+    if isinstance(v, str): return v
+    try:
+        return v.isoformat()
+    except Exception:
+        try:
+            return str(v)
+        except Exception:
+            return None
+
+async def _message_bounds_and_count(conv_ref) -> Tuple[Optional[object], Optional[object], Optional[int]]:
+    """Return (first_created_at, last_created_at, count). Count may be None if you don't want to scan."""
+    msgs = conv_ref.collection("messages")
+
+    first = None
+    last = None
+
+    # Latest
+    async for m in msgs.order_by("created_at", direction=firestore.Query.DESCENDING).limit(1).stream():
+        d = m.to_dict() or {}
+        last = d.get("created_at")
+
+    # Earliest
+    async for m in msgs.order_by("created_at").limit(1).stream():
+        d = m.to_dict() or {}
+        first = d.get("created_at")
+
+    # Counting can be heavy; do it only if asked
+    cnt = 0
+    async for _ in msgs.select([]).stream():
+        cnt += 1
+
+    return first, last, cnt
+
+@app.post("/admin/backfill_conversations")
+async def admin_backfill_conversations(
+    payload: BackfillRequest,
+    admin_secret: Optional[str] = Header(default=None, alias="x-admin-secret"),
+):
+    # Simple admin guard
+    import os
+    required = os.environ.get("ADMIN_SECRET")
+    if not required or admin_secret != required:
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    user_id = payload.user_id
+    email_lc = (payload.user_email or "").lower()
+    human_senders = list(dict.fromkeys(payload.human_senders or []))  # de-dupe
+    limit = max(1, min(payload.limit, 5000))
+
+    base = db.collection("conversations")
+    candidate_refs: Dict[str, any] = {}
+
+    # a) by user_id
+    q1 = base.where("user_id", "==", user_id).limit(limit)
+    async for d in q1.stream():
+        candidate_refs[d.id] = d.reference
+
+    # b) by owner_keys contains email (legacy)
+    if email_lc:
+        q2 = base.where("owner_keys", "array_contains", email_lc).limit(limit)
+        async for d in q2.stream():
+            candidate_refs[d.id] = d.reference
+
+    # c) optional: via messages collection-group (sender in human_senders)
+    # splits into chunks of 30 values for 'in' operator
+    if human_senders:
+        chunk = 30
+        for i in range(0, len(human_senders), chunk):
+            vals = human_senders[i:i+chunk]
+            qg = db.collection_group("messages").where("sender", "in", vals).limit(limit)
+            async for m in qg.stream():
+                # parent is .../conversations/{id}/messages/{mid}
+                parent = m.reference.parent.parent
+                if parent:
+                    candidate_refs[parent.id] = parent
+
+    if not candidate_refs:
+        return {"updated": 0, "dry_run": not payload.apply, "items": [], "candidates": 0}
+
+    results = []
+    updated = 0
+
+    for conv_id, ref in candidate_refs.items():
+        snap = await ref.get()
+        if not snap.exists:
+            continue
+        doc = snap.to_dict() or {}
+        changes = {}
+
+        # Ensure owner fields
+        if doc.get("user_id") != user_id:
+            changes["user_id"] = user_id
+
+        current_keys = set((doc.get("owner_keys") or []))
+        need_keys = set()
+        if user_id and user_id not in current_keys:
+            need_keys.add(user_id)
+        if email_lc and email_lc not in {k.lower() for k in current_keys}:
+            need_keys.add(email_lc)
+        if need_keys:
+            changes["owner_keys"] = sorted({*(k.lower() for k in current_keys), *need_keys})
+
+        # Title baseline
+        if not (doc.get("title") and str(doc.get("title")).strip()):
+            changes["title"] = "New conversation"
+
+        # Compute/fill timestamps and count if missing or requested
+        created_at = doc.get("created_at")
+        updated_at = doc.get("updated_at")
+        msg_count = doc.get("message_count")
+
+        if payload.recompute_count or created_at is None or updated_at is None or msg_count in (None, 0):
+            first_ts, last_ts, cnt = await _message_bounds_and_count(ref)
+            created_at = created_at or first_ts
+            updated_at = updated_at or last_ts or created_at
+            if payload.recompute_count or (msg_count in (None, 0) and cnt is not None):
+                msg_count = cnt
+
+        if doc.get("created_at") is None and created_at is not None:
+            changes["created_at"] = created_at
+        if doc.get("updated_at") is None and updated_at is not None:
+            changes["updated_at"] = updated_at
+        if msg_count is not None and doc.get("message_count") != msg_count:
+            changes["message_count"] = msg_count
+
+        # Record what we'd do
+        results.append({
+            "id": conv_id,
+            "changes": {k: _iso_any(v) for k, v in changes.items()},
+        })
+
+        # Apply if requested
+        if payload.apply and changes:
+            await ref.set(changes, merge=True)
+            updated += 1
+
+    return {
+        "updated": updated,
+        "dry_run": not payload.apply,
+        "items": results[:200],  # include first 200 for visibility
+        "candidates": len(candidate_refs),
+    }
+# ---------- /ADMIN BACKFILL ----------
+
     return {
         "id": conv_id,
         "title": conv.get("title") or "Conversation",
