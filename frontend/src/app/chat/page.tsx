@@ -257,7 +257,22 @@ export default function ChatPage() {
             setConversationId(savedId);
         }
     }, []);
+    // 1) add this helper, e.g. near loadConversations()
+    const hydrateConversation = useCallback(async (id: string) => {
+        try {
+            const res = await apiFetch(`/api/conversations/${id}/messages?limit=200`, { cache: 'no-store' });
+            if (!res.ok) return;
+            const data = await res.json();
 
+            const items: StoredMessage[] = Array.isArray(data?.items) ? (data.items as StoredMessage[]) : [];
+
+            setChatHistory(items.map((m) => ({
+            sender: m.sender,
+            model: m.sender,
+            text: m.content,
+            })));
+        } catch {}
+    }, []);
     useEffect(() => {
         // If there's an active conversation ID and the chat history is empty,
         // it's a signal that we need to hydrate the chat from the backend.
@@ -285,22 +300,7 @@ export default function ChatPage() {
             setIsLoadingConvs(false);
         }
     }, [userToken]);
-    // 1) add this helper, e.g. near loadConversations()
-    const hydrateConversation = useCallback(async (id: string) => {
-        try {
-            const res = await apiFetch(`/api/conversations/${id}/messages?limit=200`, { cache: 'no-store' });
-            if (!res.ok) return;
-            const data = await res.json();
 
-            const items: StoredMessage[] = Array.isArray(data?.items) ? (data.items as StoredMessage[]) : [];
-
-            setChatHistory(items.map((m) => ({
-            sender: m.sender,
-            model: m.sender,
-            text: m.content,
-            })));
-        } catch {}
-    }, []);
 
     // 2) call it when opening a convo
     const handleOpenConversation = async (id: string) => {
