@@ -485,14 +485,13 @@ export default function ChatPage() {
 
 
         // Build the URL safely
-        let u: URL;
-        try {
-            const base = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
-            u = new URL(base); // e.g. https://api.aicolosseum.app
-        } catch {
+        var base = process.env.NEXT_PUBLIC_WS_URL;
+        var u;
+        if (base) {
+            u = new URL(base);
+        } else {
             u = new URL('http://localhost:8000');
-        }
-        u.protocol = (u.protocol === 'https:') ? 'wss:' : 'ws:';
+        }otocol = (u.protocol === 'https:') ? 'wss:' : 'ws:';
         u.pathname = '/ws/colosseum-chat';
         u.search = `?token=${encodeURIComponent(localStorage.getItem('access_token') || userToken)}`;
 
