@@ -234,29 +234,7 @@ export default function ChatPage() {
         }
     }, [chatHistory]);
     
-    // load saved conversation id on mount
-    useEffect(() => {
-        try {
-            const saved = localStorage.getItem('conversationId');
-            if (saved) setConversationId(saved);
-        } catch {}
-        }, []);
 
-        // save id whenever it changes
-        useEffect(() => {
-        try {
-            if (conversationId) localStorage.setItem('conversationId', conversationId);
-        } catch {}
-    }, [conversationId]);
-    // Hydrate messages when we already have an id (e.g., page reload / return)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    useEffect(() => {
-        // Load the saved conversation ID from local storage when the component mounts.
-        const savedId = localStorage.getItem('conversationId');
-        if (savedId) {
-            setConversationId(savedId);
-        }
-    }, []);
     // 1) add this helper, e.g. near loadConversations()
     const hydrateConversation = useCallback(async (id: string) => {
         try {
@@ -302,8 +280,14 @@ export default function ChatPage() {
     }, [userToken]);
 
 
-    // 2) call it when opening a convo
     const handleOpenConversation = async (id: string) => {
+        // First, close the old socket if it exists.
+        if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
+            ws.current.close(1000, 'switch-conversation');
+        }
+
+        // Clear the current chat view and update the conversation ID.
+        // This will trigger the useEffect hooks to re-hydrate the chat and reconnect the WebSocket.
         try { localStorage.setItem('conversationId', id); } catch {}
         setConversationId(id);
         setLoadedSummary(null);
@@ -311,24 +295,9 @@ export default function ChatPage() {
         setChatHistory([]);
         setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
 
-        // First, check if there's an existing WebSocket connection and close it.
-        // This ensures the old connection is terminated before a new one is established.
-        if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
-            ws.current.close(1000, 'switch-conversation');
-        }
-
-        // Now, we load the conversation messages from the backend.
-        // This is a crucial step to ensure the chat history is displayed.
+        // NEW: This line explicitly tells the app to fetch and display the messages.
         await hydrateConversation(id);
-        
-        // Finally, we signal the application to establish a new WebSocket connection
-        // for the selected conversation.
-        setWsReconnectNonce(n => n + 1);
     };
-    // keep the sidebar list fresh
-    useEffect(() => {
-        if (userToken) loadConversations();
-    }, [userToken, loadConversations]);
 
     // Handle redirection to sign-in page when userToken is not present
     useEffect(() => {
@@ -475,10 +444,10 @@ export default function ChatPage() {
         }
     };
 
-// eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     // WebSocket connection logic
     useEffect(() => {
-        // don’t try to connect without a token
+        // Don't try to connect without a token.
         if (!userToken) {
             if (ws.current) {
                 try { ws.current.close(); } catch {}
@@ -487,9 +456,25 @@ export default function ChatPage() {
             setIsWsOpen(false);
             return;
         }
-        // try to top up access token if it's close to expiring (non-blocking)
-        refreshTokenIfNeeded();
+
+        // We check here for a saved ID and set it. The effect will re-run with the correct ID.
+        if (isInitialRender.current) {
+            isInitialRender.current = false;
+            const savedId = localStorage.getItem('conversationId');
+            if (savedId) {
+                setConversationId(savedId);
+            }
+        }
+
+        // If conversationId is null after the initial check, we don't connect yet.
+        // We'll wait for the next run of this effect (triggered by the state change)
+        if (conversationId === null && !isInitialRender.current) {
+            return;
+        }
         
+        // Try to top up access token if it's close to expiring (non-blocking).
+        refreshTokenIfNeeded();
+
         // Build the URL safely
         const base = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
         let u: URL;
@@ -510,13 +495,10 @@ export default function ChatPage() {
 
         const currentWs = socket;
         const isNonEmptyString = (v: unknown): v is string =>
-        typeof v === 'string' && v.length > 0;
+            typeof v === 'string' && v.length > 0;
 
-
-        // --- Start of the refactored code block ---
         Object.assign(currentWs, {
             onopen: () => {
-                // reset reconnect backoff on successful open
                 reconnectRef.current.tries = 0;
                 if (reconnectRef.current.timer) {
                     window.clearTimeout(reconnectRef.current.timer);
@@ -528,103 +510,73 @@ export default function ChatPage() {
                 authFailedRef.current = false;
                 reconnectBackoffRef.current = 1000;
         
-                // --- initial handshake ---
                 const initialPayload: Record<string, unknown> = {
                     user_name: userName,
                 };
                 if (conversationId) {
-                    // If we have an ID, explicitly tell the server to reuse it.
+                    // Hydrate the conversation before connecting.
+                    hydrateConversation(conversationId);
                     initialPayload.conversation_id = conversationId;
                 }
-                // If conversationId is null, the server's 'get_or_create_conversation' function
-                // will automatically create a new one for us. We don't need 'resume_last'.
                 currentWs.send(JSON.stringify(initialPayload));
-                // --- end handshake ---
         
-                // --- flush any queued messages that were sent while connecting ---
                 while (pendingSends.current.length > 0) {
                     const next = pendingSends.current.shift();
                     if (next) currentWs.send(JSON.stringify(next));
                 }
-                // --- end flush ---
             },
         
             onmessage: (event: MessageEvent<string>) => {
-            let msg: ServerMessage;
-            try { msg = JSON.parse(event.data); }
-            catch { return; }
+                let msg: ServerMessage;
+                try { msg = JSON.parse(event.data); }
+                catch { return; }
 
-            // meta/system messages
-            if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
-                const id = msg.id;
+                if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
+                    const id = msg.id;
+                    setConversationId(curr => curr || id);
+                    setConversations(prev => {
+                        const rest = prev.filter(c => c.id !== id);
+                        return [{ id, title: 'New conversation', updated_at: new Date().toISOString() }, ...rest];
+                    });
+                    if (!chatHistory.length) { hydrateConversation(id); }
+                    loadConversations();
+                    return;
+                }
 
-                // Always set (only the first time actually changes)
-                setConversationId(curr => curr || id);
+                if (msg.type === 'conversation_meta' && typeof msg.id === 'string') {
+                    const id: string = msg.id;
+                    const title: string = typeof msg.title === 'string' && msg.title.trim() ? msg.title : 'New conversation';
+                    const updated_at: string = typeof msg.updated_at === 'string' && msg.updated_at.trim() ? msg.updated_at : new Date().toISOString();
+                    setConversations(prev => {
+                        const rest = prev.filter(c => c.id !== id);
+                        return [{ id, title, updated_at }, ...rest];
+                    });
+                    setConversationId(curr => {
+                        const chosen = curr || id;
+                        if (!chatHistory.length) { hydrateConversation(chosen); }
+                        return chosen;
+                    });
+                    return;
+                }
 
-                // ALWAYS upsert a row so the sidebar shows something immediately
-                setConversations(prev => {
-                    const rest = prev.filter(c => c.id !== id);
-                    return [{ id, title: 'New conversation', updated_at: new Date().toISOString() }, ...rest];
-                });
-                // Hydrate this conversation's messages once if the view is empty
-                if (!chatHistory.length) { hydrateConversation(id); }
-                // Still refresh from the server when ready
-                loadConversations();
-                return;
-            }
+                if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
+                    setLoadedSummary(msg.summary);
+                    return;
+                }
+                if (msg.type === 'ping' || msg.type === 'pong') return;
+                const sender = isNonEmptyString(msg.sender) ? msg.sender : null;
 
-            // NEW: server-pushed minimal metadata for immediate sidebar display
-            if (msg.type === 'conversation_meta' && typeof msg.id === 'string') {
-            const id: string = msg.id;
-            const title: string =
-                typeof msg.title === 'string' && msg.title.trim()
-                ? msg.title
-                : 'New conversation';
-            const updated_at: string =
-                typeof msg.updated_at === 'string' && msg.updated_at.trim()
-                ? msg.updated_at
-                : new Date().toISOString();
+                if (sender && typeof msg.typing === 'boolean' && ALLOWED_AGENTS.includes(sender as AgentName)) {
+                    setTypingWithDelayAndTTL(sender as AgentName, msg.typing === true);
+                    return;
+                }
 
-            setConversations(prev => {
-                const rest = prev.filter(c => c.id !== id);
-                return [{ id, title, updated_at }, ...rest];
-            });
-
-            setConversationId(curr => {
-                const chosen = curr || id;
-                if (!chatHistory.length) { hydrateConversation(chosen); }
-                return chosen;
-            });
-            return;
-            }
-
-
-            if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
-                setLoadedSummary(msg.summary);
-                return;
-            }
-            if (msg.type === 'ping' || msg.type === 'pong') return;
-
-            // normalize once so TS knows it's safe when used
-            const sender = isNonEmptyString(msg.sender) ? msg.sender : null;
-    
-       
-            // typing updates
-            if (sender && typeof msg.typing === 'boolean' && ALLOWED_AGENTS.includes(sender as AgentName)) {
-                setTypingWithDelayAndTTL(sender as AgentName, msg.typing === true);
-                return;
-            }
-
-            // normal chat message
-            if (sender && typeof msg.text === 'string' && ALLOWED_AGENTS.includes(sender as AgentName)) {
-                // message arrived → cancel any pending show + turn off immediately
-                setTypingWithDelayAndTTL(sender as AgentName, false);
-                addMessageToChat({ sender, text: msg.text });
-                return;
-            }
-        },
-
-        
+                if (sender && typeof msg.text === 'string' && ALLOWED_AGENTS.includes(sender as AgentName)) {
+                    setTypingWithDelayAndTTL(sender as AgentName, false);
+                    addMessageToChat({ sender, text: msg.text });
+                    return;
+                }
+            },
             onclose: (ev: CloseEvent) => {
                 console.log('WebSocket closed. code=', ev.code, 'reason=', ev.reason, 'wasClean=', ev.wasClean);
                 Object.values(typingTimersRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
@@ -634,21 +586,13 @@ export default function ChatPage() {
                 typingShowDelayRef.current = {};
                 typingTTLRef.current = {};
                 setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
-
                 setIsWsOpen(false);
-                
-        
-                // mark ref as closed
                 ws.current = null;
-        
-                // compute next backoff (up to 15s)
-                const base = 1000; // 1s
-                const max = 15000; // 15s
+                const base = 1000;
+                const max = 15000;
                 const tries = reconnectRef.current.tries;
                 const nextDelay = Math.min(max, base * Math.pow(2, tries)) + Math.floor(Math.random() * 250);
                 reconnectRef.current.tries = tries + 1;
-        
-                // clear any previous timer and schedule a reconnect attempt
                 if (reconnectRef.current.timer) {
                     window.clearTimeout(reconnectRef.current.timer);
                 }
@@ -656,7 +600,6 @@ export default function ChatPage() {
                     setWsReconnectNonce((n) => n + 1);
                 }, nextDelay);
             },
-        
             onerror: (event: Event) => {
                 console.error('WebSocket error:', event);
                 Object.values(typingTimersRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
@@ -669,14 +612,12 @@ export default function ChatPage() {
                 setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
             }
         });
-        // --- End of the refactored code block ---
-
         return () => {
             if (currentWs && (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING)) {
-            try { currentWs.close(); } catch {}
+                try { currentWs.close(); } catch {}
             }
         };
-    }, [userToken, userName, addMessageToChat, wsReconnectNonce]);
+    }, [userToken, userName, addMessageToChat, wsReconnectNonce, conversationId]);
 
         
 
