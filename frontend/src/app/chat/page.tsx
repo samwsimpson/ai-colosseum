@@ -67,10 +67,27 @@ type ConversationListResponse =
   | { data: ConversationListItem[] }
   | { data: { items: ConversationListItem[] } };
 
-// Base REST API (same host as WS but https/http, not ws)
-const API_BASE =
-  (process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '')) ||
-  'https://api.aicolosseum.app';
+// Base REST API (same host as WS when NEXT_PUBLIC_API_URL is not provided)
+function resolveApiBase(): string {
+  const fromEnv = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '');
+  if (fromEnv) return fromEnv;
+
+  // Fall back to the WS host and flip ws:// -> http://, wss:// -> https://
+  const wsBase = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
+  try {
+    const u = new URL(wsBase);
+    u.protocol = (u.protocol === 'wss:') ? 'https:' : 'http:';
+    u.pathname = '';
+    u.search = '';
+    u.hash = '';
+    return u.toString().replace(/\/+$/, '');
+  } catch {
+    // Final fallback to local dev
+    return 'http://localhost:8000';
+  }
+}
+const API_BASE = resolveApiBase();
+
 
 
 
@@ -327,14 +344,14 @@ export default function ChatPage() {
     }, [conversationId, chatHistory.length, hydrateConversation]);
     // Fetch the list of conversations
     const loadConversations = useCallback(async () => {
-        if (!userToken) return;
+        const token =
+        (typeof window !== 'undefined' && localStorage.getItem('access_token')) || userToken || '';
+        if (!token) return;
         try {
-            setIsLoadingConvs(true);
-            const token =
-            (typeof window !== 'undefined' && localStorage.getItem('access_token')) || userToken || '';
+        setIsLoadingConvs(true);
 
             const res = await apiFetch(
-            `${API_BASE}/api/conversations/by_token?token=${encodeURIComponent(token)}&limit=100`,
+            `/api/conversations/by_token?token=${encodeURIComponent(token)}&limit=100`,
             { cache: 'no-store' }
             );
             if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
@@ -387,6 +404,12 @@ export default function ChatPage() {
         }
     }, [userToken, loadConversations]);
 
+    // Also try once on mount using whatever token is already in localStorage.
+    // Covers refreshes where context isn't ready yet.
+    useEffect(() => {
+        loadConversations();
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     const handleOpenConversation = async (id: string) => {
     if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
@@ -394,6 +417,8 @@ export default function ChatPage() {
     }
 
     setConversationId(id);
+    try { localStorage.setItem('conversationId', id); } catch {}
+
     setLoadedSummary(null);
     setShowSummary(false);
     setChatHistory([]);
@@ -402,6 +427,14 @@ export default function ChatPage() {
     hydrateConversation(id);
     };
 
+    // Restore last-opened conversation ID from localStorage (before WS connects)
+    useEffect(() => {
+    try {
+        const cid = localStorage.getItem('conversationId');
+        if (cid) setConversationId(cid);
+    } catch {}
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
 
     // Handle redirection to sign-in page when userToken is not present
     useEffect(() => {
@@ -494,6 +527,7 @@ export default function ChatPage() {
     // Create a brand-new conversation
     const handleNewConversation = () => {  
         setConversationId(null);
+        try { localStorage.removeItem('conversationId'); } catch {}
         setLoadedSummary(null);
         setShowSummary(false);
         setChatHistory([]);
@@ -541,6 +575,7 @@ export default function ChatPage() {
 
         // If we deleted the one we’re viewing, start fresh
         if (conversationId === id) {
+            try { localStorage.removeItem('conversationId'); } catch {}
             handleNewConversation();
         } else {
             await loadConversations();
@@ -575,7 +610,7 @@ export default function ChatPage() {
             u = new URL('http://localhost:8000');
         }
 
-        u.protocol = (u.protocol === 'https:') ? 'wss:' : 'ws:';
+        u.protocol = (u.protocol === 'https:' || u.protocol === 'wss:') ? 'wss:' : 'ws:';
         u.pathname = '/ws/colosseum-chat';
         u.search = `?token=${encodeURIComponent(localStorage.getItem('access_token') || userToken)}`;
 
@@ -624,6 +659,8 @@ export default function ChatPage() {
                 if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
                     const id = msg.id;
                     setConversationId(curr => curr || id);
+                    try { localStorage.setItem('conversationId', id); } catch {}
+
                     setConversations(prev => {
                         const rest = prev.filter(c => c.id !== id);
                         return [{ id, title: 'New conversation', updated_at: new Date().toISOString() }, ...rest];
@@ -643,6 +680,8 @@ export default function ChatPage() {
                     });
                     setConversationId(curr => {
                         const chosen = curr || id;
+                        try { localStorage.setItem('conversationId', chosen); } catch {}
+
                         if (!chatHistory.length) { hydrateConversation(chosen); }
                         return chosen;
                     });
