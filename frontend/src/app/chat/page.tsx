@@ -348,17 +348,9 @@ export default function ChatPage() {
         setIsLoadingConvs(true);
 
         // Let apiFetch handle 401 -> /api/refresh -> retry via cookie
-        const token =
-            (typeof window !== 'undefined' && localStorage.getItem('access_token')) ||
-            userToken ||
-            '';
+        // Let apiFetch handle 401 -> /api/refresh -> retry via cookie+Authorization
+        const res = await apiFetch(`/api/conversations/by_token?limit=100`, { cache: 'no-store' });
 
-        if (!token) { setIsLoadingConvs(false); return; }
-
-        const res = await apiFetch(
-            `/api/conversations/by_token?token=${encodeURIComponent(token)}&limit=100`,
-            { cache: 'no-store' }
-        );
 
 
 

@@ -412,10 +412,10 @@ async def list_conversations_by_token(
     limit: int = 100,
     authorization: Optional[str] = Header(default=None),
 ):
-    # accept either ?token=... or Authorization: Bearer ...
-    if not token and authorization and authorization.lower().startswith("bearer "):
-        token = authorization.split(" ", 1)[1]
-    if not token:
+    # Prefer Authorization header (fresh after /api/refresh); fall back to ?token=
+    if authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1].strip()
+    elif not token:
         raise HTTPException(status_code=401, detail="Missing token")
     user = await get_current_user(token=token)
     # --- AUTO-BACKFILL-ONCE: run per-user on first visit if enabled ---
