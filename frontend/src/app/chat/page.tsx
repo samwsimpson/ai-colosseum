@@ -344,13 +344,12 @@ export default function ChatPage() {
     }, [conversationId, chatHistory.length, hydrateConversation]);
     // Fetch the list of conversations
     const loadConversations = useCallback(async () => {
-        const token =
-        (typeof window !== 'undefined' && localStorage.getItem('access_token')) || userToken || '';
-        if (!token) return;
-        try {
+    try {
         setIsLoadingConvs(true);
 
-            const res = await apiFetch(`/api/conversations/by_token?limit=100`, { cache: 'no-store' });
+        // Let apiFetch handle 401 -> /api/refresh -> retry via cookie
+        const res = await apiFetch(`/api/conversations/by_token?limit=100`, { cache: 'no-store' });
+
             if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
 
             const data: ConversationListResponse = await res.json();
@@ -435,26 +434,36 @@ export default function ChatPage() {
 
     // Handle redirection to sign-in page when userToken is not present
     useEffect(() => {
-    if (!userToken) {
-        // wipe conversation continuity on sign-out
+    (async () => {
+        if (userToken) return;
+
+        const hasAccess = typeof window !== 'undefined' && !!localStorage.getItem('access_token');
+        if (!hasAccess) {
+        try { await refreshTokenIfNeeded(true); } catch {}
+        }
+
+        const tokenNow = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+        if (!tokenNow) {
+        // clean up & redirect only if refresh didn’t produce a token
         try { localStorage.removeItem('conversationId'); } catch {}
         setConversationId(null);
         setChatHistory([]);
         setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
 
-        // close any open socket
         if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
-        ws.current.close(1000, 'logout');
+            ws.current.close(1000, 'logout');
         }
         ws.current = null;
 
-        // route to sign-in if not already there
-        if (pathname !== '/sign-in') {
-        router.push('/sign-in');
+        if (pathname !== '/sign-in') router.push('/sign-in');
+        } else {
+        // we have a token now; hydrate
+        loadConversations();
+        setWsReconnectNonce(n => n + 1);
         }
-        return; // don’t try to connect without a token
-    }
-    }, [userToken, pathname, router]);
+    })();
+    }, [userToken, pathname, router, loadConversations]);
+
 
     useEffect(() => {
     const onVisible = () => {
