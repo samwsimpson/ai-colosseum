@@ -460,7 +460,7 @@ export default function ChatPage() {
         }
     };
 
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+// eslint-disable-next-line react-hooks/exhaustive-deps
     // WebSocket connection logic
     useEffect(() => {
         // don’t try to connect without a token
@@ -474,24 +474,19 @@ export default function ChatPage() {
         }
         // try to top up access token if it's close to expiring (non-blocking)
         refreshTokenIfNeeded();
-
-        // short-circuit once if we have a token but no conversationId:
-        // define this once near your interfaces (or just above the effect)
-        type SidebarConvo = ConversationListItem & { created_at?: string | null };
-
-      
-    }
-
-
-
+        
         // Build the URL safely
-        var base = process.env.NEXT_PUBLIC_WS_URL;
+        var base = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
         var u;
-        if (base) {
+        
+        try {
             u = new URL(base);
-        } else {
+        } catch (e) {
+            console.error("Invalid WS URL from env, falling back:", e);
             u = new URL('http://localhost:8000');
-        }otocol = (u.protocol === 'https:') ? 'wss:' : 'ws:';
+        }
+
+        u.protocol = (u.protocol === 'https:') ? 'wss:' : 'ws:';
         u.pathname = '/ws/colosseum-chat';
         u.search = `?token=${encodeURIComponent(localStorage.getItem('access_token') || userToken)}`;
 
@@ -588,7 +583,6 @@ export default function ChatPage() {
             });
             return;
             }
-
 
 
             if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
