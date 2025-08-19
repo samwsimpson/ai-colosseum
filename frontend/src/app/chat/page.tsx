@@ -369,78 +369,80 @@ export default function ChatPage() {
     }, [conversationId, chatHistory.length, hydrateConversation]);
     // Fetch the list of conversations
     const loadConversations = useCallback(async () => {
-    try {
-        setIsLoadingConvs(true);
+        try {
+            setIsLoadingConvs(true);
 
-        // Pull a token from localStorage or from the user context
-        const token =
-        typeof window !== 'undefined'
-            ? localStorage.getItem('access_token') || userToken || null
-            : null;
+            // Grab a token from localStorage or from the user context
+            const token =
+                typeof window !== 'undefined'
+                    ? localStorage.getItem('access_token') || userToken || null
+                    : null;
 
-        // If no token, bail out — don’t clear the sidebar
-        if (!token) {
-        return;
+            // If no token is available yet, bail out to avoid clearing the sidebar
+            if (!token) {
+                return;
+            }
+
+            // Build query with limit and token
+            const query = new URLSearchParams();
+            query.set('limit', '100');
+            query.set('token', token);
+
+            // Make the fetch using the query string; apiFetch will set Authorization header too
+            const res = await apiFetch(`/api/conversations/by_token?${query.toString()}`, {
+                cache: 'no-store',
+            });
+
+            if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
+            const data: ConversationListResponse = await res.json();
+
+            // Accept many shapes: [], {items}, {conversations}, {data}, {data:{items}}
+            const raw: ConversationListItem[] =
+                Array.isArray(data)
+                    ? data
+                    : Array.isArray((data as { items?: ConversationListItem[] })?.items)
+                    ? (data as { items: ConversationListItem[] }).items
+                    : Array.isArray((data as { conversations?: ConversationListItem[] })?.conversations)
+                    ? (data as { conversations: ConversationListItem[] }).conversations
+                    : Array.isArray((data as { data?: ConversationListItem[] })?.data)
+                    ? (data as { data: ConversationListItem[] }).data
+                    : Array.isArray(
+                        (data as { data?: { items?: ConversationListItem[] } })?.data?.items
+                    )
+                    ? ((data as { data: { items: ConversationListItem[] } }).data.items)
+                    : [];
+
+            // Normalize & sort newest-first by updated_at/created_at, avoid using "any"
+            const normalized: ConversationListItem[] = raw
+                .map((c) => ({
+                    id: String(c.id),
+                    title: (c.title && String(c.title)) || 'Untitled',
+                    updated_at:
+                        c.updated_at ??
+                        (c as { updatedAt?: string }).updatedAt ??
+                        (c as { last_updated?: string }).last_updated,
+                    created_at: c.created_at ?? (c as { createdAt?: string }).createdAt ?? null,
+                }))
+                .filter((c) => !!c.id)
+                .sort((a, b) => {
+                    const ta = Date.parse(String(a.updated_at ?? a.created_at ?? ''));
+                    const tb = Date.parse(String(b.updated_at ?? b.created_at ?? ''));
+                    return (tb || 0) - (ta || 0);
+                });
+
+            // De-duplicate by id
+            const seen: Record<string, true> = {};
+            const unique = normalized.filter((c) =>
+                seen[c.id] ? false : (seen[c.id] = true)
+            );
+            setConversations(unique);
+        } catch {
+            // Ignore errors; leave the existing conversation list intact
+        } finally {
+            setIsLoadingConvs(false);
         }
-
-        // Build query with limit and token
-        const query = new URLSearchParams();
-        query.set('limit', '100');
-        query.set('token', token);
-
-        const res = await apiFetch(`/api/conversations/by_token?${query.toString()}`, {
-        cache: 'no-store',
-        });
-        if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
-
-        const data: ConversationListResponse = await res.json();
-
-        // Flatten various response shapes
-        const raw: ConversationListItem[] =
-        Array.isArray(data)
-            ? data
-            : Array.isArray((data as { items?: ConversationListItem[] })?.items)
-            ? (data as { items: ConversationListItem[] }).items
-            : Array.isArray((data as { conversations?: ConversationListItem[] })?.conversations)
-            ? (data as { conversations: ConversationListItem[] }).conversations
-            : Array.isArray((data as { data?: ConversationListItem[] })?.data)
-            ? (data as { data: ConversationListItem[] }).data
-            : Array.isArray(
-                (data as { data?: { items?: ConversationListItem[] } })?.data?.items
-            )
-            ? (data as { data: { items: ConversationListItem[] } }).data.items
-            : [];
-
-        // Normalize & sort by updated_at / created_at (without using `any`)
-        const normalized: ConversationListItem[] = raw
-        .map((c) => ({
-            id: String(c.id),
-            title: (c.title && String(c.title)) || 'Untitled',
-            updated_at:
-            c.updated_at ??
-            (c as { updatedAt?: string }).updatedAt ??
-            (c as { last_updated?: string }).last_updated,
-            created_at: c.created_at ?? (c as { createdAt?: string }).createdAt ?? null,
-        }))
-        .filter((c) => !!c.id)
-        .sort((a, b) => {
-            const ta = Date.parse(String((a.updated_at ?? a.created_at) || ''));
-            const tb = Date.parse(String((b.updated_at ?? b.created_at) || ''));
-            return (tb || 0) - (ta || 0);
-        });
-
-        // De-duplicate and update state
-        const seen: Record<string, true> = {};
-        const unique = normalized.filter((c) =>
-        seen[c.id] ? false : (seen[c.id] = true)
-        );
-        setConversations(unique);
-    } catch {
-        // Ignore errors; keep existing list
-    } finally {
-        setIsLoadingConvs(false);
-    }
     }, [userToken]);
+
 
 
 
@@ -881,48 +883,50 @@ export default function ChatPage() {
             <div className="p-4 text-sm text-gray-400">No conversations yet</div>
             )}
             <ul className="divide-y divide-gray-800">
-            {conversations.map((c) => (
-                <li
-                key={c.id}
-                className={`group px-3 py-2 cursor-pointer ${
-                    conversationId === c.id
-                    ? 'bg-gray-800'
-                    : 'hover:bg-gray-800/60'
-                }`}
-                >
-                <div className="flex items-center justify-between gap-2">
-                    <button
-                    onClick={() => handleOpenConversation(c.id)}
-                    className="flex-1 text-left truncate"
-                    title={c.title}
+                {conversations.map((c) => (
+                    <li
+                        key={c.id}
+                        onClick={() => handleOpenConversation(c.id)}
+                        className={`group px-3 py-2 cursor-pointer ${
+                            conversationId === c.id ? 'bg-gray-800' : 'hover:bg-gray-800/60'
+                        }`}
                     >
-                    {c.title || 'Untitled'}
-                    </button>
-                    <div className="opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
-                    <button
-                        onClick={() => handleRenameConversation(c.id)}
-                        className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
-                        title="Rename"
-                    >
-                        Rename
-                    </button>
-                    <button
-                        onClick={() => handleDeleteConversation(c.id)}
-                        className="text-xs px-2 py-1 rounded bg-red-700 hover:bg-red-600"
-                        title="Delete"
-                    >
-                        Delete
-                    </button>
-                    </div>
-                </div>
-                {(c.updated_at || c.created_at) && (
-                    <div className="mt-1 text-[11px] text-gray-400">
-                        {new Date((c.updated_at ?? c.created_at) as string).toLocaleString()}
-                    </div>
-                )}
-                </li>
-            ))}
+                        <div className="flex items-center justify-between gap-2">
+                            <span className="flex-1 text-left truncate" title={c.title}>
+                                {c.title || 'Untitled'}
+                            </span>
+                            <div className="opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation(); // prevent the li click
+                                        handleRenameConversation(c.id);
+                                    }}
+                                    className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+                                    title="Rename"
+                                >
+                                    Rename
+                                </button>
+                                <button
+                                    onClick={(e) => {
+                                        e.stopPropagation();
+                                        handleDeleteConversation(c.id);
+                                    }}
+                                    className="text-xs px-2 py-1 rounded bg-red-700 hover:bg-red-600"
+                                    title="Delete"
+                                >
+                                    Delete
+                                </button>
+                            </div>
+                        </div>
+                        {(c.updated_at || c.created_at) && (
+                            <div className="mt-1 text-[11px] text-gray-400">
+                                {new Date((c.updated_at ?? c.created_at) as string).toLocaleString()}
+                            </div>
+                        )}
+                    </li>
+                ))}
             </ul>
+
         </div>
         </aside>
 
