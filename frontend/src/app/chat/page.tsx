@@ -278,26 +278,27 @@ export default function ChatPage() {
             setIsLoadingConvs(false);
         }
     }, [userToken]);
+    useEffect(() => {
+    if (userToken) {
+        loadConversations();
+    }
+    }, [userToken, loadConversations]);
 
 
     const handleOpenConversation = async (id: string) => {
-        // First, close the old socket if it exists.
-        if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
-            ws.current.close(1000, 'switch-conversation');
-        }
+    if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
+        ws.current.close(1000, 'switch-conversation');
+    }
 
-        // Clear the current chat view and update the conversation ID.
-        // This will trigger the useEffect hooks to re-hydrate the chat and reconnect the WebSocket.
-        try { localStorage.setItem('conversationId', id); } catch {}
-        setConversationId(id);
-        setLoadedSummary(null);
-        setShowSummary(false);
-        setChatHistory([]);
-        setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+    setConversationId(id);
+    setLoadedSummary(null);
+    setShowSummary(false);
+    setChatHistory([]);
+    setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
 
-        // NEW: This line explicitly tells the app to fetch and display the messages.
-        await hydrateConversation(id);
+    await hydrateConversation(id);
     };
+
 
     // Handle redirection to sign-in page when userToken is not present
     useEffect(() => {
@@ -388,8 +389,7 @@ export default function ChatPage() {
     }, [message, userName, addMessageToChat]);
 
     // Create a brand-new conversation
-    const handleNewConversation = () => {
-        try { localStorage.removeItem('conversationId'); } catch {}
+    const handleNewConversation = () => {  
         setConversationId(null);
         setLoadedSummary(null);
         setShowSummary(false);
@@ -457,20 +457,7 @@ export default function ChatPage() {
             return;
         }
 
-        // We check here for a saved ID and set it. The effect will re-run with the correct ID.
-        if (isInitialRender.current) {
-            isInitialRender.current = false;
-            const savedId = localStorage.getItem('conversationId');
-            if (savedId) {
-                setConversationId(savedId);
-            }
-        }
 
-        // If conversationId is null after the initial check, we don't connect yet.
-        // We'll wait for the next run of this effect (triggered by the state change)
-        if (conversationId === null && !isInitialRender.current) {
-            return;
-        }
         
         // Try to top up access token if it's close to expiring (non-blocking).
         refreshTokenIfNeeded();
@@ -654,8 +641,7 @@ export default function ChatPage() {
 
 
     
-    const handleResetConversation = () => {
-        try { localStorage.removeItem('conversationId'); } catch {}
+    const handleResetConversation = () => {    
         setConversationId(null);
         setLoadedSummary(null);          // <- add this line
         setShowSummary(false);           // <- and this line
