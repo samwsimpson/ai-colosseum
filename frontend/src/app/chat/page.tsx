@@ -235,22 +235,57 @@ export default function ChatPage() {
     }, [chatHistory]);
     
 
-    // 1) add this helper, e.g. near loadConversations()
     const hydrateConversation = useCallback(async (id: string) => {
         try {
-            const res = await apiFetch(`/api/conversations/${id}/messages?limit=200`, { cache: 'no-store' });
+            // Some backends require the token as a query param (like your list API),
+            // so we pass it explicitly here too.
+            const token =
+            (typeof window !== 'undefined' && localStorage.getItem('access_token')) || userToken || '';
+
+            const res = await apiFetch(
+            `/api/conversations/${id}/messages?limit=200&token=${encodeURIComponent(token)}`,
+            { cache: 'no-store' }
+            );
             if (!res.ok) return;
+
             const data = await res.json();
 
-            const items: StoredMessage[] = Array.isArray(data?.items) ? (data.items as StoredMessage[]) : [];
+            // Tolerate many shapes: [], {items}, {messages}, {data}, {data:{items}}, {results}
+            const raw =
+            Array.isArray(data) ? data
+            : Array.isArray(data?.items) ? data.items
+            : Array.isArray(data?.messages) ? data.messages
+            : Array.isArray(data?.results) ? data.results
+            : Array.isArray(data?.data) ? data.data
+            : Array.isArray(data?.data?.items) ? data.data.items
+            : [];
 
-            setChatHistory(items.map((m) => ({
-            sender: m.sender,
-            model: m.sender,
-            text: m.content,
-            })));
-        } catch {}
-    }, []);
+            const toText = (c: any): string => {
+            if (typeof c === 'string') return c;
+            if (Array.isArray(c)) {
+                return c.map(part => (typeof part === 'string' ? part : (part?.text ?? ''))).join('\n').trim();
+            }
+            if (c && typeof c.text === 'string') return c.text;
+            try { return JSON.stringify(c); } catch { return ''; }
+            };
+
+            const normalized = raw.map((m: any) => {
+            const sender =
+                m.sender ??
+                m.agent ??
+                (m.role === 'user' ? (userName || 'You') : (m.model || 'Assistant'));
+            const model = m.model ?? m.sender ?? 'Assistant';
+            const text = toText(m.content ?? m.text ?? m.message ?? m.body ?? '');
+            return { sender, model, text };
+            });
+
+            setChatHistory(normalized);
+        } catch {
+            /* noop */
+        }
+    }, [userName, userToken]);
+
+
     useEffect(() => {
         // If there's an active conversation ID and the chat history is empty,
         // it's a signal that we need to hydrate the chat from the backend.
@@ -263,15 +298,47 @@ export default function ChatPage() {
     if (!userToken) return;
         try {
             setIsLoadingConvs(true);
-            const token = (typeof window !== 'undefined' && localStorage.getItem('access_token')) || userToken || '';
-            const res = await apiFetch(`${API_BASE}/api/conversations/by_token?token=${encodeURIComponent(token)}&limit=100`, {
-                cache: 'no-store',
+            const token =
+            (typeof window !== 'undefined' && localStorage.getItem('access_token')) || userToken || '';
+
+            const res = await apiFetch(
+            `${API_BASE}/api/conversations/by_token?token=${encodeURIComponent(token)}&limit=100`,
+            { cache: 'no-store' }
+            );
+            if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
+
+            const data = await res.json();
+
+            // Accept many shapes: [], {items}, {conversations}, {data}, {data:{items}}
+            const raw =
+            Array.isArray(data) ? data
+            : Array.isArray(data?.items) ? data.items
+            : Array.isArray(data?.conversations) ? data.conversations
+            : Array.isArray(data?.data) ? data.data
+            : Array.isArray(data?.data?.items) ? data.data.items
+            : [];
+
+            // Normalize & sort newest-first by updated_at/created_at
+            const normalized = raw
+            .map((c: any) => ({
+                id: String(c.id),
+                title: (c.title && String(c.title)) || 'Untitled',
+                updated_at: c.updated_at || c.updatedAt || c.last_updated || null,
+                created_at: c.created_at || c.createdAt || null,
+            }))
+            .filter((c: any) => !!c.id)
+            .sort((a: any, b: any) => {
+                const ta = Date.parse(a.updated_at || a.created_at || 0);
+                const tb = Date.parse(b.updated_at || b.created_at || 0);
+                return (tb || 0) - (ta || 0);
             });
 
-            if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
-            const data = await res.json();
-            // Support either {items:[...]} or [...] responses
-            setConversations(Array.isArray(data) ? data : (data.items ?? []));
+            // De-duplicate by id (in case WS meta already injected a row)
+            const dedup: Record<string, true> = {};
+            const unique = normalized.filter((c: any) => (dedup[c.id] ? false : (dedup[c.id] = true)));
+
+            setConversations(unique);
+
         } catch (e) {
             console.warn('loadConversations error:', e);
         } finally {
@@ -279,9 +346,9 @@ export default function ChatPage() {
         }
     }, [userToken]);
     useEffect(() => {
-    if (userToken) {
-        loadConversations();
-    }
+        if (userToken) {
+            loadConversations();
+        }
     }, [userToken, loadConversations]);
 
 
@@ -296,7 +363,7 @@ export default function ChatPage() {
     setChatHistory([]);
     setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
 
-    await hydrateConversation(id);
+    hydrateConversation(id);
     };
 
 
