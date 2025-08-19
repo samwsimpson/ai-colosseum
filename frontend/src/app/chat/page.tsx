@@ -46,6 +46,27 @@ interface StoredMessage {
   created_at?: string;
 }
 
+/** Helper types to avoid `any` while staying flexible */
+type ContentFragment = string | { text?: string } | { type?: string; text?: string } | unknown[];
+
+interface BackendMessageLike {
+  sender?: string;
+  agent?: string;
+  role?: string;
+  model?: string;
+  content?: unknown;
+  text?: string;
+  message?: string;
+  body?: unknown;
+}
+
+type ConversationListResponse =
+  | ConversationListItem[]
+  | { items: ConversationListItem[] }
+  | { conversations: ConversationListItem[] }
+  | { data: ConversationListItem[] }
+  | { data: { items: ConversationListItem[] } };
+
 // Base REST API (same host as WS but https/http, not ws)
 const API_BASE =
   (process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '')) ||
@@ -237,44 +258,54 @@ export default function ChatPage() {
 
     const hydrateConversation = useCallback(async (id: string) => {
         try {
-            // Some backends require the token as a query param (like your list API),
-            // so we pass it explicitly here too.
-            const token =
-            (typeof window !== 'undefined' && localStorage.getItem('access_token')) || userToken || '';
-
-            const res = await apiFetch(
-            `/api/conversations/${id}/messages?limit=200&token=${encodeURIComponent(token)}`,
-            { cache: 'no-store' }
-            );
+            const res = await apiFetch(`/api/conversations/${id}/messages?limit=200`, { cache: 'no-store' });
             if (!res.ok) return;
 
-            const data = await res.json();
+            const data: unknown = await res.json();
 
             // Tolerate many shapes: [], {items}, {messages}, {data}, {data:{items}}, {results}
-            const raw =
+            const rawUnknown: unknown =
             Array.isArray(data) ? data
-            : Array.isArray(data?.items) ? data.items
-            : Array.isArray(data?.messages) ? data.messages
-            : Array.isArray(data?.results) ? data.results
-            : Array.isArray(data?.data) ? data.data
-            : Array.isArray(data?.data?.items) ? data.data.items
+            : Array.isArray((data as { items?: unknown[] })?.items) ? (data as { items: unknown[] }).items
+            : Array.isArray((data as { messages?: unknown[] })?.messages) ? (data as { messages: unknown[] }).messages
+            : Array.isArray((data as { results?: unknown[] })?.results) ? (data as { results: unknown[] }).results
+            : Array.isArray((data as { data?: unknown[] })?.data) ? (data as { data: unknown[] }).data
+            : Array.isArray((data as { data?: { items?: unknown[] } })?.data?.items)
+                ? ((data as { data: { items: unknown[] } }).data.items)
+                : [];
+
+            const items: BackendMessageLike[] = Array.isArray(rawUnknown)
+            ? rawUnknown.filter((m): m is BackendMessageLike => typeof m === 'object' && m !== null)
             : [];
 
-            const toText = (c: any): string => {
+            const toText = (c: unknown): string => {
             if (typeof c === 'string') return c;
             if (Array.isArray(c)) {
-                return c.map(part => (typeof part === 'string' ? part : (part?.text ?? ''))).join('\n').trim();
+                return c
+                .map((part) => {
+                    if (typeof part === 'string') return part;
+                    const maybeObj = part as { text?: unknown };
+                    return typeof maybeObj?.text === 'string' ? maybeObj.text : '';
+                })
+                .join('\n')
+                .trim();
             }
-            if (c && typeof c.text === 'string') return c.text;
+            const maybeObj = c as { text?: unknown };
+            if (maybeObj && typeof maybeObj.text === 'string') return maybeObj.text;
             try { return JSON.stringify(c); } catch { return ''; }
             };
 
-            const normalized = raw.map((m: any) => {
+            const normalized = items.map<Message>((m) => {
             const sender =
-                m.sender ??
-                m.agent ??
-                (m.role === 'user' ? (userName || 'You') : (m.model || 'Assistant'));
-            const model = m.model ?? m.sender ?? 'Assistant';
+                (typeof m.sender === 'string' && m.sender) ||
+                (typeof m.agent === 'string' && m.agent) ||
+                (m.role === 'user' ? (userName || 'You') : (typeof m.model === 'string' ? m.model : 'Assistant'));
+
+            const model =
+                (typeof m.model === 'string' && m.model) ||
+                (typeof m.sender === 'string' && m.sender) ||
+                'Assistant';
+
             const text = toText(m.content ?? m.text ?? m.message ?? m.body ?? '');
             return { sender, model, text };
             });
@@ -283,7 +314,8 @@ export default function ChatPage() {
         } catch {
             /* noop */
         }
-    }, [userName, userToken]);
+        }, [userName]);
+
 
 
     useEffect(() => {
@@ -295,7 +327,7 @@ export default function ChatPage() {
     }, [conversationId, chatHistory.length, hydrateConversation]);
     // Fetch the list of conversations
     const loadConversations = useCallback(async () => {
-    if (!userToken) return;
+        if (!userToken) return;
         try {
             setIsLoadingConvs(true);
             const token =
@@ -307,44 +339,48 @@ export default function ChatPage() {
             );
             if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
 
-            const data = await res.json();
+            const data: ConversationListResponse = await res.json();
 
             // Accept many shapes: [], {items}, {conversations}, {data}, {data:{items}}
-            const raw =
+            const raw: ConversationListItem[] =
             Array.isArray(data) ? data
-            : Array.isArray(data?.items) ? data.items
-            : Array.isArray(data?.conversations) ? data.conversations
-            : Array.isArray(data?.data) ? data.data
-            : Array.isArray(data?.data?.items) ? data.data.items
-            : [];
+            : Array.isArray((data as { items?: ConversationListItem[] })?.items)
+                ? (data as { items: ConversationListItem[] }).items
+            : Array.isArray((data as { conversations?: ConversationListItem[] })?.conversations)
+                ? (data as { conversations: ConversationListItem[] }).conversations
+            : Array.isArray((data as { data?: ConversationListItem[] })?.data)
+                ? (data as { data: ConversationListItem[] }).data
+            : Array.isArray((data as { data?: { items?: ConversationListItem[] } })?.data?.items)
+                ? ((data as { data: { items: ConversationListItem[] } }).data.items)
+                : [];
 
             // Normalize & sort newest-first by updated_at/created_at
-            const normalized = raw
-            .map((c: any) => ({
+            const normalized: ConversationListItem[] = raw
+            .map((c) => ({
                 id: String(c.id),
                 title: (c.title && String(c.title)) || 'Untitled',
-                updated_at: c.updated_at || c.updatedAt || c.last_updated || null,
-                created_at: c.created_at || c.createdAt || null,
+                updated_at: c.updated_at ?? (c as { updatedAt?: string })?.updatedAt ?? (c as { last_updated?: string })?.last_updated,
+                created_at: c.created_at ?? (c as { createdAt?: string })?.createdAt ?? null,
             }))
-            .filter((c: any) => !!c.id)
-            .sort((a: any, b: any) => {
-                const ta = Date.parse(a.updated_at || a.created_at || 0);
-                const tb = Date.parse(b.updated_at || b.created_at || 0);
+            .filter((c) => !!c.id)
+            .sort((a, b) => {
+                const ta = Date.parse(a.updated_at || a.created_at || '');
+                const tb = Date.parse(b.updated_at || b.created_at || '');
                 return (tb || 0) - (ta || 0);
             });
 
             // De-duplicate by id (in case WS meta already injected a row)
-            const dedup: Record<string, true> = {};
-            const unique = normalized.filter((c: any) => (dedup[c.id] ? false : (dedup[c.id] = true)));
+            const seen: Record<string, true> = {};
+            const unique = normalized.filter((c) => (seen[c.id] ? false : (seen[c.id] = true)));
 
             setConversations(unique);
-
-        } catch (e) {
-            console.warn('loadConversations error:', e);
+        } catch {
+            /* noop */
         } finally {
             setIsLoadingConvs(false);
         }
     }, [userToken]);
+
     useEffect(() => {
         if (userToken) {
             loadConversations();
