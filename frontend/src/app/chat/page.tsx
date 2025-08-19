@@ -301,7 +301,8 @@ export default function ChatPage() {
         setChatHistory([]);
         setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
 
-        await hydrateConversation(id);            // <-- NEW
+        // NEW: Fetch and display the messages for the selected conversation ID
+        await hydrateConversation(id);
 
         if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
             ws.current.close(1000, 'switch-conversation');
