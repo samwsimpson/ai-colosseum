@@ -300,8 +300,8 @@ export default function ChatPage() {
         setShowSummary(false);
         setChatHistory([]);
         setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
-
-        // NEW: Fetch and display the messages for the selected conversation ID
+        
+        // NEW: We need to hydrate the conversation messages first, before reconnecting.
         await hydrateConversation(id);
 
         if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
@@ -310,7 +310,6 @@ export default function ChatPage() {
         ws.current = null;
         setTimeout(() => setWsReconnectNonce(n => n + 1), 50);
     };
-
     // keep the sidebar list fresh
     useEffect(() => {
         if (userToken) loadConversations();
