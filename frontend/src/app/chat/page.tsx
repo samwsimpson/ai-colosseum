@@ -350,10 +350,7 @@ export default function ChatPage() {
         try {
         setIsLoadingConvs(true);
 
-            const res = await apiFetch(
-            `/api/conversations/by_token?token=${encodeURIComponent(token)}&limit=100`,
-            { cache: 'no-store' }
-            );
+            const res = await apiFetch(`/api/conversations/by_token?limit=100`, { cache: 'no-store' });
             if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
 
             const data: ConversationListResponse = await res.json();

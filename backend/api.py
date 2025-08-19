@@ -1,7 +1,7 @@
 import sys
 import traceback
 print("TOP OF api.py: Script starting...", file=sys.stderr)
-from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from fastapi import Request, Response
@@ -22,7 +22,7 @@ import stripe
 from google_auth_oauthlib.flow import Flow
 from openai import AsyncOpenAI
 from collections import defaultdict
-from fastapi import Header, HTTPException
+from fastapi import Header
 
 OPENAI_SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -183,16 +183,6 @@ print("FIRESTORE_CLIENT_INITIALIZED: db = firestore.AsyncClient()", file=sys.std
 
 # --- Conversations API ---
 
-async def _user_from_bearer(authorization: str | None):
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Missing bearer token")
-    token = authorization.split(" ", 1)[1]
-    # <-- use your existing JWT verify function here -->
-    user = await verify_and_get_user(token)  # if your helper is sync, remove await
-    if not user or not user.get("id"):
-        raise HTTPException(status_code=401, detail="Invalid token")
-    return user
-
 @app.get("/conversations")
 async def list_conversations(user=Depends(get_current_user), limit: int = 30):    
 
@@ -306,7 +296,6 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
     return conv_ref, (doc.to_dict() or {})
 
 async def save_message(conv_ref, *, role: str, sender: str, content: str):
-    from google.cloud import firestore
     now = firestore.SERVER_TIMESTAMP
 
     # save the message
@@ -377,7 +366,6 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
 # === Conversations REST ===
 from typing import Optional, List
 from pydantic import BaseModel, constr
-from google.cloud import firestore
 
 def _ts_iso(v):
     if v is None:
@@ -417,10 +405,18 @@ async def list_conversations(user=Depends(get_current_user)):
     return {"items": items}
 
 from typing import Dict
-from google.cloud import firestore
 
 @app.get("/api/conversations/by_token")
-async def list_conversations_by_token(token: str, limit: int = 100):
+async def list_conversations_by_token(
+    token: Optional[str] = None,
+    limit: int = 100,
+    authorization: Optional[str] = Header(default=None),
+):
+    # accept either ?token=... or Authorization: Bearer ...
+    if not token and authorization and authorization.lower().startswith("bearer "):
+        token = authorization.split(" ", 1)[1]
+    if not token:
+        raise HTTPException(status_code=401, detail="Missing token")
     user = await get_current_user(token=token)
     # --- AUTO-BACKFILL-ONCE: run per-user on first visit if enabled ---
     import os
@@ -547,11 +543,20 @@ async def export_conversation(conv_id: str, user=Depends(get_current_user)):
             "content": d.get("content"),
             "timestamp": _ts_iso(d.get("created_at")),  # ← was 'timestamp'
         })
+    return {
+        "id": conv_id,
+        "title": conv.get("title") or "Conversation",
+        "summary": conv.get("summary") or "",
+        "message_count": conv.get("message_count", len(msgs)),
+        "created_at": _ts_iso(conv.get("created_at")),
+        "updated_at": _ts_iso(conv.get("updated_at")),
+        "messages": msgs,
+    }
+
 
 # ---------- ADMIN BACKFILL (one-off) ----------
 from typing import Dict, List, Optional, Tuple
 from pydantic import BaseModel
-from fastapi import Header
 
 class BackfillRequest(BaseModel):
     user_id: str
@@ -615,7 +620,7 @@ async def admin_backfill_conversations(
     limit = max(1, min(payload.limit, 5000))
 
     base = db.collection("conversations")
-    candidate_refs: Dict[str, any] = {}
+    candidate_refs: Dict[str, Any] = {}
 
     # a) by user_id
     q1 = base.where("user_id", "==", user_id).limit(limit)
@@ -791,18 +796,6 @@ async def _auto_backfill_for_user(user_id: str, user_email: str | None, limit: i
             updated += 1
 
     return updated
-# ---------- /ADMIN BACKFILL ----------
-
-    return {
-        "id": conv_id,
-        "title": conv.get("title") or "Conversation",
-        "summary": conv.get("summary") or "",
-        "message_count": conv.get("message_count", len(msgs)),
-        "created_at": _ts_iso(conv.get("created_at")),
-        "updated_at": _ts_iso(conv.get("updated_at")),
-        "messages": msgs,
-    }
-# === end Conversations REST ===
 
 @app.get("/api/users/me/usage")
 async def get_user_usage(current_user: dict = Depends(get_current_user)):
@@ -1177,7 +1170,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             "subscription_id": user_data.get("subscription_id"),
         })
         # --- Ensure conversation doc is materialized & listable ---
-        from google.cloud import firestore
 
         try:
             snap = await conv_ref.get()
