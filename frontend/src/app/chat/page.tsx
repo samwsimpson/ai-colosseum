@@ -485,9 +485,9 @@ export default function ChatPage() {
 
 
         // Build the URL safely
-        var base = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
         let u: URL;
         try {
+            const base = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
             u = new URL(base); // e.g. https://api.aicolosseum.app
         } catch {
             u = new URL('http://localhost:8000');
