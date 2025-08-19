@@ -198,6 +198,31 @@ export default function ChatPage() {
 
     // Sidebar + conversation list
     const [conversations, setConversations] = useState<ConversationListItem[]>([]);
+    // Hydrate the list from localStorage on mount (if available)
+    useEffect(() => {
+    if (typeof window === 'undefined') return; // only run in the browser
+    try {
+        const cached = localStorage.getItem('conversations_cache');
+        if (cached) {
+        const parsed = JSON.parse(cached) as ConversationListItem[];
+        if (Array.isArray(parsed)) {
+            setConversations(parsed);
+        }
+        }
+    } catch {
+        // ignore parse errors
+    }
+    }, []);
+
+    // Persist the list to localStorage whenever it changes
+    useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+        localStorage.setItem('conversations_cache', JSON.stringify(conversations));
+    } catch {
+        // ignore storage errors
+    }
+    }, [conversations]);
     const [isLoadingConvs, setIsLoadingConvs] = useState(false);
     const chatContainerRef = useRef<HTMLDivElement | null>(null);
 
@@ -347,56 +372,72 @@ export default function ChatPage() {
     try {
         setIsLoadingConvs(true);
 
-        // Let apiFetch handle 401 -> /api/refresh -> retry via cookie
-        // Let apiFetch handle 401 -> /api/refresh -> retry via cookie+Authorization
-        const res = await apiFetch(`/api/conversations/by_token?limit=100`, { cache: 'no-store' });
+        // Obtain a token either from localStorage or from the user context
+        const token =
+        typeof window !== 'undefined'
+            ? localStorage.getItem('access_token') || userToken || null
+            : null;
 
-
-
-
-            if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
-
-            const data: ConversationListResponse = await res.json();
-
-            // Accept many shapes: [], {items}, {conversations}, {data}, {data:{items}}
-            const raw: ConversationListItem[] =
-            Array.isArray(data) ? data
-            : Array.isArray((data as { items?: ConversationListItem[] })?.items)
-                ? (data as { items: ConversationListItem[] }).items
-            : Array.isArray((data as { conversations?: ConversationListItem[] })?.conversations)
-                ? (data as { conversations: ConversationListItem[] }).conversations
-            : Array.isArray((data as { data?: ConversationListItem[] })?.data)
-                ? (data as { data: ConversationListItem[] }).data
-            : Array.isArray((data as { data?: { items?: ConversationListItem[] } })?.data?.items)
-                ? ((data as { data: { items: ConversationListItem[] } }).data.items)
-                : [];
-
-            // Normalize & sort newest-first by updated_at/created_at
-            const normalized: ConversationListItem[] = raw
-            .map((c) => ({
-                id: String(c.id),
-                title: (c.title && String(c.title)) || 'Untitled',
-                updated_at: c.updated_at ?? (c as { updatedAt?: string })?.updatedAt ?? (c as { last_updated?: string })?.last_updated,
-                created_at: c.created_at ?? (c as { createdAt?: string })?.createdAt ?? null,
-            }))
-            .filter((c) => !!c.id)
-            .sort((a, b) => {
-                const ta = Date.parse(a.updated_at || a.created_at || '');
-                const tb = Date.parse(b.updated_at || b.created_at || '');
-                return (tb || 0) - (ta || 0);
-            });
-
-            // De-duplicate by id (in case WS meta already injected a row)
-            const seen: Record<string, true> = {};
-            const unique = normalized.filter((c) => (seen[c.id] ? false : (seen[c.id] = true)));
-
-            setConversations(unique);
-        } catch {
-            /* noop */
-        } finally {
-            setIsLoadingConvs(false);
+        // If no token is available, do NOT wipe out the list
+        if (!token) {
+        return;
         }
-    }, []);
+
+        // Build the query string: include limit and token
+        const query = new URLSearchParams();
+        query.set('limit', '100');
+        query.set('token', token);
+
+        const res = await apiFetch(`/api/conversations/by_token?${query.toString()}`, {
+        cache: 'no-store',
+        });
+
+        if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
+
+        const data: ConversationListResponse = await res.json();
+
+        // Normalize and sort (same logic as before)
+        const raw: ConversationListItem[] =
+        Array.isArray(data)
+            ? data
+            : Array.isArray((data as { items?: ConversationListItem[] })?.items)
+            ? (data as { items: ConversationListItem[] }).items
+            : Array.isArray((data as { conversations?: ConversationListItem[] })?.conversations)
+            ? (data as { conversations: ConversationListItem[] }).conversations
+            : Array.isArray((data as { data?: ConversationListItem[] })?.data)
+            ? (data as { data: ConversationListItem[] }).data
+            : Array.isArray((data as { data?: { items?: ConversationListItem[] } })?.data?.items)
+            ? ((data as { data: { items: ConversationListItem[] } }).data.items)
+            : [];
+
+        const normalized: ConversationListItem[] = raw
+        .map((c) => ({
+            id: String(c.id),
+            title: (c.title && String(c.title)) || 'Untitled',
+            updated_at:
+            c.updated_at ??
+            (c as { updatedAt?: string }).updatedAt ??
+            (c as { last_updated?: string }).last_updated,
+            created_at: c.created_at ?? (c as { createdAt?: string }).createdAt ?? null,
+        }))
+        .filter((c) => !!c.id)
+        .sort((a, b) => {
+            const ta = Date.parse((a.updated_at as any) || (a.created_at as any) || '');
+            const tb = Date.parse((b.updated_at as any) || (b.created_at as any) || '');
+            return (tb || 0) - (ta || 0);
+        });
+
+        const seen: Record<string, true> = {};
+        const unique = normalized.filter((c) => (seen[c.id] ? false : (seen[c.id] = true)));
+
+        setConversations(unique);
+    } catch {
+        // ignore errors and leave the existing list intact
+    } finally {
+        setIsLoadingConvs(false);
+    }
+    }, [userToken]);
+
 
     useEffect(() => {
         if (userToken) {
