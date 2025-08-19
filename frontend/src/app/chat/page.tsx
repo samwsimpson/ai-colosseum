@@ -204,10 +204,10 @@ export default function ChatPage() {
     try {
         const cached = localStorage.getItem('conversations_cache');
         if (cached) {
-        const parsed = JSON.parse(cached) as ConversationListItem[];
-        if (Array.isArray(parsed)) {
-            setConversations(parsed);
-        }
+            const parsed = JSON.parse(cached) as ConversationListItem[];
+            if (Array.isArray(parsed)) {
+                setConversations(parsed);
+            }
         }
     } catch {
         // ignore parse errors
@@ -216,12 +216,12 @@ export default function ChatPage() {
 
     // Persist the list to localStorage whenever it changes
     useEffect(() => {
-    if (typeof window === 'undefined') return;
-    try {
-        localStorage.setItem('conversations_cache', JSON.stringify(conversations));
-    } catch {
-        // ignore storage errors
-    }
+        if (typeof window === 'undefined') return;
+        try {
+            localStorage.setItem('conversations_cache', JSON.stringify(conversations));
+        } catch {
+            // ignore storage errors
+        }
     }, [conversations]);
     const [isLoadingConvs, setIsLoadingConvs] = useState(false);
     const chatContainerRef = useRef<HTMLDivElement | null>(null);
@@ -372,18 +372,18 @@ export default function ChatPage() {
     try {
         setIsLoadingConvs(true);
 
-        // Obtain a token either from localStorage or from the user context
+        // Pull a token from localStorage or from the user context
         const token =
         typeof window !== 'undefined'
             ? localStorage.getItem('access_token') || userToken || null
             : null;
 
-        // If no token is available, do NOT wipe out the list
+        // If no token, bail out — don’t clear the sidebar
         if (!token) {
         return;
         }
 
-        // Build the query string: include limit and token
+        // Build query with limit and token
         const query = new URLSearchParams();
         query.set('limit', '100');
         query.set('token', token);
@@ -391,12 +391,11 @@ export default function ChatPage() {
         const res = await apiFetch(`/api/conversations/by_token?${query.toString()}`, {
         cache: 'no-store',
         });
-
         if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
 
         const data: ConversationListResponse = await res.json();
 
-        // Normalize and sort (same logic as before)
+        // Flatten various response shapes
         const raw: ConversationListItem[] =
         Array.isArray(data)
             ? data
@@ -406,10 +405,13 @@ export default function ChatPage() {
             ? (data as { conversations: ConversationListItem[] }).conversations
             : Array.isArray((data as { data?: ConversationListItem[] })?.data)
             ? (data as { data: ConversationListItem[] }).data
-            : Array.isArray((data as { data?: { items?: ConversationListItem[] } })?.data?.items)
-            ? ((data as { data: { items: ConversationListItem[] } }).data.items)
+            : Array.isArray(
+                (data as { data?: { items?: ConversationListItem[] } })?.data?.items
+            )
+            ? (data as { data: { items: ConversationListItem[] } }).data.items
             : [];
 
+        // Normalize & sort by updated_at / created_at (without using `any`)
         const normalized: ConversationListItem[] = raw
         .map((c) => ({
             id: String(c.id),
@@ -422,21 +424,24 @@ export default function ChatPage() {
         }))
         .filter((c) => !!c.id)
         .sort((a, b) => {
-            const ta = Date.parse((a.updated_at as any) || (a.created_at as any) || '');
-            const tb = Date.parse((b.updated_at as any) || (b.created_at as any) || '');
+            const ta = Date.parse(String((a.updated_at ?? a.created_at) || ''));
+            const tb = Date.parse(String((b.updated_at ?? b.created_at) || ''));
             return (tb || 0) - (ta || 0);
         });
 
+        // De-duplicate and update state
         const seen: Record<string, true> = {};
-        const unique = normalized.filter((c) => (seen[c.id] ? false : (seen[c.id] = true)));
-
+        const unique = normalized.filter((c) =>
+        seen[c.id] ? false : (seen[c.id] = true)
+        );
         setConversations(unique);
     } catch {
-        // ignore errors and leave the existing list intact
+        // Ignore errors; keep existing list
     } finally {
         setIsLoadingConvs(false);
     }
     }, [userToken]);
+
 
 
     useEffect(() => {
