@@ -404,21 +404,19 @@ export default function ChatPage() {
     }, [message, userName, addMessageToChat]);
 
     // Create a brand-new conversation
-const handleNewConversation = () => {
+    const handleNewConversation = () => {
         try { localStorage.removeItem('conversationId'); } catch {}
         setConversationId(null);
         setLoadedSummary(null);
         setShowSummary(false);
         setChatHistory([]);
-        setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
         if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
             ws.current.close(1000, 'new-conversation');
         }
         ws.current = null;
-        setTimeout(() => {
-            setWsReconnectNonce(n => n + 1);
-            loadConversations(); // Add this line to force a refresh
-        }, 50);
+        // The WebSocket reconnect effect will fire automatically because conversationId changed to null.
+        // We do not need a manual timeout or nonce bump here.
     };
 
     // Rename the selected conversation
@@ -481,45 +479,7 @@ const handleNewConversation = () => {
         // define this once near your interfaces (or just above the effect)
         type SidebarConvo = ConversationListItem & { created_at?: string | null };
 
-        // (place this inside the effect that connects the WebSocket, before constructing the WS URL)
-        if (userToken && !conversationId) {
-            (async () => {
-                try {
-                const token =
-                    (typeof window !== "undefined" && localStorage.getItem("access_token")) ||
-                    userToken ||
-                    "";
-
-                const res = await apiFetch(
-                    `/api/conversations/by_token?token=${encodeURIComponent(token)}&limit=100`,
-                    { cache: "no-store" }
-                );
-
-                if (res.ok) {
-                    const data = await res.json();
-
-                    // typed items (no 'any')
-                    const items: SidebarConvo[] = Array.isArray(data)
-                        ? (data as SidebarConvo[])
-                        : ((data.items ?? []) as SidebarConvo[]);
-
-                    // pick the newest by updated_at (fallback to created_at)
-                    items.sort((a: SidebarConvo, b: SidebarConvo) => {
-                        const keyA = String(a.updated_at ?? a.created_at ?? "");
-                        const keyB = String(b.updated_at ?? b.created_at ?? "");
-                        return keyB.localeCompare(keyA); // desc
-                    });
-
-                    if (items[0]?.id) {
-                        setConversationId(items[0].id);
-                        return; // next render will reconnect WS bound to this id
-                    }
-                }
-            } catch {
-            // ignore and let WS create a fresh conversation
-            }
-            // fall through; no prior conv — let WS create one
-        })();        
+      
     }
 
 
@@ -562,14 +522,14 @@ const handleNewConversation = () => {
         
                 // --- initial handshake ---
                 const initialPayload: Record<string, unknown> = {
-                    
                     user_name: userName,
                 };
                 if (conversationId) {
-                    initialPayload.conversation_id = conversationId; // reuse exact convo
-                } else {
-                    initialPayload.resume_last = true;               // ask server to resume latest
+                    // If we have an ID, explicitly tell the server to reuse it.
+                    initialPayload.conversation_id = conversationId;
                 }
+                // If conversationId is null, the server's 'get_or_create_conversation' function
+                // will automatically create a new one for us. We don't need 'resume_last'.
                 currentWs.send(JSON.stringify(initialPayload));
                 // --- end handshake ---
         
