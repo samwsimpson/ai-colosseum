@@ -251,10 +251,20 @@ export default function ChatPage() {
     // Hydrate messages when we already have an id (e.g., page reload / return)
     // eslint-disable-next-line react-hooks/exhaustive-deps
     useEffect(() => {
-    if (conversationId && chatHistory.length === 0) {
-        hydrateConversation(conversationId);
-    }
-    }, [conversationId]);
+        // Load the saved conversation ID from local storage when the component mounts.
+        const savedId = localStorage.getItem('conversationId');
+        if (savedId) {
+            setConversationId(savedId);
+        }
+    }, []);
+
+    useEffect(() => {
+        // If there's an active conversation ID and the chat history is empty,
+        // it's a signal that we need to hydrate the chat from the backend.
+        if (conversationId && chatHistory.length === 0) {
+            hydrateConversation(conversationId);
+        }
+    }, [conversationId, chatHistory.length, hydrateConversation]);
     // Fetch the list of conversations
     const loadConversations = useCallback(async () => {
     if (!userToken) return;
@@ -300,20 +310,25 @@ export default function ChatPage() {
         setShowSummary(false);
         setChatHistory([]);
         setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
-        
-        // NEW: We need to hydrate the conversation messages first, before reconnecting.
-        await hydrateConversation(id);
 
+        // First, check if there's an existing WebSocket connection and close it.
+        // This ensures the old connection is terminated before a new one is established.
         if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
             ws.current.close(1000, 'switch-conversation');
         }
-        ws.current = null;
-        setTimeout(() => setWsReconnectNonce(n => n + 1), 50);
+
+        // Now, we load the conversation messages from the backend.
+        // This is a crucial step to ensure the chat history is displayed.
+        await hydrateConversation(id);
+        
+        // Finally, we signal the application to establish a new WebSocket connection
+        // for the selected conversation.
+        setWsReconnectNonce(n => n + 1);
     };
     // keep the sidebar list fresh
     useEffect(() => {
         if (userToken) loadConversations();
-    }, [userToken, conversationId, loadConversations]);
+    }, [userToken, loadConversations]);
 
     // Handle redirection to sign-in page when userToken is not present
     useEffect(() => {
