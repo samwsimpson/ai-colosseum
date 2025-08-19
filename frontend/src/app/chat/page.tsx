@@ -67,22 +67,22 @@ type ConversationListResponse =
   | { data: ConversationListItem[] }
   | { data: { items: ConversationListItem[] } };
 
-// Base REST API (same host as WS when NEXT_PUBLIC_API_URL is not provided)
+// Base REST API (mirror WS host but force http/https for REST)
 function resolveApiBase(): string {
   const fromEnv = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '');
   if (fromEnv) return fromEnv;
 
-  // Fall back to the WS host and flip ws:// -> http://, wss:// -> https://
   const wsBase = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
   try {
     const u = new URL(wsBase);
-    u.protocol = (u.protocol === 'wss:') ? 'https:' : 'http:';
+    // Flip any ws/wss to http/https for REST
+    if (u.protocol === 'ws:') u.protocol = 'http:';
+    else if (u.protocol === 'wss:') u.protocol = 'https:';
     u.pathname = '';
     u.search = '';
     u.hash = '';
     return u.toString().replace(/\/+$/, '');
   } catch {
-    // Final fallback to local dev
     return 'http://localhost:8000';
   }
 }
