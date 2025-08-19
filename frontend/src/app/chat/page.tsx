@@ -348,7 +348,8 @@ export default function ChatPage() {
         setIsLoadingConvs(true);
 
         // Let apiFetch handle 401 -> /api/refresh -> retry via cookie
-        const res = await apiFetch(`${API_BASE}/api/conversations`, { cache: 'no-store' });
+        const res = await apiFetch(`/api/conversations/by_token?limit=100`, { cache: 'no-store' });
+
 
 
             if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
