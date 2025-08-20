@@ -1030,7 +1030,7 @@ const loadConversations = useCallback(async () => {
                     >
 
                         <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-2 min-w-0 pr-16 md:pr-20">
+                            <div className="flex items-center gap-2 min-w-0 pr-28 md:pr-32">
                             {manageMode && (
                                 <input
                                 type="checkbox"
@@ -1051,24 +1051,23 @@ const loadConversations = useCallback(async () => {
                                     manageMode
                                     ? 'hidden'
                                     : 'opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto'
-                                } absolute right-3 top-2 transition-opacity flex flex-col gap-1 items-end`}
+                                } absolute right-3 top-2 w-24 transition-opacity flex flex-col gap-1 items-stretch`}
                                 >
                                 <button
                                     onClick={(e) => { e.stopPropagation(); handleRenameConversation(c.id); }}
-                                    className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+                                    className="w-full text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
                                     title="Rename"
                                 >
                                     Rename
                                 </button>
                                 <button
                                     onClick={(e) => { e.stopPropagation(); handleDeleteConversation(c.id); }}
-                                    className="text-xs px-2 py-1 rounded bg-red-700 hover:bg-red-600"
+                                    className="w-full text-xs px-2 py-1 rounded bg-red-700 hover:bg-red-600"
                                     title="Delete"
                                 >
                                     Delete
                                 </button>
                             </div>
-
                         </div>
 
                         {(c.updated_at || c.created_at) && (
