@@ -18,6 +18,12 @@ from google.auth.transport import requests as google_requests
 from google.oauth2.id_token import verify_oauth2_token
 from google.cloud.firestore_v1 import Increment
 from google.cloud import firestore  # for Query.DESCENDING
+# --- Firestore client (async) ---
+# Cloud Run provides default credentials, so no explicit key is required.
+# Your code uses `await` on Firestore calls, so use AsyncClient (not the sync Client).
+db = firestore.AsyncClient()
+print("FIRESTORE_CLIENT_INITIALIZED: created firestore.AsyncClient()", file=sys.stderr)
+
 import stripe
 from google_auth_oauthlib.flow import Flow
 from openai import AsyncOpenAI
@@ -316,7 +322,6 @@ async def startup_event():
         print("STARTUP EVENT: Firestore initialization complete.")
     except Exception as e:
         print(f"STARTUP EVENT: Failed to initialize Firestore collections: {e}")
-        raise
 
 @app.get("/api/users/me")
 async def read_users_me(current_user: dict = Depends(get_current_user)):
