@@ -937,7 +937,7 @@ async def refresh_access_token(request: Request):
         {"sub": sub},
         expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
     )
-    return {"access_token": access_token, "token_type": "bearer"}
+    return {"token": access_token, "access_token": access_token, "token_type": "bearer"}
 
 @app.post("/api/logout")
 async def logout(response: Response):
