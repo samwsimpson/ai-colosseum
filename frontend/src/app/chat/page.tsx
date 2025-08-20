@@ -104,7 +104,6 @@ function buildAuthHeaders(userToken?: string | null): Headers {
 
 // Helper: fetch with Authorization header and 1x retry on 401 using /api/refresh
 async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
-  // Always build absolute URL against API_BASE
   const url =
     typeof pathOrUrl === 'string'
       ? (pathOrUrl.startsWith('http')
@@ -120,7 +119,6 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
   let res = await fetch(url, { ...init, headers, credentials: 'include' });
   if (res.status !== 401) return res;
 
-  // try to refresh access token
   const rr = await fetch(`${API_BASE}/api/refresh`, {
     method: 'POST',
     credentials: 'include',
@@ -135,6 +133,7 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
   }
   return res;
 }
+
 
 type AgentName = 'ChatGPT' | 'Claude' | 'Gemini' | 'Mistral';
 const ALLOWED_AGENTS: AgentName[] = ['ChatGPT', 'Claude', 'Gemini', 'Mistral'];
@@ -619,54 +618,43 @@ const loadConversations = useCallback(async () => {
 
     // Rename the selected conversation
     const handleRenameConversation = async (id: string) => {
-        const current = conversations.find((c) => c.id === id);
-        const proposed = window.prompt('Rename conversation to:', current?.title ?? '');
-        if (!proposed || !proposed.trim()) return;
+    if (!userToken) return;
 
-        try { await refreshTokenIfNeeded(true); } catch {}
+    const current = conversations.find((c) => c.id === id);
+    const proposed = window.prompt('Rename conversation to:', current?.title ?? '');
+    if (!proposed || !proposed.trim()) return;
 
-        const res = await apiFetch(`/api/conversations/${id}`, {
-            method: 'PATCH',
-            headers: buildAuthHeaders(userToken ?? undefined),
-            body: JSON.stringify({ title: proposed.trim() }),
-        });
-
-        if (!res.ok) {
-            const txt = await res.text().catch(() => '');
-            alert(`Rename failed (${res.status}). ${txt || ''}`.trim());
-            return;
-        }
-
-        setConversations(prev =>
-            prev.map(c => (c.id === id ? { ...c, title: proposed.trim() } : c))
-        );
-        await loadConversations();
-        };
-
-        // Delete a conversation
-        const handleDeleteConversation = async (id: string) => {
-        if (!window.confirm('Delete this conversation? This cannot be undone.')) return;
-        try { await refreshTokenIfNeeded(true); } catch {}
-
-        const res = await apiFetch(`/api/conversations/${id}`, {
-            method: 'DELETE',
-            headers: buildAuthHeaders(userToken ?? undefined),
-        });
-
-        if (!res.ok) {
-            const txt = await res.text().catch(() => '');
-            alert(`Delete failed (${res.status}). ${txt || ''}`.trim());
-            return;
-        }
-
-        setConversations(prev => prev.filter(c => c.id !== id));
-        if (conversationId === id) {
-            try { localStorage.removeItem('conversationId'); } catch {}
-            handleNewConversation();
-        } else {
-            await loadConversations();
-        }
+    const res = await apiFetch(`/api/conversations/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: proposed.trim() }),
+    });
+    if (!res.ok) {
+        alert('Rename failed.');
+        return;
+    }
+    await loadConversations();
     };
+
+    // Delete a conversation
+    const handleDeleteConversation = async (id: string) => {
+    if (!userToken) return;
+    if (!window.confirm('Delete this conversation? This cannot be undone.')) return;
+
+    const res = await apiFetch(`/api/conversations/${id}`, { method: 'DELETE' });
+    if (!res.ok) {
+        alert('Delete failed.');
+        return;
+    }
+
+    if (conversationId === id) {
+        try { localStorage.removeItem('conversationId'); } catch {}
+        handleNewConversation();
+    } else {
+        await loadConversations();
+    }
+    };
+
 
 
 

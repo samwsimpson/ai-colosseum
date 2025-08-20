@@ -143,7 +143,8 @@ if ENABLE_APP_CORS == "1":
         allow_headers=["*"],
     )
 
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/google-auth")
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/google-auth")
+
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
@@ -182,43 +183,9 @@ class Token(BaseModel):
     user_name: str
     user_id: str
 
-# Initialize Firestore DB client without explicit credentials
-db = firestore.AsyncClient()
-print("FIRESTORE_CLIENT_INITIALIZED: db = firestore.AsyncClient()", file=sys.stderr)
 
-# --- Conversations API ---
 
-@app.get("/conversations")
-async def list_conversations(user=Depends(get_current_user), limit: int = 30):    
 
-    col = db.collection("conversations")
-    # newest first
-    q = col.where("user_id", "==", user["id"]).order_by("updated_at", direction=firestore.Query.DESCENDING).limit(limit)
-
-    items = []
-    async for doc in q.stream():
-        d = doc.to_dict() or {}
-        items.append({
-            "id": doc.id,
-            "title": d.get("title") or "New conversation",
-            "updated_at": (d.get("updated_at") or d.get("created_at")),
-        })
-    return {"items": items}
-
-@app.patch("/conversations/{conv_id}")
-async def rename_conversation(conv_id: str, body: dict, user=Depends(get_current_user)):
-    
-    new_title = (body or {}).get("title", "")
-    new_title = new_title.strip()[:120] or "Untitled"
-
-    ref = db.collection("conversations").document(conv_id)
-    # enforce ownership
-    snap = await ref.get()
-    if not snap.exists or (snap.to_dict() or {}).get("user_id") != user["id"]:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-    await ref.update({"title": new_title, "updated_at": datetime.utcnow()})
-    return {"ok": True}
 
 def create_access_token(data: dict, expires_delta: Union[timedelta, None] = None):
     to_encode = data.copy()
