@@ -396,9 +396,7 @@ export default function ChatPage() {
             return { sender, model, text };
             });
 
-            setChatHistory(prev =>
-                (prev.length > 0 && normalized.length === 0) ? prev : normalized
-            );
+            setChatHistory(prev => (prev.length === 0 ? normalized : prev));
         } catch {
             /* noop */
         }
@@ -575,10 +573,15 @@ const loadConversations = useCallback(async () => {
     // Use useCallback to memoize the function, preventing unnecessary re-renders
     const addMessageToChat = useCallback((msg: { sender: string; text: string }) => {
         const cleanSender = (msg.sender || '').trim();
-        setChatHistory(prev => [
-            ...prev,
-            { sender: cleanSender, model: cleanSender, text: msg.text }
-        ]);
+        setChatHistory(prev => {
+            const next = [
+                ...prev,
+                { sender: cleanSender, model: cleanSender, text: msg.text }
+            ];
+            // Prevent hydrate from firing based on a stale length in racey WS events
+            chatLengthRef.current = next.length;
+            return next;
+        });
         // keep the newest message in view
         setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 0);
     }, []);
