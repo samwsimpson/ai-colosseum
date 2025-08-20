@@ -90,13 +90,15 @@ const API_BASE = resolveApiBase();
 
 // Always include an Authorization header using either localStorage or userToken fallback.
 // We'll pass this from handlers that need guaranteed auth even if localStorage isn't ready yet.
-function buildAuthHeaders(userToken?: string): Headers {
+function buildAuthHeaders(userToken?: string | null): Headers {
   const h = new Headers({ 'Content-Type': 'application/json' });
   const local = (typeof window !== 'undefined') ? localStorage.getItem('access_token') : null;
-  const tok = local || userToken || '';
+  // normalize null/undefined to an empty string for the header check
+  const tok = (local ?? userToken) ?? '';
   if (tok) h.set('Authorization', `Bearer ${tok}`);
   return h;
 }
+
 
 
 
@@ -312,13 +314,13 @@ export default function ChatPage() {
     try {
         // ensure we have a token (apiFetch will still 401->refresh->retry)
         const res = await apiFetch(`/api/conversations/${id}/messages?limit=200`, {
-        cache: 'no-store',
-        headers: buildAuthHeaders(userToken),
+            cache: 'no-store',
+            headers: buildAuthHeaders(userToken ?? undefined),
         });
         if (!res.ok) {
-        const txt = await res.text().catch(() => '');
-        console.warn('hydrate failed', res.status, txt);
-        return;
+            const txt = await res.text().catch(() => '');
+            console.warn('hydrate failed', res.status, txt);
+            return;
         }
 
             const data: unknown = await res.json();
@@ -624,9 +626,8 @@ const loadConversations = useCallback(async () => {
     try { await refreshTokenIfNeeded(true); } catch {}
 
     const res = await apiFetch(`/api/conversations/${id}`, {
-        method: 'PATCH',
-        headers: buildAuthHeaders(userToken),
-        body: JSON.stringify({ title: proposed.trim() }),
+        method: 'DELETE',
+        headers: buildAuthHeaders(userToken ?? undefined),
     });
 
     if (!res.ok) {
