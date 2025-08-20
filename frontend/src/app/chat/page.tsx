@@ -270,6 +270,8 @@ export default function ChatPage() {
     const isInitialRender = useRef(true);
     const chatEndRef = useRef<HTMLDivElement>(null);
     const ws = useRef<WebSocket | null>(null);
+    const chatLengthRef = useRef(0);
+    useEffect(() => { chatLengthRef.current = chatHistory.length; }, [chatHistory.length]);
     const pendingSends = useRef<Array<Record<string, unknown>>>([]);
     // Tracks reconnect backoff and any pending timer
     const reconnectRef = useRef<{ tries: number; timer: number | null }>({
@@ -819,7 +821,7 @@ const loadConversations = useCallback(async () => {
                         const rest = prev.filter(c => c.id !== id);
                         return [{ id, title: 'New conversation', updated_at: new Date().toISOString() }, ...rest];
                     });
-                    if (!chatHistory.length) { hydrateConversation(id); }
+                    if (chatLengthRef.current === 0) { hydrateConversation(id); }
                     loadConversations();
                     return;
                 }
@@ -836,7 +838,7 @@ const loadConversations = useCallback(async () => {
                         const chosen = curr || id;
                         try { localStorage.setItem('conversationId', chosen); } catch {}
 
-                        if (!chatHistory.length) { hydrateConversation(chosen); }
+                        if (chatLengthRef.current === 0) { hydrateConversation(chosen); }
                         return chosen;
                     });
                     return;
