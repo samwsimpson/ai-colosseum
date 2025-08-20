@@ -240,6 +240,7 @@ export default function ChatPage() {
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const chatContainerRef = useRef<HTMLDivElement | null>(null);
     const composerRef = useRef<HTMLDivElement | null>(null);
+    const textareaRef = useRef<HTMLTextAreaElement | null>(null);
     const [composerHeight, setComposerHeight] = useState<number>(120);
 
     useEffect(() => {
@@ -393,7 +394,9 @@ export default function ChatPage() {
             return { sender, model, text };
             });
 
-            setChatHistory(normalized);
+            setChatHistory(prev =>
+                (prev.length > 0 && normalized.length === 0) ? prev : normalized
+            );
         } catch {
             /* noop */
         }
@@ -612,6 +615,9 @@ const loadConversations = useCallback(async () => {
             // optimistic UI
             addMessageToChat({ sender: userName, text });
             setMessage('');
+            if (textareaRef.current) {
+                textareaRef.current.style.height = 'auto'; // collapse back to 1 line
+            }
         } catch (err) {
             console.error('Send failed:', err);
         }
@@ -1215,6 +1221,7 @@ const loadConversations = useCallback(async () => {
   <form onSubmit={handleSubmit} className="max-w-4xl mx-auto p-4 md:p-6">
     <div className="flex gap-4">
         <textarea
+            ref={textareaRef}
             rows={1}
             value={message}
             onChange={(e) => setMessage(e.target.value)}
@@ -1235,7 +1242,7 @@ const loadConversations = useCallback(async () => {
         />      
         <button
             type="submit"
-            className="px-4 py-2 md:px-6 md:py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 transition-colors duration-200 text-sm"
+            className="h-11 md:h-12 px-4 md:px-6 self-end bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 transition-colors duration-200 text-sm"
             disabled={!userName}
         >
             Send
