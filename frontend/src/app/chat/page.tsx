@@ -1030,7 +1030,14 @@ const loadConversations = useCallback(async () => {
                     >
 
                         <div className="flex items-center justify-between gap-2">
-                            <div className="flex items-center gap-2 min-w-0 pr-28 md:pr-32">
+                            <div
+                                className={`flex items-center gap-2 min-w-0 ${
+                                    manageMode
+                                    ? 'pr-2'
+                                    : 'pr-6 group-hover:pr-20 md:group-hover:pr-24 transition-[padding-right] duration-200'
+                                }`}
+                            >
+
                             {manageMode && (
                                 <input
                                 type="checkbox"
@@ -1051,8 +1058,9 @@ const loadConversations = useCallback(async () => {
                                     manageMode
                                     ? 'hidden'
                                     : 'opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto'
-                                } absolute right-3 top-2 w-24 transition-opacity flex flex-col gap-1 items-stretch`}
-                                >
+                                } absolute right-3 top-2 w-16 sm:w-20 transition-opacity flex flex-col gap-1 items-stretch`}
+                            >
+
                                 <button
                                     onClick={(e) => { e.stopPropagation(); handleRenameConversation(c.id); }}
                                     className="w-full text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
