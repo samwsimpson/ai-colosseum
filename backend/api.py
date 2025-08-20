@@ -888,8 +888,9 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
             # Local dev: cookie must be readable over http://localhost
             cookie_kwargs.update(secure=False, samesite="Lax")
         else:
-            # Prod: cross-site during Google redirect requires Secure + SameSite=None + domain
-            cookie_kwargs.update(secure=True, samesite="None", domain=".aicolosseum.app")
+            # Prod: host-only, first-party cookie (best for same-site subdomains)
+            # No domain attribute → cookie is bound to api.aicolosseum.app only.
+            cookie_kwargs.update(secure=True, samesite="Lax")
 
         response.set_cookie(**cookie_kwargs)
 
@@ -943,12 +944,23 @@ async def refresh_access_token(request: Request):
 
 @app.post("/api/logout")
 async def logout(response: Response):
+    # Delete possible old domain-scoped cookie
     response.delete_cookie(
         "refresh_token",
         path="/",
-        samesite="none"
+        domain=".aicolosseum.app",
+        secure=True,
+        samesite="None",
+    )
+    # Delete new host-only cookie
+    response.delete_cookie(
+        "refresh_token",
+        path="/",
+        secure=True,
+        samesite="Lax",
     )
     return {"ok": True}
+
 
 @app.post("/api/create-checkout-session")
 async def create_checkout_session(request: SubscriptionRequest, current_user: dict = Depends(get_current_user)):
