@@ -132,7 +132,9 @@ def cors_preflight(path: str):
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
-
+@app.get("/")
+async def root_ok():
+    return {"status": "ok"}
 # CORS: only enable in local/dev; prod relies on Google Load Balancer
 ENABLE_APP_CORS = os.getenv("ENABLE_APP_CORS", "0")  # "1" to enable locally
 
