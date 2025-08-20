@@ -198,23 +198,23 @@ export default function ChatPage() {
 
     // Sidebar + conversation list
     const [conversations, setConversations] = useState<ConversationListItem[]>([]);
-    // Hydrate the list from localStorage on mount (if available)
+    // Hydrate conversations from localStorage on mount
     useEffect(() => {
-    if (typeof window === 'undefined') return; // only run in the browser
-    try {
-        const cached = localStorage.getItem('conversations_cache');
-        if (cached) {
-            const parsed = JSON.parse(cached) as ConversationListItem[];
-            if (Array.isArray(parsed)) {
-                setConversations(parsed);
+        if (typeof window === 'undefined') return; // avoid SSR access
+        try {
+            const cached = localStorage.getItem('conversations_cache');
+            if (cached) {
+                const parsed = JSON.parse(cached) as ConversationListItem[];
+                if (Array.isArray(parsed)) {
+                    setConversations(parsed);
+                }
             }
+        } catch {
+            // ignore parse/storage errors
         }
-    } catch {
-        // ignore parse errors
-    }
     }, []);
 
-    // Persist the list to localStorage whenever it changes
+    // Persist conversations to localStorage whenever they change
     useEffect(() => {
         if (typeof window === 'undefined') return;
         try {
@@ -223,6 +223,7 @@ export default function ChatPage() {
             // ignore storage errors
         }
     }, [conversations]);
+
     const [isLoadingConvs, setIsLoadingConvs] = useState(false);
     const chatContainerRef = useRef<HTMLDivElement | null>(null);
 
@@ -368,80 +369,78 @@ export default function ChatPage() {
         }
     }, [conversationId, chatHistory.length, hydrateConversation]);
     // Fetch the list of conversations
-    const loadConversations = useCallback(async () => {
-        try {
-            setIsLoadingConvs(true);
+const loadConversations = useCallback(async () => {
+    try {
+        setIsLoadingConvs(true);
 
-            // Grab a token from localStorage or from the user context
-            const token =
-                typeof window !== 'undefined'
-                    ? localStorage.getItem('access_token') || userToken || null
-                    : null;
+        // Obtain a token from localStorage or userToken
+        const token =
+            typeof window !== 'undefined'
+                ? localStorage.getItem('access_token') || userToken || null
+                : null;
 
-            // If no token is available yet, bail out to avoid clearing the sidebar
-            if (!token) {
-                return;
-            }
+        // If no token, abort; prevents clearing the sidebar
+        if (!token) return;
 
-            // Build query with limit and token
-            const query = new URLSearchParams();
-            query.set('limit', '100');
-            query.set('token', token);
+        // Build query string with limit and token
+        const query = new URLSearchParams();
+        query.set('limit', '100');
+        query.set('token', token);
 
-            // Make the fetch using the query string; apiFetch will set Authorization header too
-            const res = await apiFetch(`/api/conversations/by_token?${query.toString()}`, {
-                cache: 'no-store',
+        const res = await apiFetch(`/api/conversations/by_token?${query.toString()}`, {
+            cache: 'no-store',
+        });
+        if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
+        const data: ConversationListResponse = await res.json();
+
+        // Flatten various response shapes
+        const raw: ConversationListItem[] =
+            Array.isArray(data)
+                ? data
+                : Array.isArray((data as { items?: ConversationListItem[] })?.items)
+                ? (data as { items: ConversationListItem[] }).items
+                : Array.isArray((data as { conversations?: ConversationListItem[] })?.conversations)
+                ? (data as { conversations: ConversationListItem[] }).conversations
+                : Array.isArray((data as { data?: ConversationListItem[] })?.data)
+                ? (data as { data: ConversationListItem[] }).data
+                : Array.isArray(
+                    (data as { data?: { items?: ConversationListItem[] } })?.data?.items,
+                  )
+                ? ((data as { data: { items: ConversationListItem[] } }).data.items)
+                : [];
+
+        // Normalize & sort by updated_at or created_at
+        const normalized: ConversationListItem[] = raw
+            .map((c) => ({
+                id: String(c.id),
+                title: (c.title && String(c.title)) || 'Untitled',
+                updated_at:
+                    c.updated_at ??
+                    (c as { updatedAt?: string }).updatedAt ??
+                    (c as { last_updated?: string }).last_updated,
+                created_at:
+                    c.created_at ?? (c as { createdAt?: string }).createdAt ?? null,
+            }))
+            .filter((c) => !!c.id)
+            .sort((a, b) => {
+                const ta = Date.parse(String(a.updated_at ?? a.created_at ?? ''));
+                const tb = Date.parse(String(b.updated_at ?? b.created_at ?? ''));
+                return (tb || 0) - (ta || 0);
             });
 
-            if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
-            const data: ConversationListResponse = await res.json();
+        // De-duplicate by id
+        const seen: Record<string, true> = {};
+        const unique = normalized.filter((c) =>
+            seen[c.id] ? false : (seen[c.id] = true),
+        );
+        setConversations(unique);
+    } catch {
+        // ignore errors
+    } finally {
+        setIsLoadingConvs(false);
+    }
+}, [userToken]);
 
-            // Accept many shapes: [], {items}, {conversations}, {data}, {data:{items}}
-            const raw: ConversationListItem[] =
-                Array.isArray(data)
-                    ? data
-                    : Array.isArray((data as { items?: ConversationListItem[] })?.items)
-                    ? (data as { items: ConversationListItem[] }).items
-                    : Array.isArray((data as { conversations?: ConversationListItem[] })?.conversations)
-                    ? (data as { conversations: ConversationListItem[] }).conversations
-                    : Array.isArray((data as { data?: ConversationListItem[] })?.data)
-                    ? (data as { data: ConversationListItem[] }).data
-                    : Array.isArray(
-                        (data as { data?: { items?: ConversationListItem[] } })?.data?.items
-                    )
-                    ? ((data as { data: { items: ConversationListItem[] } }).data.items)
-                    : [];
-
-            // Normalize & sort newest-first by updated_at/created_at, avoid using "any"
-            const normalized: ConversationListItem[] = raw
-                .map((c) => ({
-                    id: String(c.id),
-                    title: (c.title && String(c.title)) || 'Untitled',
-                    updated_at:
-                        c.updated_at ??
-                        (c as { updatedAt?: string }).updatedAt ??
-                        (c as { last_updated?: string }).last_updated,
-                    created_at: c.created_at ?? (c as { createdAt?: string }).createdAt ?? null,
-                }))
-                .filter((c) => !!c.id)
-                .sort((a, b) => {
-                    const ta = Date.parse(String(a.updated_at ?? a.created_at ?? ''));
-                    const tb = Date.parse(String(b.updated_at ?? b.created_at ?? ''));
-                    return (tb || 0) - (ta || 0);
-                });
-
-            // De-duplicate by id
-            const seen: Record<string, true> = {};
-            const unique = normalized.filter((c) =>
-                seen[c.id] ? false : (seen[c.id] = true)
-            );
-            setConversations(unique);
-        } catch {
-            // Ignore errors; leave the existing conversation list intact
-        } finally {
-            setIsLoadingConvs(false);
-        }
-    }, [userToken]);
 
 
 
@@ -606,7 +605,7 @@ export default function ChatPage() {
         const proposed = window.prompt('Rename conversation to:', current?.title ?? '');
         if (!proposed || !proposed.trim()) return;
 
-        const res = await apiFetch(`${API_BASE}/api/conversations/${id}`, {
+        const res = await apiFetch(`/api/conversations/${id}`, {
             method: 'PATCH',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ title: proposed.trim() }),
@@ -623,7 +622,7 @@ export default function ChatPage() {
         if (!userToken) return;
         if (!window.confirm('Delete this conversation? This cannot be undone.')) return;
 
-        const res = await apiFetch(`${API_BASE}/api/conversations/${id}`, {
+        const res = await apiFetch(`/api/conversations/${id}`, {
             method: 'DELETE',            
         });
         if (!res.ok) {
@@ -898,7 +897,7 @@ export default function ChatPage() {
                             <div className="opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
                                 <button
                                     onClick={(e) => {
-                                        e.stopPropagation(); // prevent the li click
+                                        e.stopPropagation();
                                         handleRenameConversation(c.id);
                                     }}
                                     className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
@@ -926,6 +925,7 @@ export default function ChatPage() {
                     </li>
                 ))}
             </ul>
+
 
         </div>
         </aside>
