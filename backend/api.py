@@ -16,7 +16,7 @@ import jwt as pyjwt
 from datetime import datetime, timedelta, timezone
 from google.auth.transport import requests as google_requests
 from google.oauth2.id_token import verify_oauth2_token
-from google.cloud.firestore_v1 import Increment
+from google.cloud.firestore_v1 import SERVER_TIMESTAMP, ArrayUnion, Increment
 from google.cloud import firestore  # for Query.DESCENDING
 # --- Firestore client (async) ---
 # Cloud Run provides default credentials, so no explicit key is required.
@@ -29,13 +29,13 @@ from google_auth_oauthlib.flow import Flow
 from openai import AsyncOpenAI
 from collections import defaultdict
 from fastapi import Header
-
+load_dotenv()
 OPENAI_SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 3.1 - FIRESTORE) <<")
-load_dotenv()
+
 SECRET_KEY = os.getenv("SECRET_KEY")
 if not SECRET_KEY:
     raise RuntimeError("SECRET_KEY env var is required")
@@ -87,7 +87,8 @@ MISTRAL_SYSTEM = _env(
     "If critical details seem missing, ask the user if you'd like to retrieve details from earlier turns."    
 )
 # ==== end system prompts ====
-
+REFRESH_TOKEN_EXPIRE_SECONDS = 14 * 24 * 60 * 60  # 14 days
+FS_TS = SERVER_TIMESTAMP
 # ===== Retry & fallback helpers for LLM calls =====
 import random
 
@@ -219,13 +220,13 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
     cfg = initial_config or {}
     conv_id = cfg.get("conversation_id")
     resume_last = bool(cfg.get("resume_last"))
-    now = datetime.utcnow()
+    # --- now = datetime.utcnow()
 
     conversations = db.collection("conversations")
 
     if conv_id:
         conv_ref = conversations.document(conv_id)
-        await conv_ref.set({"user_id": user_id, "updated_at": now}, merge=True)
+        await conv_ref.set({"user_id": user_id, "updated_at": FS_TS}, merge=True)
         doc = await conv_ref.get()
         return conv_ref, (doc.to_dict() or {})
 
@@ -265,8 +266,8 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
     await conv_ref.set(
         {
             "user_id": user_id,
-            "created_at": now,
-            "updated_at": now,
+            "created_at": FS_TS,
+            "updated_at": FS_TS,
             "subscription_id": cfg.get("subscription_id"),
             "title": cfg.get("title") or "New conversation",
             "summary": "",
@@ -276,20 +277,20 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
     return conv_ref, (doc.to_dict() or {})
 
 async def save_message(conv_ref, *, role: str, sender: str, content: str):
-    now = firestore.SERVER_TIMESTAMP
+    # now = firestore.SERVER_TIMESTAMP
 
     # save the message
     await conv_ref.collection("messages").add({
         "role": role,
         "sender": sender,
         "content": content,
-        "created_at": now,
+        "created_at": FS_TS,
     })
 
     # update parent conversation
     await conv_ref.set({
-        "updated_at": now,
-        "message_count": firestore.Increment(1),
+        "updated_at": FS_TS,
+        "message_count": Increment(1),
     }, merge=True)
 
 
@@ -479,7 +480,7 @@ async def rename_conversation(conv_id: str, body: RenameBody, user=Depends(get_c
     snap = await conv_ref.get()
     if (not snap.exists) or ((snap.to_dict() or {}).get("user_id") != user["id"]):
         raise HTTPException(status_code=404, detail="Conversation not found")
-    await conv_ref.update({"title": body.title, "updated_at": datetime.now(timezone.utc)})
+    await conv_ref.update({"title": body.title, "updated_at": FS_TS})
     return {"ok": True}
 
 
@@ -876,10 +877,8 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
         cookie_kwargs = dict(
             key="refresh_token",
             value=refresh_token,
-            max_age=14 * 24 * 60 * 60,   # 14 days
-            httponly=True,
-            secure=True,                 # required for SameSite=None
-            samesite="none",
+            max_age=REFRESH_TOKEN_EXPIRE_SECONDS,
+            httponly=True,            
             path="/",                    # make it visible to /api/refresh
             # domain is optional; omit it to bind to api.aicolosseum.app automatically
         )
@@ -950,7 +949,7 @@ async def logout(response: Response):
         path="/",
         domain=".aicolosseum.app",
         secure=True,
-        samesite="None",
+        samesite="Lax",
     )
     # Delete new host-only cookie
     response.delete_cookie(
@@ -1088,8 +1087,8 @@ async def maybe_refresh_summary(conv_ref, threshold: int = 10, window: int = 40)
         await conv_ref.update({
             "summary": summary_text,
             "last_summary_count": mc,
-            "last_summary_at": now,
-            "updated_at": now,
+            "last_summary_at": FS_TS,
+            "updated_at": FS_TS,
         })
     except Exception as e:
         print(f"[maybe_refresh_summary] skipped due to error: {e}")
@@ -1098,7 +1097,7 @@ async def maybe_refresh_summary(conv_ref, threshold: int = 10, window: int = 40)
 async def stripe_webhook(request: Request):
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature")
-    event = None
+    
 
     try:
         event = stripe.Webhook.construct_event(
@@ -1195,7 +1194,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             doc = snap.to_dict() or {}
 
             # server-side timestamps
-            now = firestore.SERVER_TIMESTAMP
+            # now = firestore.SERVER_TIMESTAMP
 
             # stable owner keys (doc id; also email if you have it)
             owner_keys = [user["id"]]
@@ -1205,10 +1204,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             seed = {
                 "user_id": user["id"],
                 "subscription_id": user_data.get("subscription_id"),
-                "owner_keys": firestore.ArrayUnion(owner_keys),
+                "owner_keys": ArrayUnion(owner_keys),
                 "title": doc.get("title") or "New conversation",
-                "created_at": doc.get("created_at") or now,
-                "updated_at": now if not doc.get("updated_at") else doc.get("updated_at"),
+                "created_at": doc.get("created_at") or FS_TS,
+                "updated_at": FS_TS if not doc.get("updated_at") else doc.get("updated_at"),
                 "message_count": doc.get("message_count", 0),
             }
 
@@ -1224,7 +1223,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 safe_keys.append(user["email"].lower())
             await conv_ref.set({
                 "user_id": user["id"],                      # keep single owner field
-                "owner_keys": firestore.ArrayUnion(safe_keys)
+                "owner_keys": ArrayUnion(safe_keys)
             }, merge=True)
         except Exception as e:
             print("[ws] owner_keys upsert failed:", e)
@@ -1285,10 +1284,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
             # Also skip if we greeted this (user, conversation) very recently (e.g., quick reconnect)
             key = (user['id'], conv_ref.id)
-            now = time.monotonic()
+            now_mono = time.monotonic()
             last = RECENT_GREETS.get(key)
 
-            if (not has_any) and (last is None or (now - last) > GREETING_TTL_SECONDS):
+            if (not has_any) and (last is None or (now_mono - last) > GREETING_TTL_SECONDS):
                 greeter = random.choice(agent_names)  # e.g. "ChatGPT", "Claude", "Gemini", "Mistral"
                 greeting_text = f"Hi {user_display_name}, what can we help you with?"
 
@@ -1299,7 +1298,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 await save_message(conv_ref, role="assistant", sender=greeter, content=greeting_text)
 
 
-                RECENT_GREETS[key] = now
+                RECENT_GREETS[key] = now_mono
 
         except Exception as e:
             print("[opening greeting] skipped:", e)
@@ -1710,7 +1709,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         has_any = True
 
                     if not has_any:
-                        opener = random.choice([a["name"] for a in agents if a.get("enabled", True)])
+                        opener = random.choice([a.name for a in agents if getattr(a, "name", "") in agent_names])
                         await websocket.send_json({"sender": opener, "typing": True})
                         await asyncio.sleep(random.uniform(0.4, 1.2))
                         await websocket.send_json({
