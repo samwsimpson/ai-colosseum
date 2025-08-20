@@ -88,6 +88,15 @@ function resolveApiBase(): string {
 }
 const API_BASE = resolveApiBase();
 
+// Always include an Authorization header using either localStorage or userToken fallback.
+// We'll pass this from handlers that need guaranteed auth even if localStorage isn't ready yet.
+function buildAuthHeaders(userToken?: string): Headers {
+  const h = new Headers({ 'Content-Type': 'application/json' });
+  const local = (typeof window !== 'undefined') ? localStorage.getItem('access_token') : null;
+  const tok = local || userToken || '';
+  if (tok) h.set('Authorization', `Bearer ${tok}`);
+  return h;
+}
 
 
 
@@ -300,9 +309,17 @@ export default function ChatPage() {
     
 
     const hydrateConversation = useCallback(async (id: string) => {
-        try {
-            const res = await apiFetch(`/api/conversations/${id}/messages?limit=200`, { cache: 'no-store' });
-            if (!res.ok) return;
+    try {
+        // ensure we have a token (apiFetch will still 401->refresh->retry)
+        const res = await apiFetch(`/api/conversations/${id}/messages?limit=200`, {
+        cache: 'no-store',
+        headers: buildAuthHeaders(userToken),
+        });
+        if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        console.warn('hydrate failed', res.status, txt);
+        return;
+        }
 
             const data: unknown = await res.json();
 
@@ -599,50 +616,61 @@ const loadConversations = useCallback(async () => {
 
     // Rename the selected conversation
     const handleRenameConversation = async (id: string) => {
-        const current = conversations.find((c) => c.id === id);
-        const proposed = window.prompt('Rename conversation to:', current?.title ?? '');
-        if (!proposed || !proposed.trim()) return;
+    const current = conversations.find((c) => c.id === id);
+    const proposed = window.prompt('Rename conversation to:', current?.title ?? '');
+    if (!proposed || !proposed.trim()) return;
 
-        const res = await apiFetch(`/api/conversations/${id}`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ title: proposed.trim() }),
-        });
-        if (!res.ok) {
-            alert('Rename failed.');
-            return;
-        }
+    // force-refresh in case localStorage token is missing/stale
+    try { await refreshTokenIfNeeded(true); } catch {}
 
-        // Optimistic update so the sidebar reflects immediately
-        setConversations(prev =>
-            prev.map(c => (c.id === id ? { ...c, title: proposed.trim() } : c))
-        );
+    const res = await apiFetch(`/api/conversations/${id}`, {
+        method: 'PATCH',
+        headers: buildAuthHeaders(userToken),
+        body: JSON.stringify({ title: proposed.trim() }),
+    });
 
-        await loadConversations();
+    if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        alert(`Rename failed (${res.status}). ${txt || ''}`.trim());
+        return;
+    }
+
+    // Optimistic UI, then re-pull list for accurate timestamps/order
+    setConversations(prev =>
+        prev.map(c => (c.id === id ? { ...c, title: proposed.trim() } : c))
+    );
+    await loadConversations();
     };
+
 
 
     // Delete a conversation
     const handleDeleteConversation = async (id: string) => {
-        if (!window.confirm('Delete this conversation? This cannot be undone.')) return;
+    if (!window.confirm('Delete this conversation? This cannot be undone.')) return;
 
-        const res = await apiFetch(`/api/conversations/${id}`, {
-            method: 'DELETE',
-        });
-        if (!res.ok) {
-            alert('Delete failed.');
-            return;
-        }
+    // force-refresh in case localStorage token is missing/stale
+    try { await refreshTokenIfNeeded(true); } catch {}
 
-        // Optimistic remove from sidebar
-        setConversations(prev => prev.filter(c => c.id !== id));
+    const res = await apiFetch(`/api/conversations/${id}`, {
+        method: 'DELETE',
+        headers: buildAuthHeaders(userToken),
+    });
 
-        if (conversationId === id) {
-            try { localStorage.removeItem('conversationId'); } catch {}
-            handleNewConversation();
-        } else {
-            await loadConversations();
-        }
+    if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        alert(`Delete failed (${res.status}). ${txt || ''}`.trim());
+        return;
+    }
+
+    // Optimistic remove from sidebar
+    setConversations(prev => prev.filter(c => c.id !== id));
+
+    if (conversationId === id) {
+        try { localStorage.removeItem('conversationId'); } catch {}
+        handleNewConversation();
+    } else {
+        await loadConversations();
+    }
     };
 
 
