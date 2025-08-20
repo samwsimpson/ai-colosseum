@@ -235,6 +235,9 @@ export default function ChatPage() {
     }, [conversations]);
 
     const [isLoadingConvs, setIsLoadingConvs] = useState(false);
+    // Sidebar bulk-manage state
+    const [manageMode, setManageMode] = useState(false);
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const chatContainerRef = useRef<HTMLDivElement | null>(null);
     const composerRef = useRef<HTMLDivElement | null>(null);
     const [composerHeight, setComposerHeight] = useState<number>(120);
@@ -566,17 +569,13 @@ const loadConversations = useCallback(async () => {
 
     // Use useCallback to memoize the function, preventing unnecessary re-renders
     const addMessageToChat = useCallback((msg: { sender: string; text: string }) => {
-        const cleanSender = msg.sender.trim();
-        
-        setChatHistory(prev => {
-            const lastMessage = prev[prev.length - 1];
-            if (lastMessage && lastMessage.sender === cleanSender) {
-                return prev.map((item, index) => 
-                    index === prev.length - 1 ? { ...item, text: `${item.text}\n${msg.text}` } : item
-                );
-            }
-            return [...prev, { sender: cleanSender, model: cleanSender, text: msg.text }];
-        });
+        const cleanSender = (msg.sender || '').trim();
+        setChatHistory(prev => [
+            ...prev,
+            { sender: cleanSender, model: cleanSender, text: msg.text }
+        ]);
+        // keep the newest message in view
+        setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 0);
     }, []);
 
     const handleSubmit = useCallback((e: React.FormEvent) => {
@@ -637,47 +636,97 @@ const loadConversations = useCallback(async () => {
 
     // Rename the selected conversation
     const handleRenameConversation = async (id: string) => {
-    if (!userToken) return;
+        if (!userToken) return;
 
-    const current = conversations.find((c) => c.id === id);
-    const proposed = window.prompt('Rename conversation to:', current?.title ?? '');
-    if (!proposed || !proposed.trim()) return;
-    const h = buildAuthHeaders(userToken);
-    h.set("Content-Type", "application/json");
-    const res = await apiFetch(`/api/conversations/${id}`, {
-        method: 'PATCH',
-        headers: h,
-        body: JSON.stringify({ title: proposed.trim() }),
-    });
-    if (!res.ok) {
-        alert('Rename failed.');
-        return;
-    }
-    await loadConversations();
+        const current = conversations.find((c) => c.id === id);
+        const proposed = window.prompt('Rename conversation to:', current?.title ?? '');
+        if (!proposed || !proposed.trim()) return;
+        const h = buildAuthHeaders(userToken);
+        h.set("Content-Type", "application/json");
+        const res = await apiFetch(`/api/conversations/${id}`, {
+            method: 'PATCH',
+            headers: h,
+            body: JSON.stringify({ title: proposed.trim() }),
+        });
+        if (!res.ok) {
+            alert('Rename failed.');
+            return;
+        }
+        await loadConversations();
+        };
+
+        // Delete a conversation
+        const handleDeleteConversation = async (id: string) => {
+        if (!userToken) return;
+        if (!window.confirm('Delete this conversation? This cannot be undone.')) return;
+
+        const res = await apiFetch(`/api/conversations/${id}`, {         
+            method: "DELETE",
+            headers: buildAuthHeaders(userToken),  // <— add this 
+        });
+        if (!res.ok) {
+            alert('Delete failed.');
+            return;
+        }
+
+        if (conversationId === id) {
+            try { localStorage.removeItem('conversationId'); } catch {}
+            handleNewConversation();
+        } else {
+            await loadConversations();
+        }
     };
 
-    // Delete a conversation
-    const handleDeleteConversation = async (id: string) => {
-    if (!userToken) return;
-    if (!window.confirm('Delete this conversation? This cannot be undone.')) return;
-
-    const res = await apiFetch(`/api/conversations/${id}`, {         
-        method: "DELETE",
-        headers: buildAuthHeaders(userToken),  // <— add this 
+    const toggleSelect = useCallback((id: string) => {
+    setSelectedIds(prev => {
+        const next = new Set(prev);
+        if (next.has(id)) next.delete(id);
+        else next.add(id);
+        return next;
     });
-    if (!res.ok) {
-        alert('Delete failed.');
+    }, []);
+
+    const selectAll = useCallback(() => {
+    setSelectedIds(new Set(conversations.map(c => c.id)));
+    }, [conversations]);
+
+    const clearSelection = useCallback(() => {
+    setSelectedIds(new Set());
+    }, []);
+
+    const handleBulkDelete = useCallback(async () => {
+    if (!userToken) return;
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+
+    if (!window.confirm(`Delete ${ids.length} conversation${ids.length > 1 ? 's' : ''}? This cannot be undone.`)) {
         return;
     }
 
-    if (conversationId === id) {
+    // optimistic removal in UI
+    setConversations(prev => prev.filter(c => !selectedIds.has(c.id)));
+
+    await Promise.allSettled(
+        ids.map(id =>
+        apiFetch(`/api/conversations/${id}`, {
+            method: 'DELETE',
+            headers: buildAuthHeaders(userToken),
+        })
+        )
+    );
+
+    // if the open convo got deleted, reset; otherwise refresh list
+    const deletedOpen = conversationId ? selectedIds.has(conversationId) : false;
+    setSelectedIds(new Set());
+    setManageMode(false);
+
+    if (deletedOpen) {
         try { localStorage.removeItem('conversationId'); } catch {}
         handleNewConversation();
     } else {
         await loadConversations();
     }
-    };
-
+    }, [userToken, selectedIds, conversationId, loadConversations, handleNewConversation, setConversations]);
 
 
 
@@ -907,7 +956,15 @@ const loadConversations = useCallback(async () => {
         <aside className="hidden md:flex flex-col w-72 border-r border-gray-800 bg-gray-900 pt-[72px] z-[60]">
 
         <div className="p-4 border-b border-gray-800 flex items-center justify-between">
-            <div className="font-semibold">Conversations</div>
+        <div className="font-semibold">Conversations</div>
+        <div className="flex items-center gap-2">
+            <button
+            onClick={() => setManageMode(m => !m)}
+            className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+            title={manageMode ? "Done" : "Manage conversations"}
+            >
+            {manageMode ? 'Done' : 'Manage'}
+            </button>
             <button
             onClick={handleNewConversation}
             className="text-xs px-2 py-1 rounded bg-blue-600 hover:bg-blue-700"
@@ -915,6 +972,34 @@ const loadConversations = useCallback(async () => {
             New
             </button>
         </div>
+        </div>
+
+        {manageMode && (
+        <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-2">
+            <button
+            onClick={selectAll}
+            className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+            >
+            Select all
+            </button>
+            <button
+            onClick={clearSelection}
+            className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+            >
+            Clear
+            </button>
+            <button
+            onClick={handleBulkDelete}
+            disabled={selectedIds.size === 0}
+            className="text-xs px-2 py-1 rounded bg-red-700 hover:bg-red-600 disabled:opacity-50"
+            title={selectedIds.size === 0 ? "No conversations selected" : "Delete selected"}
+            >
+            Delete selected
+            </button>
+            <span className="ml-auto text-[11px] text-gray-400">{selectedIds.size} selected</span>
+        </div>
+        )}
+
 
         <div className="flex-1 overflow-y-auto custom-scrollbar">
             {isLoadingConvs && (
@@ -927,44 +1012,59 @@ const loadConversations = useCallback(async () => {
                 {conversations.map((c) => (
                     <li
                         key={c.id}
-                        onClick={() => handleOpenConversation(c.id)}
+                        onClick={() => manageMode ? toggleSelect(c.id) : handleOpenConversation(c.id)}
                         className={`group px-3 py-2 cursor-pointer ${
                             conversationId === c.id ? 'bg-gray-800' : 'hover:bg-gray-800/60'
                         }`}
-                    >
+                        >
                         <div className="flex items-center justify-between gap-2">
+                            <div className="flex items-center gap-2 min-w-0">
+                            {manageMode && (
+                                <input
+                                type="checkbox"
+                                className="h-4 w-4"
+                                checked={selectedIds.has(c.id)}
+                                onChange={(e) => { e.stopPropagation(); toggleSelect(c.id); }}
+                                onClick={(e) => e.stopPropagation()}
+                                />
+                            )}
                             <span className="flex-1 text-left truncate" title={c.title}>
                                 {c.title || 'Untitled'}
                             </span>
-                            <div className="opacity-0 group-hover:opacity-100 transition-opacity flex gap-1">
-                                <button
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleRenameConversation(c.id);
-                                    }}
-                                    className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
-                                    title="Rename"
-                                >
-                                    Rename
-                                </button>
-                                <button
-                                    onClick={(e) => {
-                                        e.stopPropagation();
-                                        handleDeleteConversation(c.id);
-                                    }}
-                                    className="text-xs px-2 py-1 rounded bg-red-700 hover:bg-red-600"
-                                    title="Delete"
-                                >
-                                    Delete
-                                </button>
+                            </div>
+
+                            {/* Hide per-item actions in manage mode */}
+                            <div className={`${manageMode ? 'hidden' : 'opacity-0 group-hover:opacity-100'} transition-opacity flex gap-1`}>
+                            <button
+                                onClick={(e) => {
+                                e.stopPropagation();
+                                handleRenameConversation(c.id);
+                                }}
+                                className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+                                title="Rename"
+                            >
+                                Rename
+                            </button>
+                            <button
+                                onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteConversation(c.id);
+                                }}
+                                className="text-xs px-2 py-1 rounded bg-red-700 hover:bg-red-600"
+                                title="Delete"
+                            >
+                                Delete
+                            </button>
                             </div>
                         </div>
+
                         {(c.updated_at || c.created_at) && (
                             <div className="mt-1 text-[11px] text-gray-400">
-                                {new Date((c.updated_at ?? c.created_at) as string).toLocaleString()}
+                            {new Date((c.updated_at ?? c.created_at) as string).toLocaleString()}
                             </div>
                         )}
-                    </li>
+                        </li>
+
                 ))}
             </ul>
 
@@ -996,41 +1096,37 @@ const loadConversations = useCallback(async () => {
             )}
 
             {chatHistory.length > 0 &&
-                chatHistory.map((msg, index) => (
-                <div
-                    key={index}
-                    className={`flex ${
-                    msg.sender === (userName || 'You')
-                        ? 'justify-end'
-                        : 'justify-start'
-                    }`}
-                >
-                    <div
-                    className={`relative p-3 md:p-4 max-w-[80%] text-white rounded-2xl md:rounded-3xl shadow-lg transition-all duration-200 ease-in-out transform hover:scale-[1.01] ${
-                        msg.sender === (userName || 'You')
-                        ? 'bg-blue-600 text-white rounded-tr-none'
-                        : msg.sender === 'Claude'
-                        ? 'bg-gray-700 text-white rounded-bl-none'
-                        : msg.sender === 'ChatGPT'
-                        ? 'bg-gray-800 text-white rounded-bl-none'
-                        : msg.sender === 'Gemini'
-                        ? 'bg-gray-600 text-white rounded-bl-none'
-                        : msg.sender === 'Mistral'
-                        ? 'bg-gray-500 text-white rounded-bl-none'
-                        : 'bg-gray-700 text-gray-200 rounded-bl-none'
-                    }`}
-                    >
-                    {msg.sender !== (userName || 'You') && (
-                        <div className="text-xs text-gray-300 mb-1 font-semibold">
-                        {msg.sender}
+                chatHistory.map((msg, index) => {
+                    const isUser =
+                    (msg.sender || '').trim().toLowerCase() === (userName || 'You').trim().toLowerCase();
+                    return (
+                    <div key={index} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+                        <div
+                        className={`relative p-3 md:p-4 max-w-[80%] text-white rounded-2xl md:rounded-3xl shadow-lg transition-all duration-200 ease-in-out transform hover:scale-[1.01] ${
+                            isUser
+                            ? 'bg-blue-600 text-white rounded-tr-none'
+                            : msg.sender === 'Claude'
+                            ? 'bg-gray-700 text-white rounded-bl-none'
+                            : msg.sender === 'ChatGPT'
+                            ? 'bg-gray-800 text-white rounded-bl-none'
+                            : msg.sender === 'Gemini'
+                            ? 'bg-gray-600 text-white rounded-bl-none'
+                            : msg.sender === 'Mistral'
+                            ? 'bg-gray-500 text-white rounded-bl-none'
+                            : 'bg-gray-700 text-gray-200 rounded-bl-none'
+                        }`}
+                        >
+                        {!isUser && (
+                            <div className="text-xs text-gray-300 mb-1 font-semibold">{msg.sender}</div>
+                        )}
+                        <pre className="whitespace-pre-wrap font-sans text-sm md:text-base leading-relaxed">
+                            {msg.text}
+                        </pre>
                         </div>
-                    )}
-                    <pre className="whitespace-pre-wrap font-sans text-sm md:text-base leading-relaxed">
-                        {msg.text}
-                    </pre>
                     </div>
-                </div>
-                ))}
+                    );
+                })}
+
 
             <div className="flex flex-col space-y-2">
                 {isTyping.ChatGPT && (
