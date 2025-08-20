@@ -599,8 +599,6 @@ const loadConversations = useCallback(async () => {
 
     // Rename the selected conversation
     const handleRenameConversation = async (id: string) => {
-        if (!userToken) return;
-
         const current = conversations.find((c) => c.id === id);
         const proposed = window.prompt('Rename conversation to:', current?.title ?? '');
         if (!proposed || !proposed.trim()) return;
@@ -614,23 +612,31 @@ const loadConversations = useCallback(async () => {
             alert('Rename failed.');
             return;
         }
+
+        // Optimistic update so the sidebar reflects immediately
+        setConversations(prev =>
+            prev.map(c => (c.id === id ? { ...c, title: proposed.trim() } : c))
+        );
+
         await loadConversations();
     };
 
+
     // Delete a conversation
     const handleDeleteConversation = async (id: string) => {
-        if (!userToken) return;
         if (!window.confirm('Delete this conversation? This cannot be undone.')) return;
 
         const res = await apiFetch(`/api/conversations/${id}`, {
-            method: 'DELETE',            
+            method: 'DELETE',
         });
         if (!res.ok) {
             alert('Delete failed.');
             return;
         }
 
-        // If we deleted the one we’re viewing, start fresh
+        // Optimistic remove from sidebar
+        setConversations(prev => prev.filter(c => c.id !== id));
+
         if (conversationId === id) {
             try { localStorage.removeItem('conversationId'); } catch {}
             handleNewConversation();
@@ -638,6 +644,7 @@ const loadConversations = useCallback(async () => {
             await loadConversations();
         }
     };
+
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // WebSocket connection logic
