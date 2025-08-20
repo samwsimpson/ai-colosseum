@@ -1024,7 +1024,7 @@ const loadConversations = useCallback(async () => {
                     <li
                         key={c.id}
                         onClick={() => manageMode ? toggleSelect(c.id) : handleOpenConversation(c.id)}
-                        className={`group px-3 py-2 cursor-pointer ${
+                        className={`group w-full px-3 py-2 cursor-pointer ${
                             conversationId === c.id ? 'bg-gray-800' : 'hover:bg-gray-800/60'
                         }`}
                         >
@@ -1039,7 +1039,7 @@ const loadConversations = useCallback(async () => {
                                 onClick={(e) => e.stopPropagation()}
                                 />
                             )}
-                            <span className="flex-1 text-left truncate" title={c.title}>
+                            <span className="flex-1 text-left break-words whitespace-normal leading-snug" title={c.title}>
                                 {c.title || 'Untitled'}
                             </span>
                             </div>
@@ -1258,6 +1258,31 @@ const loadConversations = useCallback(async () => {
 {/* ===== /Composer ===== */}
 
         </div>
+        <style jsx global>{`
+        /* Works on Firefox */
+        .custom-scrollbar {
+            scrollbar-width: thin;
+            scrollbar-color: #475569 #0f172a; /* thumb, track */
+        }
+
+        /* Works on Chrome, Edge, Safari */
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 8px;
+            height: 8px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #0f172a; /* dark track to match your theme */
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #475569;        /* slate-600 */
+            border-radius: 9999px;       /* fully rounded */
+            border: 2px solid #0f172a;   /* creates a gap around the thumb */
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #64748b; /* slate-500 on hover */
+        }
+        `}</style>
+
     </div>
     );
 
