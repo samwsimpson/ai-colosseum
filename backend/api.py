@@ -118,25 +118,30 @@ async def call_with_retry(op_coro_factory, ws, *, retries: int = 2, base_delay: 
             await asyncio.sleep(delay)
 
 app = FastAPI()
+@app.options("/{path:path}")
+def cors_preflight(path: str):
+    # LB will inject the CORS headers we configured.
+    return Response(status_code=204)
 
 @app.get("/health")
 async def health_check():
     return {"status": "ok"}
 
-# Re-added CORS middleware for local development
-origins = [
-    "http://localhost:3000",
-    "https://aicolosseum.app",
-    "https://www.aicolosseum.app"
-]
+# CORS: only enable in local/dev; prod relies on Google Load Balancer
+ENABLE_APP_CORS = os.getenv("ENABLE_APP_CORS", "0")  # "1" to enable locally
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+if ENABLE_APP_CORS == "1":
+    origins = [
+        "http://localhost:3000",
+        # add any other local dev origins here
+    ]
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="api/google-auth")
 
@@ -890,14 +895,26 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
 
         # Refresh token cookie (silent refresh later)
         refresh_token = create_refresh_token(data={"sub": user_id})
-        response.set_cookie(
+        # AFTER — environment-aware cookie
+        # If you have the redirect URI here, this is an easy local/prod test:
+        is_local = auth_code.redirect_uri.startswith("http://localhost") if "auth_code" in locals() else False
+
+        cookie_kwargs = dict(
             key="refresh_token",
             value=refresh_token,
-            max_age=14 * 24 * 60 * 60,
-            httponly=True,  # Corrected typo: httpy_only -> httponly
-            secure=True,
-            samesite="none",
+            httponly=True,
+            path="/",
+            max_age=60*60*24*30,  # 30 days
         )
+
+        if is_local:
+            # Local dev: cookie must be readable over http://localhost
+            cookie_kwargs.update(secure=False, samesite="Lax")
+        else:
+            # Prod: cross-site during Google redirect requires Secure + SameSite=None + domain
+            cookie_kwargs.update(secure=True, samesite="None", domain=".aicolosseum.app")
+
+        response.set_cookie(**cookie_kwargs)
 
         return Token(
             access_token=access_token,
