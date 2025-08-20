@@ -236,6 +236,23 @@ export default function ChatPage() {
 
     const [isLoadingConvs, setIsLoadingConvs] = useState(false);
     const chatContainerRef = useRef<HTMLDivElement | null>(null);
+    const composerRef = useRef<HTMLDivElement | null>(null);
+    const [composerHeight, setComposerHeight] = useState<number>(120);
+
+    useEffect(() => {
+        const el = composerRef.current;
+        if (!el || typeof window === 'undefined') return;
+        const ro = new ResizeObserver(() => {
+            setComposerHeight(el.offsetHeight);
+        });
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, []);
+
+    // Nudge scroll when the composer height changes so content never hides behind it
+    useEffect(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, [composerHeight]);    
 
     // New state to track which agents are typing
     const [isTyping, setIsTyping] = useState<TypingState>({
@@ -261,57 +278,41 @@ export default function ChatPage() {
     const authFailedRef = useRef(false);
     const reconnectBackoffRef = useRef(1000); // start at 1s, exponential up to 15s
 
-    // --- guarded token refresh helpers ---
+    // --- guarded token refresh helpers (NO HOOKS INSIDE) ---
     const refreshInFlight = useRef<Promise<void> | null>(null);
     const lastRefreshAt = useRef<number>(0);
 
-    async function refreshTokenIfNeeded(force = false) {
-    const now = Date.now();
-    const composerRef = useRef<HTMLDivElement | null>(null);
-    const [composerHeight, setComposerHeight] = useState<number>(120);
+    const refreshTokenIfNeeded = useCallback(async (force = false) => {
+        const now = Date.now();
 
-    useEffect(() => {
-        const el = composerRef.current;
-        if (!el || typeof window === 'undefined') return;
-        const ro = new ResizeObserver(() => {
-            setComposerHeight(el.offsetHeight);
-        });
-        ro.observe(el);
-        return () => ro.disconnect();
+        // throttle non-forced refresh to at most once/minute
+        if (!force && now - lastRefreshAt.current < 60_000) return;
+        if (refreshInFlight.current) return refreshInFlight.current;
+
+        refreshInFlight.current = (async () => {
+            try {
+            const res = await fetch(`${API_BASE}/api/refresh`, {
+                method: 'POST',
+                credentials: 'include',
+            });
+            if (!res.ok) throw new Error('refresh failed');
+            const { token } = await res.json();
+            if (token) {
+                localStorage.setItem('access_token', token);
+                lastRefreshAt.current = Date.now();
+            } else {
+                throw new Error('no token in refresh');
+            }
+            } finally {
+            // always clear the in-flight marker
+            refreshInFlight.current = null;
+            }
+        })();
+
+        return refreshInFlight.current;
     }, []);
-
-    // Nudge scroll when the composer height changes so content never hides behind it
-    useEffect(() => {
-        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-    }, [composerHeight]);
-
-    // throttle non-forced refresh to at most once/minute
-    if (!force && now - lastRefreshAt.current < 60_000) return;
-    if (refreshInFlight.current) return refreshInFlight.current;
-
-    refreshInFlight.current = (async () => {
-        try {
-        const res = await fetch(`${API_BASE}/api/refresh`, {
-            method: 'POST',
-            credentials: 'include',
-        });
-        if (!res.ok) throw new Error('refresh failed');
-        const { token } = await res.json();
-        if (token) {
-            localStorage.setItem('access_token', token);
-            lastRefreshAt.current = Date.now();
-        } else {
-            throw new Error('no token in refresh');
-        }
-        } finally {
-        // always clear the in-flight marker
-        refreshInFlight.current = null;
-        }
-    })();
-
-    return refreshInFlight.current;
-    }
     // --- end guarded token refresh helpers ---
+
 
 
     // Unconditional scroll to the last message
@@ -1117,15 +1118,6 @@ const loadConversations = useCallback(async () => {
 
   <form onSubmit={handleSubmit} className="max-w-4xl mx-auto p-4 md:p-6">
     <div className="flex gap-4">
-        <input
-            type="text"
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            placeholder="Type your message..."
-            className="flex-grow p-3 rounded-xl border border-gray-700 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200 text-sm md:text-base"
-            // Let users type even while connecting; we'll queue the send
-            disabled={!userName}
-        />
         <textarea
             rows={1}
             value={message}
@@ -1134,6 +1126,12 @@ const loadConversations = useCallback(async () => {
                 const ta = e.currentTarget;
                 ta.style.height = 'auto';               // shrink back down if needed
                 ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'; // cap ~5 lines
+            }}
+            onKeyDown={(e) => {
+                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                e.preventDefault();
+                (e.currentTarget.form as HTMLFormElement)?.requestSubmit();
+                }
             }}
             placeholder="Type your message..."
             className="flex-grow p-3 rounded-xl border border-gray-700 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200 text-sm md:text-base resize-none overflow-y-auto min-h-[44px] max-h-40"
