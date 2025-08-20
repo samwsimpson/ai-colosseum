@@ -874,9 +874,12 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
         cookie_kwargs = dict(
             key="refresh_token",
             value=refresh_token,
+            max_age=14 * 24 * 60 * 60,   # 14 days
             httponly=True,
-            path="/",
-            max_age=60*60*24*30,  # 30 days
+            secure=True,                 # required for SameSite=None
+            samesite="none",
+            path="/",                    # make it visible to /api/refresh
+            # domain is optional; omit it to bind to api.aicolosseum.app automatically
         )
 
         if is_local:
@@ -906,31 +909,44 @@ stripe_webhook_secret = os.getenv("STRIPE_WEBHOOK_SECRET")
 class SubscriptionRequest(BaseModel):
     price_id: str
 
+from fastapi import Request, HTTPException
+
 @app.post("/api/refresh")
 async def refresh_access_token(request: Request):
+    # 1) Get the refresh token from the HttpOnly cookie
     rt = request.cookies.get("refresh_token")
     if not rt:
+        # Nothing to refresh with → 401
         raise HTTPException(status_code=401, detail="No refresh token")
 
+    # 2) Validate & decode the refresh token
     try:
         payload = pyjwt.decode(rt, SECRET_KEY, algorithms=[ALGORITHM])
         if payload.get("type") != "refresh":
             raise HTTPException(status_code=401, detail="Invalid refresh token")
-        user_id = payload.get("sub")
-        if not user_id:
-            raise HTTPException(status_code=401, detail="Invalid refresh token payload")
+        sub = payload.get("sub")
+        if not sub:
+            raise HTTPException(status_code=401, detail="Invalid refresh token")
     except pyjwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Refresh token expired")
-    except pyjwt.PyJWTError:
+    except pyjwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid refresh token")
 
-    access_expires_in = 60 * 60
-    new_access = create_access_token(
-        data={"sub": user_id},
-        expires_delta=timedelta(seconds=access_expires_in),
+    # 3) Mint a new access token
+    access_token = create_access_token(
+        {"sub": sub},
+        expires_delta=timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES),
     )
-    expires_at = int(datetime.now(timezone.utc).timestamp()) + access_expires_in
-    return {"token": new_access, "expires_at": expires_at}
+    return {"access_token": access_token, "token_type": "bearer"}
+
+@app.post("/api/logout")
+async def logout(response: Response):
+    response.delete_cookie(
+        "refresh_token",
+        path="/",
+        samesite="none"
+    )
+    return {"ok": True}
 
 @app.post("/api/create-checkout-session")
 async def create_checkout_session(request: SubscriptionRequest, current_user: dict = Depends(get_current_user)):
