@@ -814,6 +814,7 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
 
 @app.post("/api/google-auth", response_model=Token)
 async def google_auth(auth_code: GoogleAuthCode, response: Response):
+
     try:
         client_config = {
             "web": {
@@ -887,9 +888,8 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
             # Local dev: cookie must be readable over http://localhost
             cookie_kwargs.update(secure=False, samesite="Lax")
         else:
-            # Prod: host-only, first-party cookie (best for same-site subdomains)
-            # No domain attribute → cookie is bound to api.aicolosseum.app only.
-            cookie_kwargs.update(secure=True, samesite="Lax")
+            # Prod: host-only, first-party cookie (best for same-site subdomains)           
+            cookie_kwargs.update(secure=True, samesite="Lax", domain=".aicolosseum.app")
 
         response.set_cookie(**cookie_kwargs)
 

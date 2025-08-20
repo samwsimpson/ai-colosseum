@@ -623,10 +623,11 @@ const loadConversations = useCallback(async () => {
     const current = conversations.find((c) => c.id === id);
     const proposed = window.prompt('Rename conversation to:', current?.title ?? '');
     if (!proposed || !proposed.trim()) return;
-
+    const h = buildAuthHeaders(userToken);
+    h.set("Content-Type", "application/json");
     const res = await apiFetch(`/api/conversations/${id}`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: h,
         body: JSON.stringify({ title: proposed.trim() }),
     });
     if (!res.ok) {
@@ -641,7 +642,10 @@ const loadConversations = useCallback(async () => {
     if (!userToken) return;
     if (!window.confirm('Delete this conversation? This cannot be undone.')) return;
 
-    const res = await apiFetch(`/api/conversations/${id}`, { method: 'DELETE' });
+    const res = await apiFetch(`/api/conversations/${id}`, {         
+        method: "DELETE",
+        headers: buildAuthHeaders(userToken),  // <— add this 
+    });
     if (!res.ok) {
         alert('Delete failed.');
         return;
