@@ -267,6 +267,24 @@ export default function ChatPage() {
 
     async function refreshTokenIfNeeded(force = false) {
     const now = Date.now();
+    const composerRef = useRef<HTMLDivElement | null>(null);
+    const [composerHeight, setComposerHeight] = useState<number>(120);
+
+    useEffect(() => {
+        const el = composerRef.current;
+        if (!el || typeof window === 'undefined') return;
+        const ro = new ResizeObserver(() => {
+            setComposerHeight(el.offsetHeight);
+        });
+        ro.observe(el);
+        return () => ro.disconnect();
+    }, []);
+
+    // Nudge scroll when the composer height changes so content never hides behind it
+    useEffect(() => {
+        chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    }, [composerHeight]);
+
     // throttle non-forced refresh to at most once/minute
     if (!force && now - lastRefreshAt.current < 60_000) return;
     if (refreshInFlight.current) return refreshInFlight.current;
@@ -885,7 +903,7 @@ const loadConversations = useCallback(async () => {
     return (
     <div className="flex h-screen w-full bg-gray-950 text-white font-sans antialiased">
         {/* LEFT SIDEBAR */}
-        <aside className="hidden md:flex flex-col w-72 border-r border-gray-800 bg-gray-900 pt-[72px]">
+        <aside className="hidden md:flex flex-col w-72 border-r border-gray-800 bg-gray-900 pt-[72px] z-[60]">
 
         <div className="p-4 border-b border-gray-800 flex items-center justify-between">
             <div className="font-semibold">Conversations</div>
@@ -957,7 +975,8 @@ const loadConversations = useCallback(async () => {
         <div className="flex-1 flex flex-col">
         <main
             ref={chatContainerRef}
-            className="flex-1 overflow-y-auto pt-[72px] pb-[120px] bg-gray-900 custom-scrollbar"
+            className="flex-1 overflow-y-auto pt-[72px] bg-gray-900 custom-scrollbar"
+            style={{ paddingBottom: composerHeight + 24 }}  // extra 24px breathing room
         >
             <div className="max-w-4xl mx-auto flex flex-col space-y-4 md:space-y-6">
             {/* Conditional rendering for the initial message */}
@@ -1069,7 +1088,10 @@ const loadConversations = useCallback(async () => {
 
         {/* INPUT FORM — fixed on mobile, static on desktop so it doesn't cover the sidebar */}
 {/* ===== Composer (fixed footer) ===== */}
-<div className="fixed bottom-0 left-0 right-0 z-50 bg-gray-900 border-t border-gray-800">
+<div
+    ref={composerRef}
+    className="fixed bottom-0 left-0 right-0 md:left-72 z-50 bg-gray-900 border-t border-gray-800"
+>
   {/* Summary banner (if you have one) can live above the form if you like */}
   {loadedSummary && (
     <div className="max-w-4xl mx-auto px-4 pt-3">
@@ -1095,29 +1117,35 @@ const loadConversations = useCallback(async () => {
 
   <form onSubmit={handleSubmit} className="max-w-4xl mx-auto p-4 md:p-6">
     <div className="flex gap-4">
-      <input
-        type="text"
-        value={message}
-        onChange={(e) => setMessage(e.target.value)}
-        placeholder="Type your message..."
-        className="flex-grow p-3 rounded-xl border border-gray-700 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200 text-sm md:text-base"
-        // Let users type even while connecting; we'll queue the send
-        disabled={!userName}
-      />
-      <button
-        type="submit"
-        className="px-4 py-2 md:px-6 md:py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 transition-colors duration-200 text-sm"
-        disabled={!userName}
-      >
-        Send
-      </button>
-      <button
-        type="button"
-        onClick={handleResetConversation}
-        className="px-4 py-2 md:px-6 md:py-3 bg-gray-700 text-white font-semibold rounded-xl hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-gray-400 focus:ring-offset-2 focus:ring-offset-gray-900 transition-colors duration-200 text-sm"
-      >
-        Reset conversation
-      </button>
+        <input
+            type="text"
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            placeholder="Type your message..."
+            className="flex-grow p-3 rounded-xl border border-gray-700 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200 text-sm md:text-base"
+            // Let users type even while connecting; we'll queue the send
+            disabled={!userName}
+        />
+        <textarea
+            rows={1}
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            onInput={(e) => {
+                const ta = e.currentTarget;
+                ta.style.height = 'auto';               // shrink back down if needed
+                ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'; // cap ~5 lines
+            }}
+            placeholder="Type your message..."
+            className="flex-grow p-3 rounded-xl border border-gray-700 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200 text-sm md:text-base resize-none overflow-y-auto min-h-[44px] max-h-40"
+            disabled={!userName}
+        />      
+        <button
+            type="submit"
+            className="px-4 py-2 md:px-6 md:py-3 bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 transition-colors duration-200 text-sm"
+            disabled={!userName}
+        >
+            Send
+        </button>
     </div>
   </form>
 </div>
