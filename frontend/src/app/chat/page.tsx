@@ -1012,14 +1012,14 @@ const loadConversations = useCallback(async () => {
         )}
 
 
-        <div className="flex-1 overflow-y-auto custom-scrollbar">
+        <div className="flex-1 min-w-0 overflow-y-auto custom-scrollbar">
             {isLoadingConvs && (
             <div className="p-4 text-sm text-gray-400">Loading…</div>
             )}
             {!isLoadingConvs && conversations.length === 0 && (
             <div className="p-4 text-sm text-gray-400">No conversations yet</div>
             )}
-            <ul className="divide-y divide-gray-800">
+            <ul className="w-full divide-y divide-gray-800">
                 {conversations.map((c) => (
                     <li
                         key={c.id}
