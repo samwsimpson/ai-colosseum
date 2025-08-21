@@ -1,7 +1,8 @@
 import sys
 import traceback
-print("TOP OF api.py: Script starting...", file=sys.stderr)
-from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, UploadFile, File, Form
+from google.cloud import storage
+import uuid
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from fastapi import Request, Response
@@ -47,6 +48,51 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 30
 import time
 RECENT_GREETS = {}  # key: (user_id, conversation_id) -> monotonic timestamp
 GREETING_TTL_SECONDS = 10
+
+# === Attachment config ===
+MAX_ATTACHMENT_BYTES = int(os.getenv("MAX_ATTACHMENT_BYTES", "5242880"))  # 5 MB
+MAX_ATTACHMENTS_PER_TURN = int(os.getenv("MAX_ATTACHMENTS_PER_TURN", "3"))
+GCS_BUCKET = os.getenv("GCS_BUCKET")  # set this in Cloud Run env for uploads
+TEXT_PREVIEW_LIMIT = int(os.getenv("TEXT_PREVIEW_LIMIT", "120000"))  # 120 KB text preview
+
+# Strict allow-lists for text/code uploads
+TEXT_MIME_WHITELIST = {
+    "application/json", "application/javascript", "application/xml",
+    "image/svg+xml", "application/x-yaml", "application/yaml"
+}
+TEXT_EXT_WHITELIST = {
+    "txt","md","json","js","ts","tsx","jsx","py","java","go","rb","php",
+    "css","html","htm","sql","yaml","yml","sh","c","cpp","h","hpp","cs","rs","kt","svg"
+}
+def _is_utf8_text(sample: bytes) -> bool:
+    # treat null bytes as binary; otherwise require strict UTF-8
+    if b"\x00" in sample:
+        return False
+    try:
+        sample.decode("utf-8", errors="strict")
+        return True
+    except UnicodeDecodeError:
+        return False
+
+def _to_text_preview(data: bytes, mime: str, filename: str | None = None) -> str | None:
+    # 1) allow-list checks by MIME and/or extension; fallback to sniffing
+    ext = ""
+    if filename and "." in filename:
+        ext = filename.rsplit(".", 1)[-1].lower()
+
+    is_textish = (
+        (mime and (mime.startswith("text/") or mime in TEXT_MIME_WHITELIST))
+        or (ext in TEXT_EXT_WHITELIST)
+        or _is_utf8_text(data[:131072])  # sniff up to 128 KB
+    )
+    if not is_textish:
+        return None
+
+    # 2) decode + truncate for model context
+    text = data.decode("utf-8", errors="replace")
+    if len(text) > TEXT_PREVIEW_LIMIT:
+        text = text[:TEXT_PREVIEW_LIMIT] + "\n\n[...truncated...]"
+    return text
 
 # ==== System prompts (define once, before websocket handler) ====
 def _env(name: str, default: str) -> str:
@@ -153,7 +199,6 @@ if ENABLE_APP_CORS == "1":
     )
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/google-auth")
-
 
 async def get_current_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
@@ -871,17 +916,18 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
 
         # Refresh token cookie (silent refresh later)
         refresh_token = create_refresh_token(data={"sub": user_id})
-        # AFTER — environment-aware cookie
-        # If you have the redirect URI here, this is an easy local/prod test:
-        is_local = auth_code.redirect_uri.startswith("http://localhost") if "auth_code" in locals() else False
 
+        # Detect local dev by redirect_uri; otherwise treat as production
+        is_local = str(auth_code.redirect_uri or "").startswith("http://localhost")
+
+        # Host-only cookie bound to api host. In production we must allow cross-site
+        # requests (www.aicolosseum.com -> api.aicolosseum.app), so SameSite=None.
         cookie_kwargs = dict(
             key="refresh_token",
             value=refresh_token,
             max_age=REFRESH_TOKEN_EXPIRE_SECONDS,
-            httponly=True,            
-            path="/",                    # make it visible to /api/refresh
-            # domain is optional; omit it to bind to api.aicolosseum.app automatically
+            httponly=True,
+            path="/",
         )
 
         if is_local:
@@ -941,6 +987,76 @@ async def refresh_access_token(request: Request):
     )
     return {"token": access_token, "access_token": access_token, "token_type": "bearer"}
 
+@app.post("/api/uploads")
+async def upload_attachment(
+    file: UploadFile = File(...),
+    conversation_id: Optional[str] = Form(default=None),
+    user: dict = Depends(get_current_user),
+):
+    # Read and size-check
+    data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="Empty file")
+    if len(data) > MAX_ATTACHMENT_BYTES:
+        raise HTTPException(status_code=413, detail=f"File too large (>{MAX_ATTACHMENT_BYTES} bytes)")
+
+    mime = file.content_type or "application/octet-stream"
+    name = file.filename or "upload.bin"
+
+    # Enforce text/code only. If you want to allow non-text uploads but just not preview them,
+    # replace the raise below with: text_preview = None
+    text_preview = _to_text_preview(data, mime, name)
+    if text_preview is None:
+        raise HTTPException(status_code=415, detail="Only text/code files are allowed.")
+
+    # Optional: write bytes to GCS if configured
+    gcs_path = None
+    signed_url = None
+    if GCS_BUCKET:
+        client = storage.Client()
+        bucket = client.bucket(GCS_BUCKET)
+        blob = bucket.blob(f"uploads/{user['id']}/{uuid.uuid4()}/{name}")
+        blob.upload_from_string(data, content_type=mime)
+        gcs_path = f"gs://{GCS_BUCKET}/{blob.name}"
+        try:
+            from datetime import timedelta
+            signed_url = blob.generate_signed_url(expiration=timedelta(hours=2), method="GET")
+        except Exception:
+            signed_url = None
+
+    # Metadata + preview in Firestore
+    attachment_id = str(uuid.uuid4())
+    meta = {
+        "user_id": user["id"],
+        "name": name,
+        "mime": mime,
+        "size": len(data),
+        "gcs_path": gcs_path,
+        "signed_url": signed_url,
+        "text_preview": text_preview,
+        "conversation_id": conversation_id,
+        "created_at": FS_TS,
+    }
+    att_ref = db.collection("attachments").document(attachment_id)
+    await att_ref.set(meta)
+
+    # index under conversation (optional)
+    if conversation_id:
+        conv_ref = db.collection("conversations").document(conversation_id)
+        await conv_ref.collection("attachments").document(attachment_id).set({
+            "attachment_id": attachment_id,
+            "created_at": FS_TS
+        })
+
+    return {
+        "id": attachment_id,
+        "name": name,
+        "mime": mime,
+        "size": len(data),
+        "signed_url": signed_url,
+        "has_text_preview": True,
+    }
+
 @app.post("/api/logout")
 async def logout(response: Response):
     # Delete possible old domain-scoped cookie
@@ -949,14 +1065,14 @@ async def logout(response: Response):
         path="/",
         domain=".aicolosseum.app",
         secure=True,
-        samesite="Lax",
+        samesite="None",
     )
     # Delete new host-only cookie
     response.delete_cookie(
         "refresh_token",
         path="/",
         secure=True,
-        samesite="Lax",
+        samesite="None",
     )
     return {"ok": True}
 
@@ -1663,6 +1779,32 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         continue
                         
                     user_message = data["message"]
+                    # --- include text previews from user-owned attachments (if any) ---
+                    attachment_ids = (data.get("attachments") or [])[:MAX_ATTACHMENTS_PER_TURN]
+                    attachment_chunks: list[str] = []
+                    for fid in attachment_ids:
+                        snap = await db.collection("attachments").document(fid).get()
+                        doc = snap.to_dict() or {}
+                        # Ownership check
+                        owner_id = (doc.get("user_id") or "").strip()
+                        if not owner_id or str(owner_id) != str(user["id"]):
+                            continue
+                        # Optional: ensure same conversation if one is recorded
+                        conv_match = doc.get("conversation_id")
+                        try:
+                            current_conv_id = (await conv_ref.get()).id
+                        except Exception:
+                            current_conv_id = None
+                        if conv_match and current_conv_id and str(conv_match) != str(current_conv_id):
+                            continue
+
+                        preview = (doc.get("text_preview") or "").strip()
+                        fname = (doc.get("name") or "attachment").strip()
+                        if preview:
+                            attachment_chunks.append(f"[Attachment: {fname}]\n```\n{preview}\n```")
+
+                    if attachment_chunks:
+                        user_message = user_message.rstrip() + "\n\n" + "\n\n".join(attachment_chunks)
 
                     await ws.send_json({"sender": proxy.name, "text": user_message})
                     await save_message(conv_ref, role="user", sender=proxy.name, content=user_message)
@@ -1719,15 +1861,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                                 "Hello! Ready when you are.",
                             ])
                         })
-                    # Kick off or feed the manager loop
-                    if chat_task is None or chat_task.done():
-                        # (Re)start the manager loop in the background
-                        chat_task = asyncio.create_task(proxy.a_initiate_chat(manager, message=user_message))
-                    else:
-                        # Feed subsequent user turns into the running loop
-                        await proxy.a_inject_user_message(user_message)
-
-
 
                 except WebSocketDisconnect:
                     print("main_chat_loop: WebSocket disconnected.")
