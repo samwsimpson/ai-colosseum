@@ -935,7 +935,7 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
             cookie_kwargs.update(secure=False, samesite="Lax")
         else:
             # Prod: host-only, first-party cookie (best for same-site subdomains)           
-            cookie_kwargs.update(secure=True, samesite="Lax", domain=".aicolosseum.app")
+            cookie_kwargs.update(secure=True, samesite="None")
 
         response.set_cookie(**cookie_kwargs)
 
@@ -1065,14 +1065,14 @@ async def logout(response: Response):
         path="/",
         domain=".aicolosseum.app",
         secure=True,
-        samesite="None",
+        samesite="Lax",
     )
     # Delete new host-only cookie
     response.delete_cookie(
         "refresh_token",
         path="/",
         secure=True,
-        samesite="None",
+        samesite="Lax",
     )
     return {"ok": True}
 
