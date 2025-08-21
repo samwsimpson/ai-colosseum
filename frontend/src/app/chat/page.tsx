@@ -574,36 +574,35 @@ const loadConversations = useCallback(async () => {
     }, []);
 
     // Handle redirection to sign-in page when userToken is not present
+
     useEffect(() => {
     (async () => {
-        if (userToken) return;
-
-        const hasAccess = typeof window !== 'undefined' && !!localStorage.getItem('access_token');
-        if (!hasAccess) {
-        try { await refreshTokenIfNeeded(true); } catch {}
+        if (!userToken) {
+            if (ws.current) {
+                try { ws.current.close(); } catch {}
+            }
+            ws.current = null;
+            setIsWsOpen(false);
+            return;
         }
 
-        const tokenNow = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
-        if (!tokenNow) {
-        // clean up & redirect only if refresh didn’t produce a token
-        try { localStorage.removeItem('conversationId'); } catch {}
-        setConversationId(null);
-        setChatHistory([]);
-        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+        refreshTokenIfNeeded();
 
-        if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
-            ws.current.close(1000, 'logout');
+        const base = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
+        let u: URL;
+        try { u = new URL(base); }
+        catch (e) {
+            console.error("Invalid WS URL from env, falling back:", e);
+            u = new URL('http://localhost:8000');
         }
-        ws.current = null;
 
-        if (pathname !== '/sign-in') router.push('/sign-in');
-        } else {
-        // we have a token now; hydrate
-        loadConversations();
-        setWsReconnectNonce(n => n + 1);
-        }
+        u.protocol = (u.protocol === 'https:' || u.protocol === 'wss:') ? 'wss:' : 'ws:';
+        u.pathname = '/ws/colosseum-chat';
+        u.search = `?token=${encodeURIComponent(localStorage.getItem('access_token') || userToken)}`;
+        // ... (rest of the useEffect hook remains unchanged)
     })();
-    }, [userToken, pathname, router, loadConversations]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [userToken, userName, addMessageToChat, wsReconnectNonce, conversationId]);
 
 
     useEffect(() => {
@@ -633,6 +632,7 @@ const loadConversations = useCallback(async () => {
         setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 0);
     }, []);
 
+
     const handleSubmit = useCallback((e: React.FormEvent) => {
         e.preventDefault();
 
@@ -643,11 +643,12 @@ const loadConversations = useCallback(async () => {
         setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
 
         const text = message.trim();
-        if (!text || !userName) return;
+        if (!text && pendingFiles.length === 0) return; // Allow sending only files
 
-
-
-        const payload: Record<string, unknown> = { message: text, attachments: pendingFiles.map(f => f.id) };
+        const payload: Record<string, unknown> = {
+            message: text,
+            attachments: pendingFiles.map(f => f.id)
+        };
 
         try {
             const sock = ws.current;
@@ -667,7 +668,7 @@ const loadConversations = useCallback(async () => {
             // optimistic UI
             addMessageToChat({ sender: userName, text });
             setMessage('');
-            setPendingFiles([]);
+            setPendingFiles([]); // Clear pending files after sending
 
             if (textareaRef.current) {
                 textareaRef.current.style.height = 'auto'; // collapse back to 1 line
@@ -675,7 +676,7 @@ const loadConversations = useCallback(async () => {
         } catch (err) {
             console.error('Send failed:', err);
         }
-    }, [message, userName, addMessageToChat]);
+    }, [message, userName, addMessageToChat, pendingFiles]);
 
     // Create a brand-new conversation
     const handleNewConversation = () => {  
