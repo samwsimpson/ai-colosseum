@@ -124,6 +124,7 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
   const access = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
   if (access) headers.set('Authorization', `Bearer ${access}`);
 
+  // always send cookies so /api/refresh can read the refresh cookie
   let res = await fetch(url, { ...init, headers, credentials: 'include' });
   if (res.status !== 401) return res;
 
@@ -134,21 +135,24 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
   });
 
   if (!rr.ok) {
-    // Hard fail — clear token so we stop spamming refresh
-    if (typeof window !== 'undefined') localStorage.removeItem('access_token');
-    throw new Error('auth_expired');
+    // Refresh failed — clear any stale token and return original 401
+    try { localStorage.removeItem('access_token'); } catch {}
+    return res;
   }
 
-  const { token } = await rr.json();
+  const { token } = await rr.json().catch(() => ({ token: null as string | null }));
   if (!token) {
-    if (typeof window !== 'undefined') localStorage.removeItem('access_token');
-    throw new Error('auth_expired');
+    try { localStorage.removeItem('access_token'); } catch {}
+    return res; // still return original response to keep call-sites simple
   }
 
-  localStorage.setItem('access_token', token);
+  // Retry once with the fresh token
+  try { localStorage.setItem('access_token', token); } catch {}
   headers.set('Authorization', `Bearer ${token}`);
-  return fetch(url, { ...init, headers, credentials: 'include' });
+  res = await fetch(url, { ...init, headers, credentials: 'include' });
+  return res;
 }
+
 
 
 // Always return a usable access token or null (and set it in localStorage if we got a fresh one)
@@ -368,39 +372,46 @@ export default function ChatPage() {
     const lastRefreshAt = useRef<number>(0);
 
     const refreshTokenIfNeeded = useCallback(async (force = false) => {
-    const now = Date.now();
-    if (!force && now - lastRefreshAt.current < 60_000) return null;
-    if (refreshInFlight.current) return refreshInFlight.current;
+        const now = Date.now();
 
-    refreshInFlight.current = (async () => {
-        try {
-        const res = await fetch(`${API_BASE}/api/refresh`, {
-            method: 'POST',
-            credentials: 'include',
-        });
-        if (!res.ok) {
-            // refresh cookie missing/invalid — clear stale access token and stop looping
-            if (typeof window !== 'undefined') localStorage.removeItem('access_token');
-            return null;
-        }
-        const { token } = await res.json();
-        if (!token) {
-            if (typeof window !== 'undefined') localStorage.removeItem('access_token');
-            return null;
-        }
-        localStorage.setItem('access_token', token);
-        lastRefreshAt.current = Date.now();
-        return token;
-        } catch {
-        if (typeof window !== 'undefined') localStorage.removeItem('access_token');
-        return null;
-        } finally {
-        refreshInFlight.current = null;
-        }
-    })();
+        // throttle non-forced refresh to at most once/minute
+        if (!force && now - lastRefreshAt.current < 60_000) return null;
+        if (refreshInFlight.current) return refreshInFlight.current;
 
-    return refreshInFlight.current;
+        refreshInFlight.current = (async () => {
+            try {
+            const res = await fetch(`${API_BASE}/api/refresh`, {
+                method: 'POST',
+                credentials: 'include',
+            });
+
+            if (!res.ok) {
+                // 401/expired/etc. -> clear any stale access token and bail
+                try { localStorage.removeItem('access_token'); } catch {}
+                lastRefreshAt.current = 0;
+                return null;
+            }
+
+            const { token } = await res.json().catch(() => ({ token: null as string | null }));
+            if (token) {
+                try { localStorage.setItem('access_token', token); } catch {}
+                lastRefreshAt.current = Date.now();
+                return token as string;
+            }
+
+            // No token in response — treat as unauthenticated
+            try { localStorage.removeItem('access_token'); } catch {}
+            lastRefreshAt.current = 0;
+            return null;
+            } finally {
+            // always clear the in-flight marker
+            refreshInFlight.current = null;
+            }
+        })();
+
+        return refreshInFlight.current;
     }, []);
+
 
 
 
@@ -636,7 +647,17 @@ const loadConversations = useCallback(async () => {
             return;
         }
 
-        refreshTokenIfNeeded();
+        // Get a token before connecting the WS
+        const token =
+            (await refreshTokenIfNeeded(false)) ??
+            (typeof window !== 'undefined' ? localStorage.getItem('access_token') : null) ??
+            userToken;
+
+            if (!token) {
+            console.warn('No access token. Skip WS connect and show sign-in.');
+            return;
+        }
+
 
         const base = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
         let u: URL;
@@ -648,7 +669,8 @@ const loadConversations = useCallback(async () => {
 
         u.protocol = (u.protocol === 'https:' || u.protocol === 'wss:') ? 'wss:' : 'ws:';
         u.pathname = '/ws/colosseum-chat';
-        u.search = `?token=${encodeURIComponent(localStorage.getItem('access_token') || userToken)}`;
+        u.search = `?token=${encodeURIComponent(token)}`;
+
         // ... (rest of the useEffect hook remains unchanged)
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
