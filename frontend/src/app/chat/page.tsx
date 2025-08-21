@@ -646,7 +646,13 @@ const loadConversations = useCallback(async () => {
 
         const text = message.trim();
         if (!text && pendingFiles.length === 0) return; // Allow sending only files
-
+        
+        if (!userName) {
+            // Handle the case where the user is not logged in.
+            // You might want to display an error or redirect.
+            console.error("User name is missing, cannot send message.");
+            return;
+        }
         const payload: Record<string, unknown> = {
             message: text,
             attachments: pendingFiles.map(f => f.id)
@@ -662,9 +668,9 @@ const loadConversations = useCallback(async () => {
             // queue until socket is open
             pendingSends.current.push(payload);
             // ensure a reconnect attempt is queued if it’s closed
-            if (!sock || sock.readyState === WebSocket.CLOSED) {
-                setWsReconnectNonce((n) => n + 1);
-            }
+                if (!sock || sock.readyState === WebSocket.CLOSED) {
+                    setWsReconnectNonce((n) => n + 1);
+                }
             }
 
             // optimistic UI
