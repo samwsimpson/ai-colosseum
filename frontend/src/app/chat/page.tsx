@@ -124,25 +124,55 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
   const access = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
   if (access) headers.set('Authorization', `Bearer ${access}`);
 
-  // always send cookies so /api/refresh can read the refresh cookie
   let res = await fetch(url, { ...init, headers, credentials: 'include' });
   if (res.status !== 401) return res;
 
+  // Try one refresh
   const rr = await fetch(`${API_BASE}/api/refresh`, {
     method: 'POST',
     credentials: 'include',
   });
-  if (!rr.ok) return res;
+
+  if (!rr.ok) {
+    // Hard fail — clear token so we stop spamming refresh
+    if (typeof window !== 'undefined') localStorage.removeItem('access_token');
+    throw new Error('auth_expired');
+  }
 
   const { token } = await rr.json();
-  if (token) {
-    if (typeof window !== 'undefined') localStorage.setItem('access_token', token);
-    headers.set('Authorization', `Bearer ${token}`);
-    res = await fetch(url, { ...init, headers, credentials: 'include' });
+  if (!token) {
+    if (typeof window !== 'undefined') localStorage.removeItem('access_token');
+    throw new Error('auth_expired');
   }
-  return res;
+
+  localStorage.setItem('access_token', token);
+  headers.set('Authorization', `Bearer ${token}`);
+  return fetch(url, { ...init, headers, credentials: 'include' });
 }
 
+
+// Always return a usable access token or null (and set it in localStorage if we got a fresh one)
+const getFreshAccessToken = useCallback(async (): Promise<string | null> => {
+  // 1) try current one
+  const existing =
+    typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+  if (existing) return existing;
+
+  // 2) try refresh cookie
+  try {
+    const r = await fetch(`${API_BASE}/api/refresh`, {
+      method: 'POST',
+      credentials: 'include', // <- IMPORTANT so the refresh cookie is sent
+    });
+    if (!r.ok) return null;
+    const { token } = await r.json();
+    if (!token) return null;
+    localStorage.setItem('access_token', token);
+    return token;
+  } catch {
+    return null;
+  }
+}, []);
 
 type AgentName = 'ChatGPT' | 'Claude' | 'Gemini' | 'Mistral';
 const ALLOWED_AGENTS: AgentName[] = ['ChatGPT', 'Claude', 'Gemini', 'Mistral'];
@@ -338,35 +368,39 @@ export default function ChatPage() {
     const lastRefreshAt = useRef<number>(0);
 
     const refreshTokenIfNeeded = useCallback(async (force = false) => {
-        const now = Date.now();
+    const now = Date.now();
+    if (!force && now - lastRefreshAt.current < 60_000) return null;
+    if (refreshInFlight.current) return refreshInFlight.current;
 
-        // throttle non-forced refresh to at most once/minute
-        if (!force && now - lastRefreshAt.current < 60_000) return;
-        if (refreshInFlight.current) return refreshInFlight.current;
+    refreshInFlight.current = (async () => {
+        try {
+        const res = await fetch(`${API_BASE}/api/refresh`, {
+            method: 'POST',
+            credentials: 'include',
+        });
+        if (!res.ok) {
+            // refresh cookie missing/invalid — clear stale access token and stop looping
+            if (typeof window !== 'undefined') localStorage.removeItem('access_token');
+            return null;
+        }
+        const { token } = await res.json();
+        if (!token) {
+            if (typeof window !== 'undefined') localStorage.removeItem('access_token');
+            return null;
+        }
+        localStorage.setItem('access_token', token);
+        lastRefreshAt.current = Date.now();
+        return token;
+        } catch {
+        if (typeof window !== 'undefined') localStorage.removeItem('access_token');
+        return null;
+        } finally {
+        refreshInFlight.current = null;
+        }
+    })();
 
-        refreshInFlight.current = (async () => {
-            try {
-            const res = await fetch(`${API_BASE}/api/refresh`, {
-                method: 'POST',
-                credentials: 'include',
-            });
-            if (!res.ok) throw new Error('refresh failed');
-            const { token } = await res.json();
-            if (token) {
-                localStorage.setItem('access_token', token);
-                lastRefreshAt.current = Date.now();
-            } else {
-                throw new Error('no token in refresh');
-            }
-            } finally {
-            // always clear the in-flight marker
-            refreshInFlight.current = null;
-            }
-        })();
-
-        return refreshInFlight.current;
+    return refreshInFlight.current;
     }, []);
-    // --- end guarded token refresh helpers ---
 
 
 
@@ -813,23 +847,28 @@ const loadConversations = useCallback(async () => {
         }
         
         // Try to top up access token if it's close to expiring (non-blocking).
-        refreshTokenIfNeeded();
+        // Ensure we actually have a valid access token before connecting
+        const token = await getFreshAccessToken();
+        if (!token) {
+        console.warn('No access token. Skip WS connect and show sign-in.');
+        // TODO: optionally flip a "needsAuth" UI flag here
+        return;
+        }
 
-        // Build the URL safely
         const base = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
         let u: URL;
-        try {
-            u = new URL(base);
-        } catch (e) {
-            console.error("Invalid WS URL from env, falling back:", e);
-            u = new URL('http://localhost:8000');
+        try { u = new URL(base); }
+        catch (e) {
+        console.error("Invalid WS URL from env, falling back:", e);
+        u = new URL('http://localhost:8000');
         }
 
         u.protocol = (u.protocol === 'https:' || u.protocol === 'wss:') ? 'wss:' : 'ws:';
         u.pathname = '/ws/colosseum-chat';
-        u.search = `?token=${encodeURIComponent(localStorage.getItem('access_token') || userToken)}`;
+        u.search = `?token=${encodeURIComponent(token)}`;
 
         const socket = new WebSocket(u.toString());
+
         ws.current = socket;
         setIsWsOpen(false);
 
