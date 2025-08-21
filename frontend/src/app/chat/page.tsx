@@ -2,7 +2,6 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useUser } from '../../context/UserContext';
-import { usePathname, useRouter } from 'next/navigation';
 
 interface Message {
     sender: string;
@@ -153,30 +152,26 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
   return res;
 }
 
-
-
 // Always return a usable access token or null (and set it in localStorage if we got a fresh one)
-const getFreshAccessToken = useCallback(async (): Promise<string | null> => {
-  // 1) try current one
+async function getFreshAccessToken(): Promise<string | null> {
   const existing =
     typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
   if (existing) return existing;
 
-  // 2) try refresh cookie
   try {
     const r = await fetch(`${API_BASE}/api/refresh`, {
       method: 'POST',
-      credentials: 'include', // <- IMPORTANT so the refresh cookie is sent
+      credentials: 'include', // send refresh cookie
     });
     if (!r.ok) return null;
-    const { token } = await r.json();
+    const { token } = await r.json().catch(() => ({ token: null as string | null }));
     if (!token) return null;
-    localStorage.setItem('access_token', token);
+    try { localStorage.setItem('access_token', token); } catch {}
     return token;
   } catch {
     return null;
   }
-}, []);
+}
 
 type AgentName = 'ChatGPT' | 'Claude' | 'Gemini' | 'Mistral';
 const ALLOWED_AGENTS: AgentName[] = ['ChatGPT', 'Claude', 'Gemini', 'Mistral'];
@@ -186,13 +181,7 @@ export default function ChatPage() {
     const typingTTLRef = useRef<Partial<Record<AgentName, number>>>({});
     const typingShowDelayRef = useRef<Partial<Record<AgentName, number>>>({});
     const typingTimersRef = useRef<Partial<Record<AgentName, number>>>({});    
-    const clearTypingTimer = (agent: AgentName) => {
-        const id = typingTimersRef.current[agent];
-        if (typeof id === 'number') {
-         window.clearTimeout(id);
-            delete typingTimersRef.current[agent];
-        }
-    };
+    
     const clearTypingTTL = (agent: AgentName) => {
         const id = typingTTLRef.current[agent];
         if (typeof id === 'number') {
@@ -234,9 +223,6 @@ export default function ChatPage() {
     };    
 
     const { userName, userToken } = useUser();
-    const router = useRouter();
-    const pathname = usePathname();
-
     const [message, setMessage] = useState<string>('');
     const [chatHistory, setChatHistory] = useState<Message[]>([]);
     const [isWsOpen, setIsWsOpen] = useState<boolean>(false);
@@ -365,13 +351,14 @@ export default function ChatPage() {
 
     // ws reconnect guards/backoff
     const authFailedRef = useRef(false);
-    const reconnectBackoffRef = useRef(1000); // start at 1s, exponential up to 15s
 
     // --- guarded token refresh helpers (NO HOOKS INSIDE) ---
-    const refreshInFlight = useRef<Promise<void> | null>(null);
+    const refreshInFlight = useRef<Promise<string | null> | null>(null);
+
     const lastRefreshAt = useRef<number>(0);
 
-    const refreshTokenIfNeeded = useCallback(async (force = false) => {
+    const refreshTokenIfNeeded = useCallback(
+        async (force = false): Promise<string | null> => {
         const now = Date.now();
 
         // throttle non-forced refresh to at most once/minute
@@ -634,47 +621,7 @@ const loadConversations = useCallback(async () => {
         setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 0);
     }, []);
 
-    // Handle redirection to sign-in page when userToken is not present
-
-    useEffect(() => {
-    (async () => {
-        if (!userToken) {
-            if (ws.current) {
-                try { ws.current.close(); } catch {}
-            }
-            ws.current = null;
-            setIsWsOpen(false);
-            return;
-        }
-
-        // Get a token before connecting the WS
-        const token =
-            (await refreshTokenIfNeeded(false)) ??
-            (typeof window !== 'undefined' ? localStorage.getItem('access_token') : null) ??
-            userToken;
-
-            if (!token) {
-            console.warn('No access token. Skip WS connect and show sign-in.');
-            return;
-        }
-
-
-        const base = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
-        let u: URL;
-        try { u = new URL(base); }
-        catch (e) {
-            console.error("Invalid WS URL from env, falling back:", e);
-            u = new URL('http://localhost:8000');
-        }
-
-        u.protocol = (u.protocol === 'https:' || u.protocol === 'wss:') ? 'wss:' : 'ws:';
-        u.pathname = '/ws/colosseum-chat';
-        u.search = `?token=${encodeURIComponent(token)}`;
-
-        // ... (rest of the useEffect hook remains unchanged)
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [userToken, userName, addMessageToChat, wsReconnectNonce, conversationId]);
+    
 
 
     useEffect(() => {
@@ -858,7 +805,7 @@ const loadConversations = useCallback(async () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // WebSocket connection logic
     useEffect(() => {
-          let aborted = false;
+        let currentWs: WebSocket | null = null;
         (async () => {
         // Don't try to connect without a token.
         if (!userToken) {
@@ -892,11 +839,11 @@ const loadConversations = useCallback(async () => {
         u.search = `?token=${encodeURIComponent(token)}`;
 
         const socket = new WebSocket(u.toString());
+        currentWs = socket;
 
         ws.current = socket;
         setIsWsOpen(false);
-
-        const currentWs = socket;
+        
         const isNonEmptyString = (v: unknown): v is string =>
             typeof v === 'string' && v.length > 0;
 
@@ -911,7 +858,7 @@ const loadConversations = useCallback(async () => {
                 setIsWsOpen(true);
                 loadConversations();
                 authFailedRef.current = false;
-                reconnectBackoffRef.current = 1000;
+          
         
                 const initialPayload: Record<string, unknown> = {
                     user_name: userName,
@@ -1021,11 +968,15 @@ const loadConversations = useCallback(async () => {
         });
         })();
         return () => {
-            if (currentWs && (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING)) {
-                try { currentWs.close(); } catch {}
+            if (
+            currentWs &&
+            (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING)
+            ) {
+            try { currentWs.close(); } catch {}
             }
-        };
-    }, [userToken, userName, addMessageToChat, wsReconnectNonce, conversationId]);
+        };        
+        }, [userToken, userName, addMessageToChat, wsReconnectNonce, conversationId, loadConversations, hydrateConversation]);
+
 
         
 
