@@ -1065,14 +1065,14 @@ async def logout(response: Response):
         path="/",
         domain=".aicolosseum.app",
         secure=True,
-        samesite="None",
+        samesite="Lax",
     )
     # Delete new host-only cookie
     response.delete_cookie(
         "refresh_token",
         path="/",
         secure=True,
-        samesite="None",
+        samesite="Lax",
     )
     return {"ok": True}
 
