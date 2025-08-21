@@ -108,9 +108,6 @@ function buildAuthHeaders(userToken?: string | null): Headers {
   return h;
 }
 
-
-
-
 // Helper: fetch with Authorization header and 1x retry on 401 using /api/refresh
 async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
   const url =
