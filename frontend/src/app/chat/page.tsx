@@ -573,6 +573,22 @@ const loadConversations = useCallback(async () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    // Use useCallback to memoize the function, preventing unnecessary re-renders
+    const addMessageToChat = useCallback((msg: { sender: string; text: string }) => {
+        const cleanSender = (msg.sender || '').trim();
+        setChatHistory(prev => {
+            const next = [
+                ...prev,
+                { sender: cleanSender, model: cleanSender, text: msg.text }
+            ];
+            // Prevent hydrate from firing based on a stale length in racey WS events
+            chatLengthRef.current = next.length;
+            return next;
+        });
+        // keep the newest message in view
+        setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 0);
+    }, []);
+
     // Handle redirection to sign-in page when userToken is not present
 
     useEffect(() => {
@@ -616,21 +632,7 @@ const loadConversations = useCallback(async () => {
     return () => document.removeEventListener('visibilitychange', onVisible);
     }, []);
 
-    // Use useCallback to memoize the function, preventing unnecessary re-renders
-    const addMessageToChat = useCallback((msg: { sender: string; text: string }) => {
-        const cleanSender = (msg.sender || '').trim();
-        setChatHistory(prev => {
-            const next = [
-                ...prev,
-                { sender: cleanSender, model: cleanSender, text: msg.text }
-            ];
-            // Prevent hydrate from firing based on a stale length in racey WS events
-            chatLengthRef.current = next.length;
-            return next;
-        });
-        // keep the newest message in view
-        setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 0);
-    }, []);
+
 
 
     const handleSubmit = useCallback((e: React.FormEvent) => {
