@@ -868,11 +868,11 @@ const loadConversations = useCallback(async () => {
                     hydrateConversation(conversationId);
                     initialPayload.conversation_id = conversationId;
                 }
-                currentWs.send(JSON.stringify(initialPayload));
+                socket.send(JSON.stringify(initialPayload));
         
                 while (pendingSends.current.length > 0) {
                     const next = pendingSends.current.shift();
-                    if (next) currentWs.send(JSON.stringify(next));
+                    if (next) socket.send(JSON.stringify(next));
                 }
             },
         
