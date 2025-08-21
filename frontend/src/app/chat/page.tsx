@@ -803,8 +803,6 @@ const loadConversations = useCallback(async () => {
             setIsWsOpen(false);
             return;
         }
-
-
         
         // Try to top up access token if it's close to expiring (non-blocking).
         refreshTokenIfNeeded();
