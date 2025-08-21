@@ -427,7 +427,7 @@ export default function ChatPage() {
             }
             const maybeObj = c as { text?: unknown };
             if (maybeObj && typeof maybeObj.text === 'string') return maybeObj.text;
-            try { return JSON.stringify(c); } catch { return ''; }
+                try { return JSON.stringify(c); } catch { return ''; }
             };
 
             const normalized = items.map<Message>((m) => {
@@ -450,8 +450,6 @@ export default function ChatPage() {
             /* noop */
         }
         }, [userName]);
-
-
 
     useEffect(() => {
         // If there's an active conversation ID and the chat history is empty,
