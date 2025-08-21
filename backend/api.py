@@ -935,7 +935,7 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
             cookie_kwargs.update(secure=False, samesite="Lax")
         else:
             # Prod: host-only, first-party cookie (best for same-site subdomains)           
-            cookie_kwargs.update(secure=True, samesite="None", domain=".aicolosseum.app")
+            cookie_kwargs.update(secure=True, samesite="None")
 
         response.set_cookie(**cookie_kwargs)
 

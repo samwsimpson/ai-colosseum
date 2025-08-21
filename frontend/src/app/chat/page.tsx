@@ -108,6 +108,9 @@ function buildAuthHeaders(userToken?: string | null): Headers {
   return h;
 }
 
+
+
+
 // Helper: fetch with Authorization header and 1x retry on 401 using /api/refresh
 async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
   const url =
@@ -424,7 +427,7 @@ export default function ChatPage() {
             }
             const maybeObj = c as { text?: unknown };
             if (maybeObj && typeof maybeObj.text === 'string') return maybeObj.text;
-                try { return JSON.stringify(c); } catch { return ''; }
+            try { return JSON.stringify(c); } catch { return ''; }
             };
 
             const normalized = items.map<Message>((m) => {
