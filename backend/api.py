@@ -935,7 +935,7 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
             cookie_kwargs.update(secure=False, samesite="Lax")
         else:
             # production over https + cross-site
-            cookie_kwargs.update(secure=True, samesite="None")
+            cookie_kwargs.update(secure=True, samesite="Lax", domain=".aicolosseum.app")
             # intentionally NO domain attribute → host-only cookie for api.aicolosseum.app
 
         response.set_cookie(**cookie_kwargs)
