@@ -223,7 +223,7 @@ export default function ChatPage() {
         form.append('file', file);
         if (conversationId) form.append('conversation_id', conversationId);
 
-        const res = await fetch(`/api/uploads`, {
+        const res = await fetch(`${API_BASE}/api/uploads`, {
             method: 'POST',
             body: form,
             headers: token ? { Authorization: `Bearer ${token}` } : undefined,

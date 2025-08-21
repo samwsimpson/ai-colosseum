@@ -916,25 +916,27 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
 
         # Refresh token cookie (silent refresh later)
         refresh_token = create_refresh_token(data={"sub": user_id})
-        # AFTER — environment-aware cookie
-        # If you have the redirect URI here, this is an easy local/prod test:
-        is_local = auth_code.redirect_uri.startswith("http://localhost") if "auth_code" in locals() else False
 
+        # Detect local dev by redirect_uri; otherwise treat as production
+        is_local = str(auth_code.redirect_uri or "").startswith("http://localhost")
+
+        # Host-only cookie bound to api host. In production we must allow cross-site
+        # requests (www.aicolosseum.com -> api.aicolosseum.app), so SameSite=None.
         cookie_kwargs = dict(
             key="refresh_token",
             value=refresh_token,
             max_age=REFRESH_TOKEN_EXPIRE_SECONDS,
-            httponly=True,            
-            path="/",                    # make it visible to /api/refresh
-            # domain is optional; omit it to bind to api.aicolosseum.app automatically
+            httponly=True,
+            path="/",
         )
 
         if is_local:
-            # Local dev: cookie must be readable over http://localhost
+            # local dev over http
             cookie_kwargs.update(secure=False, samesite="Lax")
         else:
-            # Prod: host-only, first-party cookie (best for same-site subdomains)           
-            cookie_kwargs.update(secure=True, samesite="Lax", domain=".aicolosseum.app")
+            # production over https + cross-site
+            cookie_kwargs.update(secure=True, samesite="None")
+            # intentionally NO domain attribute → host-only cookie for api.aicolosseum.app
 
         response.set_cookie(**cookie_kwargs)
 
