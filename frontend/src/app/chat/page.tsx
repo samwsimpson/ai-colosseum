@@ -67,6 +67,15 @@ type ConversationListResponse =
   | { data: ConversationListItem[] }
   | { data: { items: ConversationListItem[] } };
 
+type UploadedAttachment = {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  signed_url?: string | null;
+};
+
+
 // Base REST API (mirror WS host but force http/https for REST)
 function resolveApiBase(): string {
   const fromEnv = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '');
@@ -205,6 +214,46 @@ export default function ChatPage() {
 
     const [wsReconnectNonce, setWsReconnectNonce] = useState(0);
     const [conversationId, setConversationId] = useState<string | null>(null);
+    
+    const [pendingFiles, setPendingFiles] = useState<UploadedAttachment[]>([]);
+
+    const uploadOne = async (file: File, conversationId: string | null): Promise<UploadedAttachment> => {
+        const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+        const form = new FormData();
+        form.append('file', file);
+        if (conversationId) form.append('conversation_id', conversationId);
+
+        const res = await fetch(`/api/uploads`, {
+            method: 'POST',
+            body: form,
+            headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+            credentials: 'include',
+        });
+        if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+        return res.json();
+    };
+
+    const handleFilePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = e.target.files;
+        if (!files || !files.length) return;
+        try {
+            const limit = Math.min(files.length, 3); // keep in sync with backend
+            const uploaded: UploadedAttachment[] = [];
+            for (let i = 0; i < limit; i++) {
+            uploaded.push(await uploadOne(files[i], conversationId));
+            }
+            setPendingFiles(prev => [...prev, ...uploaded]);
+        } catch (err) {
+            console.error(err);
+            alert('Upload failed. Try smaller text/code files.');
+        } finally {
+            // reset the input so the same file can be chosen again
+            e.currentTarget.value = '';
+        }
+    };
+
+    const removePending = (id: string) => setPendingFiles(prev => prev.filter(p => p.id !== id));
+
 
     // Sidebar + conversation list
     const [conversations, setConversations] = useState<ConversationListItem[]>([]);
@@ -600,7 +649,7 @@ const loadConversations = useCallback(async () => {
 
 
 
-        const payload: Record<string, unknown> = { message: text };
+        const payload: Record<string, unknown> = { message: text, attachments: pendingFiles.map(f => f.id) };
 
         try {
             const sock = ws.current;
@@ -620,6 +669,8 @@ const loadConversations = useCallback(async () => {
             // optimistic UI
             addMessageToChat({ sender: userName, text });
             setMessage('');
+            setPendingFiles([]);
+
             if (textareaRef.current) {
                 textareaRef.current.style.height = 'auto'; // collapse back to 1 line
             }
@@ -1234,6 +1285,31 @@ const loadConversations = useCallback(async () => {
 
   <form onSubmit={handleSubmit} className="max-w-4xl mx-auto p-4 md:p-6">
     <div className="flex gap-4">
+        <div className="flex flex-col items-start gap-2 pt-1">
+            <label className="inline-flex items-center px-3 py-2 rounded-xl bg-gray-800 border border-gray-700 text-sm cursor-pointer hover:bg-gray-700">
+                <input
+                type="file"
+                accept=".txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.java,.go,.rb,.php,.css,.html,.sql,.yaml,.yml,.sh,.c,.cpp,.cs,.rs,.kt"
+                multiple
+                onChange={handleFilePick}
+                className="hidden"
+                />
+                Attach files
+            </label>
+
+            {/* chips for pending files */}
+            {pendingFiles.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                {pendingFiles.map(f => (
+                    <span key={f.id} className="inline-flex items-center gap-2 px-2 py-1 text-xs rounded-full bg-gray-800 border border-gray-700">
+                    <span className="truncate max-w-[180px]" title={f.name}>{f.name}</span>
+                    <button type="button" onClick={() => removePending(f.id)} className="text-gray-300 hover:text-white">×</button>
+                    </span>
+                ))}
+                </div>
+            )}
+        </div>
+
         <textarea
             ref={textareaRef}
             rows={1}
