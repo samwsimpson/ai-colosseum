@@ -858,6 +858,8 @@ const loadConversations = useCallback(async () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // WebSocket connection logic
     useEffect(() => {
+          let aborted = false;
+        (async () => {
         // Don't try to connect without a token.
         if (!userToken) {
             if (ws.current) {
@@ -1017,6 +1019,7 @@ const loadConversations = useCallback(async () => {
                 setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
             }
         });
+        })();
         return () => {
             if (currentWs && (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING)) {
                 try { currentWs.close(); } catch {}
