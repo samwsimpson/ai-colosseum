@@ -829,6 +829,8 @@ const loadConversations = useCallback(async () => {
         let token: string | null = null;
         try {
             token = await getFreshAccessToken();
+           
+
         } catch {
             token = null; // continue anonymously
         }
@@ -853,7 +855,7 @@ const loadConversations = useCallback(async () => {
         if (token) {
             u.searchParams.set('token', token);
         }
-
+        console.debug('[WS] connecting to', u.origin + u.pathname, 'token?', Boolean(token));
         const socket = new WebSocket(u.toString());
         currentWs = socket;
 
@@ -896,7 +898,8 @@ const loadConversations = useCallback(async () => {
                 let msg: ServerMessage;
                 try { msg = JSON.parse(event.data); }
                 catch { return; }
-
+                console.debug('[WS<-] raw', event.data);
+                console.debug('[WS<-] parsed', msg);
                 if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
                     const id = msg.id;
                     setConversationId(curr => curr || id);
@@ -941,10 +944,20 @@ const loadConversations = useCallback(async () => {
                     return;
                 }
 
-                if (sender && typeof msg.text === 'string' && ALLOWED_AGENTS.includes(sender as AgentName)) {
+                if (typeof msg.text === 'string') {
+                // If it's one of your named agents, clear its typing; otherwise just dump typing state.
+                if (sender && ALLOWED_AGENTS.includes(sender as AgentName)) {
                     setTypingWithDelayAndTTL(sender as AgentName, false);
-                    addMessageToChat({ sender, text: msg.text });
-                    return;
+                } else {
+                    setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+                }
+
+                // Show *any* sender; fall back to "Assistant" if none/unknown
+                const shownSender =
+                    sender && sender.trim() ? sender.trim() : 'Assistant';
+
+                addMessageToChat({ sender: shownSender, text: msg.text });
+                return;
                 }
             },
             onclose: (ev: CloseEvent) => {
