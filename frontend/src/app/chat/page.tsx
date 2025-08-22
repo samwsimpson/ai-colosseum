@@ -158,6 +158,9 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
   res = await fetch(url, { ...init, headers, credentials: 'include' });
   return res;
 }
+// safe type guard for narrowing unknown -> Record<string, unknown>
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === 'object';
 
 // Always return a usable access token or null (and set it in localStorage if we got a fresh one)
 async function getFreshAccessToken(): Promise<string | null> {
@@ -928,7 +931,19 @@ const loadConversations = useCallback(async () => {
         }
         console.debug('[WS] connecting to', u.origin + u.pathname, 'token?', Boolean(token));
         const dbgTxt = extractWsText(msg);
-        console.debug('[WS<-] sender=', (msg as any).sender, 'type=', (msg as any).type, 'client_id=', (msg as any).client_id, 'text=', dbgTxt?.slice(0, 80));
+        if (isRecord(msg)) {
+            const sender    = typeof msg['sender']     === 'string' ? (msg['sender']     as string) : undefined;
+            const type      = typeof msg['type']       === 'string' ? (msg['type']       as string) : undefined;
+            const client_id = typeof msg['client_id']  === 'string' ? (msg['client_id']  as string) : undefined;
+            const textRaw   =
+                (typeof msg['text']    === 'string' ? (msg['text']    as string) : undefined) ??
+                (typeof msg['message'] === 'string' ? (msg['message'] as string) : undefined);
+
+            console.debug('[WS<-] sender=', sender, 'type=', type, 'client_id=', client_id, 'text=', textRaw?.slice(0, 80));
+        } else {
+            console.debug('[WS<-] non-object message:', msg);
+        }
+
 
         const socket = new WebSocket(u.toString());
         currentWs = socket;
