@@ -2,7 +2,6 @@
 
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { useUser } from '../../context/UserContext';
-import { usePathname, useRouter } from 'next/navigation';
 
 interface Message {
     sender: string;
@@ -26,6 +25,7 @@ interface ServerMessage {
   // add these for conversation_meta payloads
   title?: string;
   updated_at?: string;
+  client_id?: string;
 }
 
 // Past-convo list item returned by the API
@@ -67,6 +67,15 @@ type ConversationListResponse =
   | { data: ConversationListItem[] }
   | { data: { items: ConversationListItem[] } };
 
+type UploadedAttachment = {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  signed_url?: string | null;
+};
+
+
 // Base REST API (mirror WS host but force http/https for REST)
 function resolveApiBase(): string {
   const fromEnv = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '');
@@ -86,6 +95,8 @@ function resolveApiBase(): string {
     return 'http://localhost:8000';
   }
 }
+// Opt-in switch: only try cookie refresh if you set NEXT_PUBLIC_USE_REFRESH=true
+const REFRESH_ENABLED = process.env.NEXT_PUBLIC_USE_REFRESH === 'true';
 const API_BASE = resolveApiBase();
 
 // Always include an Authorization header using either localStorage or userToken fallback.
@@ -98,7 +109,6 @@ function buildAuthHeaders(userToken?: string | null): Headers {
   if (tok) h.set('Authorization', `Bearer ${tok}`);
   return h;
 }
-
 
 
 
@@ -118,38 +128,121 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
   // always send cookies so /api/refresh can read the refresh cookie
   let res = await fetch(url, { ...init, headers, credentials: 'include' });
   if (res.status !== 401) return res;
+    // If refresh-cookie flow is not enabled, don't hammer /api/refresh
+    if (!REFRESH_ENABLED) {
+    try { localStorage.removeItem('access_token'); } catch {}
+    return res;
+    }
 
+  // Try one refresh
   const rr = await fetch(`${API_BASE}/api/refresh`, {
     method: 'POST',
     credentials: 'include',
   });
-  if (!rr.ok) return res;
 
-  const { token } = await rr.json();
-  if (token) {
-    if (typeof window !== 'undefined') localStorage.setItem('access_token', token);
-    headers.set('Authorization', `Bearer ${token}`);
-    res = await fetch(url, { ...init, headers, credentials: 'include' });
+  if (!rr.ok) {
+    // Refresh failed — clear any stale token and return original 401
+    try { localStorage.removeItem('access_token'); } catch {}
+    return res;
   }
+
+  const { token } = await rr.json().catch(() => ({ token: null as string | null }));
+  if (!token) {
+    try { localStorage.removeItem('access_token'); } catch {}
+    return res; // still return original response to keep call-sites simple
+  }
+
+  // Retry once with the fresh token
+  try { localStorage.setItem('access_token', token); } catch {}
+  headers.set('Authorization', `Bearer ${token}`);
+  res = await fetch(url, { ...init, headers, credentials: 'include' });
   return res;
 }
+// safe type guard for narrowing unknown -> Record<string, unknown>
+const isRecord = (v: unknown): v is Record<string, unknown> =>
+  !!v && typeof v === 'object';
 
+// Always return a usable access token or null (and set it in localStorage if we got a fresh one)
+async function getFreshAccessToken(): Promise<string | null> {
+  const existing =
+    typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+  if (existing) return existing;
+    if (!REFRESH_ENABLED) {
+    // No cookie refresh—just use whatever is already in localStorage
+    return existing;
+    }
+  try {
+    const r = await fetch(`${API_BASE}/api/refresh`, {
+      method: 'POST',
+      credentials: 'include', // send refresh cookie
+    });
+    if (!r.ok) return null;
+    const { token } = await r.json().catch(() => ({ token: null as string | null }));
+    if (!token) return null;
+    try { localStorage.setItem('access_token', token); } catch {}
+    return token;
+  } catch {
+    return null;
+  }
+}
 
 type AgentName = 'ChatGPT' | 'Claude' | 'Gemini' | 'Mistral';
 const ALLOWED_AGENTS: AgentName[] = ['ChatGPT', 'Claude', 'Gemini', 'Mistral'];
+// ---- helpers to normalize/compare names & dedupe client echoes ----
+// one canonical normalizer: spaces, underscores, dots, and hyphens are equivalent
+const normalize = (s?: string | null) =>
+  (s ?? '').trim().toLowerCase().replace(/[\s_.-]+/g, '');
+
+// single source of truth
+const isSelf = (sender?: string | null, me?: string | null) =>
+  !!sender && !!me && normalize(sender) === normalize(me);
+    // Turn a variety of server payload shapes into a string
+    const toTextFromUnknown = (v: unknown): string => {
+    if (typeof v === 'string') return v;
+    if (Array.isArray(v)) {
+        return v
+        .map(p => {
+            if (typeof p === 'string') return p;
+            const maybe = p as { text?: unknown } | null;
+            return (maybe && typeof maybe.text === 'string') ? maybe.text : '';
+        })
+        .join('\n')
+        .trim();
+    }
+    if (v && typeof v === 'object' && 'text' in v) {
+        const maybe = v as { text?: unknown };
+        if (typeof maybe.text === 'string') return maybe.text;
+    }
+    try { return JSON.stringify(v); } catch { return ''; }
+    };
+
+    // Accept text from text | message | content | body fields
+    const extractWsText = (m: ServerMessage | Record<string, unknown>): string | null => {
+    const cand =
+        (m as { text?: unknown }).text ??
+        (m as { message?: unknown }).message ??
+        (m as { content?: unknown }).content ??
+        (m as { body?: unknown }).body ??
+        (m as { reply?: unknown }).reply ??
+        (m as { response?: unknown }).response;
+
+    const t = toTextFromUnknown(cand);
+    return t && t.trim() ? t.trim() : null;
+    };
+
+
+
+// cheap uid
+const uid = () =>
+  (globalThis.crypto?.randomUUID?.() ||
+   Math.random().toString(36).slice(2) + Date.now().toString(36));
 
 export default function ChatPage() {
 
     const typingTTLRef = useRef<Partial<Record<AgentName, number>>>({});
     const typingShowDelayRef = useRef<Partial<Record<AgentName, number>>>({});
     const typingTimersRef = useRef<Partial<Record<AgentName, number>>>({});    
-    const clearTypingTimer = (agent: AgentName) => {
-        const id = typingTimersRef.current[agent];
-        if (typeof id === 'number') {
-         window.clearTimeout(id);
-            delete typingTimersRef.current[agent];
-        }
-    };
+    
     const clearTypingTTL = (agent: AgentName) => {
         const id = typingTTLRef.current[agent];
         if (typeof id === 'number') {
@@ -191,9 +284,6 @@ export default function ChatPage() {
     };    
 
     const { userName, userToken } = useUser();
-    const router = useRouter();
-    const pathname = usePathname();
-
     const [message, setMessage] = useState<string>('');
     const [chatHistory, setChatHistory] = useState<Message[]>([]);
     const [isWsOpen, setIsWsOpen] = useState<boolean>(false);
@@ -205,6 +295,49 @@ export default function ChatPage() {
 
     const [wsReconnectNonce, setWsReconnectNonce] = useState(0);
     const [conversationId, setConversationId] = useState<string | null>(null);
+    
+    const [pendingFiles, setPendingFiles] = useState<UploadedAttachment[]>([]);
+
+    const uploadOne = async (file: File, conversationId: string | null): Promise<UploadedAttachment> => {
+    const token =
+        (typeof window !== 'undefined' ? localStorage.getItem('access_token') : null) ||
+        userToken ||
+        null;
+        const form = new FormData();
+        form.append('file', file);
+        if (conversationId) form.append('conversation_id', conversationId);
+
+        const res = await fetch(`${API_BASE}/api/uploads`, {
+            method: 'POST',
+            body: form,
+            headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+            credentials: 'include',
+        });
+        if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+        return res.json();
+    };
+
+    const handleFilePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+        const files = e.target.files;
+        if (!files || !files.length) return;
+        try {
+            const limit = Math.min(files.length, 3); // keep in sync with backend
+            const uploaded: UploadedAttachment[] = [];
+            for (let i = 0; i < limit; i++) {
+            uploaded.push(await uploadOne(files[i], conversationId));
+            }
+            setPendingFiles(prev => [...prev, ...uploaded]);
+        } catch (err) {
+            console.error(err);
+            alert('Upload failed. Try smaller text/code files.');
+        } finally {
+            // reset the input so the same file can be chosen again
+            e.currentTarget.value = '';
+        }
+    };
+
+    const removePending = (id: string) => setPendingFiles(prev => prev.filter(p => p.id !== id));
+
 
     // Sidebar + conversation list
     const [conversations, setConversations] = useState<ConversationListItem[]>([]);
@@ -273,6 +406,13 @@ export default function ChatPage() {
     const chatLengthRef = useRef(0);
     useEffect(() => { chatLengthRef.current = chatHistory.length; }, [chatHistory.length]);
     const pendingSends = useRef<Array<Record<string, unknown>>>([]);
+    // Prevent rapid double-submits
+    const isSubmittingRef = useRef<boolean>(false);
+    // Remember the last user message we sent so we can ignore server echos
+    const lastUserTextRef = useRef<string | null>(null);
+    // Track which client_id belongs to the user's most recent send
+    const lastUserClientIdRef = useRef<string | null>(null);
+
     // Tracks reconnect backoff and any pending timer
     const reconnectRef = useRef<{ tries: number; timer: number | null }>({
         tries: 0,
@@ -282,42 +422,55 @@ export default function ChatPage() {
 
     // ws reconnect guards/backoff
     const authFailedRef = useRef(false);
-    const reconnectBackoffRef = useRef(1000); // start at 1s, exponential up to 15s
 
     // --- guarded token refresh helpers (NO HOOKS INSIDE) ---
-    const refreshInFlight = useRef<Promise<void> | null>(null);
+    const refreshInFlight = useRef<Promise<string | null> | null>(null);
     const lastRefreshAt = useRef<number>(0);
 
-    const refreshTokenIfNeeded = useCallback(async (force = false) => {
+    const refreshTokenIfNeeded = useCallback(
+    async (force = false): Promise<string | null> => {
+        if (!REFRESH_ENABLED) return null;
+
         const now = Date.now();
 
         // throttle non-forced refresh to at most once/minute
-        if (!force && now - lastRefreshAt.current < 60_000) return;
+        if (!force && now - lastRefreshAt.current < 60_000) return null;
         if (refreshInFlight.current) return refreshInFlight.current;
 
         refreshInFlight.current = (async () => {
-            try {
+        try {
             const res = await fetch(`${API_BASE}/api/refresh`, {
-                method: 'POST',
-                credentials: 'include',
+            method: 'POST',
+            credentials: 'include',
             });
-            if (!res.ok) throw new Error('refresh failed');
-            const { token } = await res.json();
+
+            if (!res.ok) {
+            try { localStorage.removeItem('access_token'); } catch {}
+            lastRefreshAt.current = 0;
+            return null;
+            }
+
+            const { token } = await res.json().catch(() => ({ token: null as string | null }));
             if (token) {
-                localStorage.setItem('access_token', token);
-                lastRefreshAt.current = Date.now();
-            } else {
-                throw new Error('no token in refresh');
+            try { localStorage.setItem('access_token', token); } catch {}
+            lastRefreshAt.current = Date.now();
+            return token as string;
             }
-            } finally {
-            // always clear the in-flight marker
+
+            try { localStorage.removeItem('access_token'); } catch {}
+            lastRefreshAt.current = 0;
+            return null;
+        } finally {
             refreshInFlight.current = null;
-            }
+        }
         })();
 
         return refreshInFlight.current;
-    }, []);
-    // --- end guarded token refresh helpers ---
+    },
+    []
+    );
+
+
 
 
 
@@ -402,8 +555,6 @@ export default function ChatPage() {
         }
         }, [userName]);
 
-
-
     useEffect(() => {
         // If there's an active conversation ID and the chat history is empty,
         // it's a signal that we need to hydrate the chat from the backend.
@@ -430,8 +581,9 @@ const loadConversations = useCallback(async () => {
         query.set('limit', '100');
         query.set('token', token);
 
-        const res = await apiFetch(`/api/conversations/by_token?${query.toString()}`, {
+        const res = await apiFetch('/api/conversations/by_token?limit=100', {
             cache: 'no-store',
+            headers: buildAuthHeaders(userToken),
         });
         if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
         const data: ConversationListResponse = await res.json();
@@ -526,50 +678,6 @@ const loadConversations = useCallback(async () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    // Handle redirection to sign-in page when userToken is not present
-    useEffect(() => {
-    (async () => {
-        if (userToken) return;
-
-        const hasAccess = typeof window !== 'undefined' && !!localStorage.getItem('access_token');
-        if (!hasAccess) {
-        try { await refreshTokenIfNeeded(true); } catch {}
-        }
-
-        const tokenNow = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
-        if (!tokenNow) {
-        // clean up & redirect only if refresh didn’t produce a token
-        try { localStorage.removeItem('conversationId'); } catch {}
-        setConversationId(null);
-        setChatHistory([]);
-        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
-
-        if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
-            ws.current.close(1000, 'logout');
-        }
-        ws.current = null;
-
-        if (pathname !== '/sign-in') router.push('/sign-in');
-        } else {
-        // we have a token now; hydrate
-        loadConversations();
-        setWsReconnectNonce(n => n + 1);
-        }
-    })();
-    }, [userToken, pathname, router, loadConversations]);
-
-
-    useEffect(() => {
-    const onVisible = () => {
-        if (document.visibilityState === 'visible' && !ws.current) {
-        // nudge a reconnect attempt
-        setWsReconnectNonce((n) => n + 1);
-        }
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
-    }, []);
-
     // Use useCallback to memoize the function, preventing unnecessary re-renders
     const addMessageToChat = useCallback((msg: { sender: string; text: string }) => {
         const cleanSender = (msg.sender || '').trim();
@@ -586,47 +694,91 @@ const loadConversations = useCallback(async () => {
         setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 0);
     }, []);
 
-    const handleSubmit = useCallback((e: React.FormEvent) => {
-        e.preventDefault();
-
-        Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-        Object.values(typingTTLRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-        typingShowDelayRef.current = {};
-        typingTTLRef.current = {};
-        setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
-
-        const text = message.trim();
-        if (!text || !userName) return;
+    
 
 
-
-        const payload: Record<string, unknown> = { message: text };
-
-        try {
-            const sock = ws.current;
-            const open = sock && sock.readyState === WebSocket.OPEN;
-
-            if (open) {
-                sock!.send(JSON.stringify(payload));
-            } else {
-            // queue until socket is open
-            pendingSends.current.push(payload);
-            // ensure a reconnect attempt is queued if it’s closed
-            if (!sock || sock.readyState === WebSocket.CLOSED) {
-                setWsReconnectNonce((n) => n + 1);
-            }
-            }
-
-            // optimistic UI
-            addMessageToChat({ sender: userName, text });
-            setMessage('');
-            if (textareaRef.current) {
-                textareaRef.current.style.height = 'auto'; // collapse back to 1 line
-            }
-        } catch (err) {
-            console.error('Send failed:', err);
+    useEffect(() => {
+    const onVisible = () => {
+        if (document.visibilityState === 'visible' && !ws.current) {
+        // nudge a reconnect attempt
+        setWsReconnectNonce((n) => n + 1);
         }
-    }, [message, userName, addMessageToChat]);
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+    }, []);
+
+
+
+
+    const handleSubmit = useCallback((e: React.FormEvent) => {
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+    setTimeout(() => { isSubmittingRef.current = false; }, 300);
+
+    e.preventDefault();
+
+    const text = message.trim();
+
+    // allow sending file-only messages too
+    if (!text && pendingFiles.length === 0) return;
+
+    // clear any typing indicators before we submit
+    Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+    Object.values(typingTTLRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+    typingShowDelayRef.current = {};
+    typingTTLRef.current = {};
+    setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+
+    if (!userName) {
+        console.error('User name is missing, cannot send message.');
+        return;
+    }
+
+    const clientId = uid();
+    lastUserClientIdRef.current = clientId;
+
+    const payload: Record<string, unknown> = {
+        client_id: clientId,
+        text,
+        message: text,
+        user_name: userName,
+        conversation_id: conversationId || undefined,
+        attachments: pendingFiles.map(f => f.id),
+    };
+
+    // remember what we sent so we can ignore any server echo
+    lastUserTextRef.current = text;
+
+
+    try {
+        const sock = ws.current;
+        const open = sock && sock.readyState === WebSocket.OPEN;
+
+        if (open) {
+        sock!.send(JSON.stringify(payload));
+        } else {
+        // queue until socket reconnects
+        pendingSends.current.push(payload);
+        if (!sock || sock.readyState === WebSocket.CLOSED) {
+            setWsReconnectNonce(n => n + 1);
+        }
+        }
+
+        // optimistic UI for the user's text (files alone won't add a bubble)
+        if (text) addMessageToChat({ sender: userName, text });
+
+        setMessage('');
+        setPendingFiles([]);
+
+        if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+        }
+    } catch (err) {
+        console.error('Send failed:', err);
+    }
+    }, [message, userName, addMessageToChat, pendingFiles, conversationId]);
+
 
     // Create a brand-new conversation
     const handleNewConversation = () => {  
@@ -744,40 +896,50 @@ const loadConversations = useCallback(async () => {
     // eslint-disable-next-line react-hooks/exhaustive-deps
     // WebSocket connection logic
     useEffect(() => {
-        // Don't try to connect without a token.
-        if (!userToken) {
-            if (ws.current) {
-                try { ws.current.close(); } catch {}
-            }
-            ws.current = null;
-            setIsWsOpen(false);
-            return;
-        }
-
+        let currentWs: WebSocket | null = null;
+        (async () => {
 
         
         // Try to top up access token if it's close to expiring (non-blocking).
-        refreshTokenIfNeeded();
+        // Ensure we actually have a valid access token before connecting
+        let token: string | null = null;
+        try {
+            token = await getFreshAccessToken();
+           
 
-        // Build the URL safely
+        } catch {
+            token = null; // continue anonymously
+        }
+        // proceed even if token is null
+        // Fallback to the token from context if cookie-refresh didn't produce one
+        if (!token && userToken) {
+        token = userToken;
+        try { localStorage.setItem('access_token', token); } catch {}
+        }
+
+
         const base = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
         let u: URL;
-        try {
-            u = new URL(base);
-        } catch (e) {
-            console.error("Invalid WS URL from env, falling back:", e);
-            u = new URL('http://localhost:8000');
+        try { u = new URL(base); }
+        catch (e) {
+        console.error("Invalid WS URL from env, falling back:", e);
+        u = new URL('http://localhost:8000');
         }
 
         u.protocol = (u.protocol === 'https:' || u.protocol === 'wss:') ? 'wss:' : 'ws:';
         u.pathname = '/ws/colosseum-chat';
-        u.search = `?token=${encodeURIComponent(localStorage.getItem('access_token') || userToken)}`;
+        if (token) {
+            u.searchParams.set('token', token);
+        }
+        console.debug('[WS] connecting to', u.origin + u.pathname, 'token?', Boolean(token));
+
 
         const socket = new WebSocket(u.toString());
+        currentWs = socket;
+
         ws.current = socket;
         setIsWsOpen(false);
-
-        const currentWs = socket;
+        
         const isNonEmptyString = (v: unknown): v is string =>
             typeof v === 'string' && v.length > 0;
 
@@ -792,79 +954,131 @@ const loadConversations = useCallback(async () => {
                 setIsWsOpen(true);
                 loadConversations();
                 authFailedRef.current = false;
-                reconnectBackoffRef.current = 1000;
+          
         
                 const initialPayload: Record<string, unknown> = {
-                    user_name: userName,
+                    kind: 'start',
+                    user_name: userName || 'Guest',
                 };
+
                 if (conversationId) {
-                    // Hydrate the conversation before connecting.
-                    hydrateConversation(conversationId);
                     initialPayload.conversation_id = conversationId;
                 }
-                currentWs.send(JSON.stringify(initialPayload));
-        
+                currentWs!.send(JSON.stringify(initialPayload));
+
                 while (pendingSends.current.length > 0) {
                     const next = pendingSends.current.shift();
-                    if (next) currentWs.send(JSON.stringify(next));
+                    if (next) socket.send(JSON.stringify(next));
                 }
             },
         
             onmessage: (event: MessageEvent<string>) => {
-                let msg: ServerMessage;
-                try { msg = JSON.parse(event.data); }
-                catch { return; }
+                let msg: ServerMessage | Record<string, unknown>;
+                try {
+                    msg = JSON.parse(event.data) as ServerMessage | Record<string, unknown>;
+                } catch {
+                    return;
+                }
+                console.debug('[WS<-] parsed', msg);
 
-                if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
-                    const id = msg.id;
+                // If the server echoes our own client_id, ignore (we already drew it optimistically)
+                // Only ignore a true echo: same client_id AND exactly the same text we just sent
+                const echoedId = (msg as { client_id?: unknown }).client_id as string | undefined;
+                const incomingTextForEchoCheck = extractWsText(msg);
+
+                if (
+                echoedId &&
+                lastUserClientIdRef.current === echoedId &&
+                incomingTextForEchoCheck &&
+                lastUserTextRef.current &&
+                incomingTextForEchoCheck.trim() === lastUserTextRef.current.trim()
+                ) {
+                setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+                return;
+                }
+
+                // Conversation id / meta / summary housekeeping
+                if ((msg as ServerMessage).type === 'conversation_id' && typeof (msg as ServerMessage).id === 'string') {
+                    const id = (msg as ServerMessage).id!;
                     setConversationId(curr => curr || id);
                     try { localStorage.setItem('conversationId', id); } catch {}
 
                     setConversations(prev => {
-                        const rest = prev.filter(c => c.id !== id);
-                        return [{ id, title: 'New conversation', updated_at: new Date().toISOString() }, ...rest];
+                    const rest = prev.filter(c => c.id !== id);
+                    return [{ id, title: 'New conversation', updated_at: new Date().toISOString() }, ...rest];
                     });
                     if (chatLengthRef.current === 0) { hydrateConversation(id); }
                     loadConversations();
                     return;
                 }
 
-                if (msg.type === 'conversation_meta' && typeof msg.id === 'string') {
-                    const id: string = msg.id;
-                    const title: string = typeof msg.title === 'string' && msg.title.trim() ? msg.title : 'New conversation';
-                    const updated_at: string = typeof msg.updated_at === 'string' && msg.updated_at.trim() ? msg.updated_at : new Date().toISOString();
+                if ((msg as ServerMessage).type === 'conversation_meta' && typeof (msg as ServerMessage).id === 'string') {
+                    const id = (msg as ServerMessage).id!;
+                    const title =
+                    typeof (msg as ServerMessage).title === 'string' && (msg as ServerMessage).title!.trim()
+                        ? (msg as ServerMessage).title!
+                        : 'New conversation';
+                    const updated_at =
+                    typeof (msg as ServerMessage).updated_at === 'string' && (msg as ServerMessage).updated_at!.trim()
+                        ? (msg as ServerMessage).updated_at!
+                        : new Date().toISOString();
+
                     setConversations(prev => {
-                        const rest = prev.filter(c => c.id !== id);
-                        return [{ id, title, updated_at }, ...rest];
+                    const rest = prev.filter(c => c.id !== id);
+                    return [{ id, title, updated_at }, ...rest];
                     });
+
                     setConversationId(curr => {
-                        const chosen = curr || id;
-                        try { localStorage.setItem('conversationId', chosen); } catch {}
-
-                        if (chatLengthRef.current === 0) { hydrateConversation(chosen); }
-                        return chosen;
+                    const chosen = curr || id;
+                    try { localStorage.setItem('conversationId', chosen); } catch {}
+                    if (chatLengthRef.current === 0) { hydrateConversation(chosen); }
+                    return chosen;
                     });
                     return;
                 }
 
-                if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
-                    setLoadedSummary(msg.summary);
-                    return;
-                }
-                if (msg.type === 'ping' || msg.type === 'pong') return;
-                const sender = isNonEmptyString(msg.sender) ? msg.sender : null;
-
-                if (sender && typeof msg.typing === 'boolean' && ALLOWED_AGENTS.includes(sender as AgentName)) {
-                    setTypingWithDelayAndTTL(sender as AgentName, msg.typing === true);
+                if ((msg as ServerMessage).type === 'context_summary' &&
+                    typeof (msg as ServerMessage).summary === 'string' &&
+                    (msg as ServerMessage).summary!.trim()) {
+                    setLoadedSummary((msg as ServerMessage).summary!);
                     return;
                 }
 
-                if (sender && typeof msg.text === 'string' && ALLOWED_AGENTS.includes(sender as AgentName)) {
+                if ((msg as ServerMessage).type === 'ping' || (msg as ServerMessage).type === 'pong') return;
+
+                // Sender (may be missing)
+                const sender = typeof (msg as ServerMessage).sender === 'string' ? (msg as ServerMessage).sender! : null;
+
+                // HARD self-echo guard: any message from me or generic "user"
+                if (sender && (isSelf(sender, userName) || normalize(sender) === 'user')) {
+                    setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+                    return;
+                }
+
+                // Extract text from flexible shapes (text/message/content/body)
+                const text = extractWsText(msg);
+                if (!text) return;
+
+                // If sender is missing and the text exactly matches what I just sent, ignore broadcast echo
+                if (!sender &&
+                    lastUserTextRef.current &&
+                    text.trim() === lastUserTextRef.current.trim()) {
+                    setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+                    return;
+                }
+
+                // Typing indicators: clear for the specific agent if it’s one of the known ones
+                if (sender && ALLOWED_AGENTS.includes(sender as AgentName)) {
                     setTypingWithDelayAndTTL(sender as AgentName, false);
-                    addMessageToChat({ sender, text: msg.text });
-                    return;
+                } else {
+                    setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
                 }
-            },
+
+                // Default name when sender not provided
+                const shownSender = sender && sender.trim() ? sender.trim() : 'Assistant';
+                addMessageToChat({ sender: shownSender, text });
+                },
+
             onclose: (ev: CloseEvent) => {
                 console.log('WebSocket closed. code=', ev.code, 'reason=', ev.reason, 'wasClean=', ev.wasClean);
                 Object.values(typingTimersRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
@@ -900,12 +1114,17 @@ const loadConversations = useCallback(async () => {
                 setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
             }
         });
+        })();
         return () => {
-            if (currentWs && (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING)) {
-                try { currentWs.close(); } catch {}
+            if (
+            currentWs &&
+            (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING)
+            ) {
+            try { currentWs.close(); } catch {}
             }
-        };
-    }, [userToken, userName, addMessageToChat, wsReconnectNonce, conversationId]);
+        };        
+        }, [userToken, userName, addMessageToChat, wsReconnectNonce, conversationId, loadConversations, hydrateConversation]);
+
 
         
 
@@ -1101,10 +1320,8 @@ const loadConversations = useCallback(async () => {
         >
             <div className="max-w-4xl mx-auto flex flex-col space-y-4 md:space-y-6">
             {/* Conditional rendering for the initial message */}
-            {!isWsOpen && userToken ? (
-                <p className="text-center text-gray-500 py-12 text-lg">
-                Connecting to chat...
-                </p>
+            {!isWsOpen && (ws.current && ws.current.readyState === WebSocket.CONNECTING) ? (
+                <p className="text-center text-gray-500 py-12 text-lg">Connecting to chat...</p>
             ) : (
                 chatHistory.length === 0 && (
                 <p className="text-center text-gray-500 py-12 text-lg">
@@ -1117,8 +1334,7 @@ const loadConversations = useCallback(async () => {
 
             {chatHistory.length > 0 &&
                 chatHistory.map((msg, index) => {
-                    const isUser =
-                    (msg.sender || '').trim().toLowerCase() === (userName || 'You').trim().toLowerCase();
+                    const isUser = isSelf(msg.sender, userName);
                     return (
                     <div key={index} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
                         <div
@@ -1234,6 +1450,31 @@ const loadConversations = useCallback(async () => {
 
   <form onSubmit={handleSubmit} className="max-w-4xl mx-auto p-4 md:p-6">
     <div className="flex gap-4">
+        <div className="flex flex-col items-start gap-2 pt-1">
+            <label className="inline-flex items-center px-3 py-2 rounded-xl bg-gray-800 border border-gray-700 text-sm cursor-pointer hover:bg-gray-700">
+                <input
+                type="file"
+                accept=".txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.java,.go,.rb,.php,.css,.html,.sql,.yaml,.yml,.sh,.c,.cpp,.cs,.rs,.kt"
+                multiple
+                onChange={handleFilePick}
+                className="hidden"
+                />
+                Attach files
+            </label>
+
+            {/* chips for pending files */}
+            {pendingFiles.length > 0 && (
+                <div className="flex flex-wrap gap-2">
+                {pendingFiles.map(f => (
+                    <span key={f.id} className="inline-flex items-center gap-2 px-2 py-1 text-xs rounded-full bg-gray-800 border border-gray-700">
+                    <span className="truncate max-w-[180px]" title={f.name}>{f.name}</span>
+                    <button type="button" onClick={() => removePending(f.id)} className="text-gray-300 hover:text-white">×</button>
+                    </span>
+                ))}
+                </div>
+            )}
+        </div>
+
         <textarea
             ref={textareaRef}
             rows={1}
