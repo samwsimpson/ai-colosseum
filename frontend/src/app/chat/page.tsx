@@ -348,15 +348,8 @@ const removePending = (id: string) => setPendingFiles(prev => prev.filter(p => p
         }
     }, [conversations]);
 
-    const [isLoadingConvs, setIsLoadingConvs] = useState(false);
-    // Sidebar bulk-manage state
-    const [manageMode, setManageMode] = useState(false);
-    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-    const chatContainerRef = useRef<HTMLDivElement | null>(null);
-    const composerRef = useRef<HTMLDivElement | null>(null);
-    const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-    const [composerHeight, setComposerHeight] = useState<number>(120);
-
+    // Sidebar bulk-manage state    
+    
     useEffect(() => {
         const el = composerRef.current;
         if (!el || typeof window === 'undefined') return;
@@ -372,42 +365,8 @@ const removePending = (id: string) => setPendingFiles(prev => prev.filter(p => p
         chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [composerHeight]);    
 
-    // New state to track which agents are typing
-    const [isTyping, setIsTyping] = useState<TypingState>({
-        ChatGPT: false,
-        Claude: false,
-        Gemini: false,
-        Mistral: false,
-    });
-
     // A simple ref to distinguish the first render
-    const isInitialRender = useRef(true);
-    const chatEndRef = useRef<HTMLDivElement>(null);
-    const ws = useRef<WebSocket | null>(null);
-    const chatLengthRef = useRef(0);
-    useEffect(() => { chatLengthRef.current = chatHistory.length; }, [chatHistory.length]);
-    const pendingSends = useRef<Array<Record<string, unknown>>>([]);
-    // Prevent rapid double-submits
-    const isSubmittingRef = useRef<boolean>(false);
-    // Remember the last user message we sent so we can ignore server echos
-    const lastUserTextRef = useRef<string | null>(null);
-    // Track which client_id belongs to the user's most recent send
-    const lastUserClientIdRef = useRef<string | null>(null);
-    // Tracks reconnect backoff and any pending timer
-    const reconnectRef = useRef<{ tries: number; timer: number | null }>({
-        tries: 0,
-        timer: null,
-    });
-
-
-    // ws reconnect guards/backoff
-    const authFailedRef = useRef(false);
-    const reconnectBackoffRef = useRef(1000); // start at 1s, exponential up to 15s
-
-    // --- guarded token refresh helpers (NO HOOKS INSIDE) ---
-    const refreshInFlight = useRef<Promise<void> | null>(null);
-    const lastRefreshAt = useRef<number>(0);
-
+    
     const refreshTokenIfNeeded = useCallback(async (force = false) => {
         const now = Date.now();
 
