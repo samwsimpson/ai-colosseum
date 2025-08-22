@@ -193,6 +193,37 @@ const normalize = (s?: string | null) =>
 // single source of truth
 const isSelf = (sender?: string | null, me?: string | null) =>
   !!sender && !!me && normalize(sender) === normalize(me);
+    // Turn a variety of server payload shapes into a string
+    const toTextFromUnknown = (v: unknown): string => {
+    if (typeof v === 'string') return v;
+    if (Array.isArray(v)) {
+        return v
+        .map(p => {
+            if (typeof p === 'string') return p;
+            const maybe = p as { text?: unknown } | null;
+            return (maybe && typeof maybe.text === 'string') ? maybe.text : '';
+        })
+        .join('\n')
+        .trim();
+    }
+    if (v && typeof v === 'object' && 'text' in v) {
+        const maybe = v as { text?: unknown };
+        if (typeof maybe.text === 'string') return maybe.text;
+    }
+    try { return JSON.stringify(v); } catch { return ''; }
+    };
+
+    // Accept text from text | message | content | body fields
+    const extractWsText = (m: ServerMessage | Record<string, unknown>): string | null => {
+    const cand =
+        (m as { text?: unknown }).text ??
+        (m as { message?: unknown }).message ??
+        (m as { content?: unknown }).content ??
+        (m as { body?: unknown }).body;
+
+    const t = toTextFromUnknown(cand);
+    return t && t.trim() ? t.trim() : null;
+    };
 
 
 // a tiny in-memory set of client message ids we've sent, so we can ignore our own echoes
@@ -933,102 +964,104 @@ const loadConversations = useCallback(async () => {
             },
         
             onmessage: (event: MessageEvent<string>) => {
-                let msg: ServerMessage;
-                try { msg = JSON.parse(event.data); }
-                catch { return; }
-                console.debug('[WS<-] raw', event.data);
+                let msg: ServerMessage | Record<string, unknown>;
+                try {
+                    msg = JSON.parse(event.data) as ServerMessage | Record<string, unknown>;
+                } catch {
+                    return;
+                }
                 console.debug('[WS<-] parsed', msg);
-                // If the server is echoing the same client_id we sent, ignore it
-                const echoedId = msg.client_id;
+
+                // If the server echoes our own client_id, ignore (we already drew it optimistically)
+                const echoedId = (msg as { client_id?: unknown }).client_id;
                 if (typeof echoedId === 'string' && sentClientIds.has(echoedId)) {
-                  sentClientIds.delete(echoedId); // clean up once seen
-                  setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
-                  return;
+                    sentClientIds.delete(echoedId);
+                    setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+                    return;
                 }
 
-                if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
-                    const id = msg.id;
+                // Conversation id / meta / summary housekeeping
+                if ((msg as ServerMessage).type === 'conversation_id' && typeof (msg as ServerMessage).id === 'string') {
+                    const id = (msg as ServerMessage).id!;
                     setConversationId(curr => curr || id);
                     try { localStorage.setItem('conversationId', id); } catch {}
 
                     setConversations(prev => {
-                        const rest = prev.filter(c => c.id !== id);
-                        return [{ id, title: 'New conversation', updated_at: new Date().toISOString() }, ...rest];
+                    const rest = prev.filter(c => c.id !== id);
+                    return [{ id, title: 'New conversation', updated_at: new Date().toISOString() }, ...rest];
                     });
                     if (chatLengthRef.current === 0) { hydrateConversation(id); }
                     loadConversations();
                     return;
                 }
 
-                if (msg.type === 'conversation_meta' && typeof msg.id === 'string') {
-                    const id: string = msg.id;
-                    const title: string = typeof msg.title === 'string' && msg.title.trim() ? msg.title : 'New conversation';
-                    const updated_at: string = typeof msg.updated_at === 'string' && msg.updated_at.trim() ? msg.updated_at : new Date().toISOString();
+                if ((msg as ServerMessage).type === 'conversation_meta' && typeof (msg as ServerMessage).id === 'string') {
+                    const id = (msg as ServerMessage).id!;
+                    const title =
+                    typeof (msg as ServerMessage).title === 'string' && (msg as ServerMessage).title!.trim()
+                        ? (msg as ServerMessage).title!
+                        : 'New conversation';
+                    const updated_at =
+                    typeof (msg as ServerMessage).updated_at === 'string' && (msg as ServerMessage).updated_at!.trim()
+                        ? (msg as ServerMessage).updated_at!
+                        : new Date().toISOString();
+
                     setConversations(prev => {
-                        const rest = prev.filter(c => c.id !== id);
-                        return [{ id, title, updated_at }, ...rest];
+                    const rest = prev.filter(c => c.id !== id);
+                    return [{ id, title, updated_at }, ...rest];
                     });
+
                     setConversationId(curr => {
-                        const chosen = curr || id;
-                        try { localStorage.setItem('conversationId', chosen); } catch {}
-
-                        if (chatLengthRef.current === 0) { hydrateConversation(chosen); }
-                        return chosen;
+                    const chosen = curr || id;
+                    try { localStorage.setItem('conversationId', chosen); } catch {}
+                    if (chatLengthRef.current === 0) { hydrateConversation(chosen); }
+                    return chosen;
                     });
                     return;
                 }
 
-                if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
-                    setLoadedSummary(msg.summary);
+                if ((msg as ServerMessage).type === 'context_summary' &&
+                    typeof (msg as ServerMessage).summary === 'string' &&
+                    (msg as ServerMessage).summary!.trim()) {
+                    setLoadedSummary((msg as ServerMessage).summary!);
                     return;
                 }
-                if (msg.type === 'ping' || msg.type === 'pong') return;
-                const sender = isNonEmptyString(msg.sender) ? msg.sender : null;
 
-                // --- HARD self-echo guard ---
-                // If the server ever sends back a message from me (or generic "user"),
-                // do not render it. We already added my message optimistically.
+                if ((msg as ServerMessage).type === 'ping' || (msg as ServerMessage).type === 'pong') return;
+
+                // Sender (may be missing)
+                const sender = typeof (msg as ServerMessage).sender === 'string' ? (msg as ServerMessage).sender! : null;
+
+                // HARD self-echo guard: any message from me or generic "user"
                 if (sender && (isSelf(sender, userName) || normalize(sender) === 'user')) {
-                setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
-                return;
-                }
-                // Also guard the case where sender is missing but text exactly matches
-                // the last thing I sent (common broadcast echo).
-                if (typeof msg.text === 'string' &&
-                    msg.text.trim().length > 0 &&
-                    lastUserTextRef.current &&
-                    msg.text.trim() === lastUserTextRef.current.trim()) {
-                setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
-                return;
-                }
-                // --- /HARD self-echo guard ---
-
-
-                if (sender && typeof msg.typing === 'boolean' && ALLOWED_AGENTS.includes(sender as AgentName)) {
-                    setTypingWithDelayAndTTL(sender as AgentName, msg.typing === true);
-                    return;
-                }
-                
-                if (typeof msg.text === 'string') {
-                // If this socket message is our own echo, ignore it (we already added it optimistically).
-                if (isSelf(sender, userName)) {
                     setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
                     return;
                 }
 
-                // If it's one of your named agents, clear its typing; else reset typing state.
+                // Extract text from flexible shapes (text/message/content/body)
+                const text = extractWsText(msg);
+                if (!text) return;
+
+                // If sender is missing and the text exactly matches what I just sent, ignore broadcast echo
+                if (!sender &&
+                    lastUserTextRef.current &&
+                    text.trim() === lastUserTextRef.current.trim()) {
+                    setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+                    return;
+                }
+
+                // Typing indicators: clear for the specific agent if it’s one of the known ones
                 if (sender && ALLOWED_AGENTS.includes(sender as AgentName)) {
                     setTypingWithDelayAndTTL(sender as AgentName, false);
                 } else {
                     setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
                 }
 
+                // Default name when sender not provided
                 const shownSender = sender && sender.trim() ? sender.trim() : 'Assistant';
-                addMessageToChat({ sender: shownSender, text: msg.text });
-                return;
-                }
+                addMessageToChat({ sender: shownSender, text });
+                },
 
-            },
             onclose: (ev: CloseEvent) => {
                 console.log('WebSocket closed. code=', ev.code, 'reason=', ev.reason, 'wasClean=', ev.wasClean);
                 Object.values(typingTimersRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
