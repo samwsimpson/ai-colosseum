@@ -930,19 +930,6 @@ const loadConversations = useCallback(async () => {
             u.searchParams.set('token', token);
         }
         console.debug('[WS] connecting to', u.origin + u.pathname, 'token?', Boolean(token));
-        const dbgTxt = extractWsText(msg);
-        if (isRecord(msg)) {
-            const sender    = typeof msg['sender']     === 'string' ? (msg['sender']     as string) : undefined;
-            const type      = typeof msg['type']       === 'string' ? (msg['type']       as string) : undefined;
-            const client_id = typeof msg['client_id']  === 'string' ? (msg['client_id']  as string) : undefined;
-            const textRaw   =
-                (typeof msg['text']    === 'string' ? (msg['text']    as string) : undefined) ??
-                (typeof msg['message'] === 'string' ? (msg['message'] as string) : undefined);
-
-            console.debug('[WS<-] sender=', sender, 'type=', type, 'client_id=', client_id, 'text=', textRaw?.slice(0, 80));
-        } else {
-            console.debug('[WS<-] non-object message:', msg);
-        }
 
 
         const socket = new WebSocket(u.toString());
