@@ -819,12 +819,14 @@ const loadConversations = useCallback(async () => {
         
         // Try to top up access token if it's close to expiring (non-blocking).
         // Ensure we actually have a valid access token before connecting
-        const token = await getFreshAccessToken();
-        if (!token) {
-        console.warn('No access token. Skip WS connect and show sign-in.');
-        // TODO: optionally flip a "needsAuth" UI flag here
-        return;
+        let token: string | null = null;
+        try {
+            token = await getFreshAccessToken();
+        } catch {
+            token = null; // continue anonymously
         }
+        // proceed even if token is null
+
 
         const base = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
         let u: URL;
@@ -836,7 +838,9 @@ const loadConversations = useCallback(async () => {
 
         u.protocol = (u.protocol === 'https:' || u.protocol === 'wss:') ? 'wss:' : 'ws:';
         u.pathname = '/ws/colosseum-chat';
-        u.search = `?token=${encodeURIComponent(token)}`;
+        if (token) {
+            u.searchParams.set('token', token);
+        }
 
         const socket = new WebSocket(u.toString());
         currentWs = socket;
@@ -860,16 +864,15 @@ const loadConversations = useCallback(async () => {
                 authFailedRef.current = false;
           
         
-                const initialPayload: Record<string, unknown> = {
-                    user_name: userName,
+                const initialPayload: any = {
+                    kind: 'start',
+                    user_name: user?.first_name || user?.email || 'Guest'
                 };
                 if (conversationId) {
-                    // Hydrate the conversation before connecting.
-                    hydrateConversation(conversationId);
                     initialPayload.conversation_id = conversationId;
                 }
-                socket.send(JSON.stringify(initialPayload));
-        
+                currentWs!.send(JSON.stringify(initialPayload));
+                
                 while (pendingSends.current.length > 0) {
                     const next = pendingSends.current.shift();
                     if (next) socket.send(JSON.stringify(next));
