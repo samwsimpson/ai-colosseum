@@ -190,22 +190,140 @@ export default function ChatPage() {
         }, showDelayMs);
     };    
 
-    const { userName, userToken } = useUser();
-    const router = useRouter();
-    const pathname = usePathname();
+const { userName, userToken } = useUser();
+const router = useRouter();
+const pathname = usePathname();
 
-    const [message, setMessage] = useState<string>('');
-    const [chatHistory, setChatHistory] = useState<Message[]>([]);
-    const [isWsOpen, setIsWsOpen] = useState<boolean>(false);
+// === State for the UI and chat logic ===
+const [message, setMessage] = useState<string>('');
+const [chatHistory, setChatHistory] = useState<Message[]>([]);
+const [isWsOpen, setIsWsOpen] = useState<boolean>(false);
+const [loadedSummary, setLoadedSummary] = useState<string | null>(null);
+const [showSummary, setShowSummary] = useState(false);
+const [wsReconnectNonce, setWsReconnectNonce] = useState(0);
+const [conversationId, setConversationId] = useState<string | null>(null);
+const [pendingFiles, setPendingFiles] = useState<UploadedAttachment[]>([]);
+const [conversations, setConversations] = useState<ConversationListItem[]>([]);
+const [isLoadingConvs, setIsLoadingConvs] = useState(false);
+const [manageMode, setManageMode] = useState(false);
+const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+const [composerHeight, setComposerHeight] = useState<number>(120);
+const [isTyping, setIsTyping] = useState<TypingState>({
+    ChatGPT: false,
+    Claude: false,
+    Gemini: false,
+    Mistral: false,
+});
 
-    // Shows a one-time banner when a past-session summary exists
-    const [loadedSummary, setLoadedSummary] = useState<string | null>(null);
+// === Refs for DOM elements and internal state ===
+const typingTTLRef = useRef<Partial<Record<AgentName, number>>>({});
+const typingShowDelayRef = useRef<Partial<Record<AgentName, number>>>({});
+const typingTimersRef = useRef<Partial<Record<AgentName, number>>>({});
+const chatContainerRef = useRef<HTMLDivElement | null>(null);
+const composerRef = useRef<HTMLDivElement | null>(null);
+const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+const isInitialRender = useRef(true);
+const chatEndRef = useRef<HTMLDivElement>(null);
+const ws = useRef<WebSocket | null>(null);
+const chatLengthRef = useRef(0);
+const pendingSends = useRef<Array<Record<string, unknown>>>([]);
+const isSubmittingRef = useRef<boolean>(false);
+const lastUserTextRef = useRef<string | null>(null);
+const lastUserClientIdRef = useRef<string | null>(null);
+const reconnectRef = useRef<{ tries: number; timer: number | null }>({
+    tries: 0,
+    timer: null,
+});
+const authFailedRef = useRef(false);
+const reconnectBackoffRef = useRef(1000); // start at 1s, exponential up to 15s
+const refreshInFlight = useRef<Promise<void> | null>(null);
+const lastRefreshAt = useRef<number>(0);
+const fileInputRef = useRef<HTMLInputElement>(null);
 
-    // Toggle to reveal/hide the text of the summary
-    const [showSummary, setShowSummary] = useState(false);
+// === Helper functions for file uploads and API calls ===
+interface UploadedAttachment {
+    id: string;
+    name: string;
+    mime: string;
+    size: number;
+    signed_url?: string | null;
+}
+function resolveApiBase(): string {
+    const fromEnv = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '');
+    if (fromEnv) return fromEnv;
+    const wsBase = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
+    try {
+        const u = new URL(wsBase);
+        if (u.protocol === 'ws:') u.protocol = 'http:';
+        else if (u.protocol === 'wss:') u.protocol = 'https:';
+        u.pathname = '';
+        u.search = '';
+        u.hash = '';
+        return u.toString().replace(/\/+$/, '');
+    } catch {
+        return 'http://localhost:8000';
+    }
+}
+const API_BASE = resolveApiBase();
 
-    const [wsReconnectNonce, setWsReconnectNonce] = useState(0);
-    const [conversationId, setConversationId] = useState<string | null>(null);
+function buildAuthHeaders(userToken?: string | null): Headers {
+    const h = new Headers({ 'Content-Type': 'application/json' });
+    const local = (typeof window !== 'undefined') ? localStorage.getItem('access_token') : null;
+    const tok = (local ?? userToken) ?? '';
+    if (tok) h.set('Authorization', `Bearer ${tok}`);
+    return h;
+}
+
+async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
+    const url =
+        typeof pathOrUrl === 'string'
+        ? (pathOrUrl.startsWith('http') ? pathOrUrl : `${API_BASE}${pathOrUrl.startsWith('/') ? '' : '/'}${pathOrUrl}`)
+        : pathOrUrl.toString();
+    const headers = new Headers(init.headers || {});
+    const access = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+    if (access) headers.set('Authorization', `Bearer ${access}`);
+    let res = await fetch(url, { ...init, headers, credentials: 'include' });
+    if (res.status !== 401) return res;
+    const rr = await fetch(`${API_BASE}/api/refresh`, { method: 'POST', credentials: 'include' });
+    if (!rr.ok) return res;
+    const { token } = await rr.json();
+    if (token) {
+        if (typeof window !== 'undefined') localStorage.setItem('access_token', token);
+        headers.set('Authorization', `Bearer ${token}`);
+        res = await fetch(url, { ...init, headers, credentials: 'include' });
+    }
+    return res;
+}
+
+const uploadOne = async (file: File): Promise<UploadedAttachment> => {
+    const formData = new FormData();
+    formData.append('file', file);
+    const res = await apiFetch(`/api/upload-file`, {
+        method: 'POST',
+        body: formData,
+    });
+    if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+    return res.json();
+};
+const handleFilePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || !files.length) return;
+    try {
+        const uploaded: UploadedAttachment[] = [];
+        for (let i = 0; i < files.length; i++) {
+            if (files[i] && files[i].size > 0 && files[i].name) {
+                uploaded.push(await uploadOne(files[i]));
+            }
+        }
+        setPendingFiles(prev => [...prev, ...uploaded]);
+    } catch (err) {
+        console.error(err);
+        alert('Upload failed. Try smaller files.');
+    } finally {
+        e.currentTarget.value = '';
+    }
+};
+const removePending = (id: string) => setPendingFiles(prev => prev.filter(p => p.id !== id));
 
     // Sidebar + conversation list
     const [conversations, setConversations] = useState<ConversationListItem[]>([]);
@@ -1260,20 +1378,24 @@ const loadConversations = useCallback(async () => {
 
 <form onSubmit={handleSubmit} className="max-w-4xl mx-auto p-4 md:p-6">
     <div className="flex flex-col gap-2">
-        {selectedFile && (
-            <div className="flex items-center gap-2 p-2 rounded-lg bg-gray-800 border border-gray-700 text-gray-300 text-sm">
-                <span>{selectedFile.name}</span>
-                <button type="button" onClick={handleRemoveFile} className="text-red-500 hover:text-red-400">
-                    &times;
-                </button>
+        {pendingFiles.length > 0 && (
+            <div className="flex flex-wrap gap-2">
+                {pendingFiles.map(f => (
+                    <span key={f.id} className="inline-flex items-center gap-2 px-2 py-1 text-xs rounded-full bg-gray-800 border border-gray-700">
+                        <span className="truncate max-w-[180px]" title={f.name}>{f.name}</span>
+                        <button type="button" onClick={() => removePending(f.id)} className="text-gray-300 hover:text-white">×</button>
+                    </span>
+                ))}
             </div>
         )}
         <div className="flex gap-4">
             <input
                 type="file"
                 ref={fileInputRef}
-                onChange={handleFileSelect}
+                onChange={handleFilePick}
                 className="hidden"
+                accept=".txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.java,.go,.rb,.php,.css,.html,.sql,.yaml,.yml,.sh,.c,.cpp,.cs,.rs,.kt"
+                multiple
             />
             <button
                 type="button"
