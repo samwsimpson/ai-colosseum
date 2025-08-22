@@ -222,7 +222,9 @@ const isSelf = (sender?: string | null, me?: string | null) =>
         (m as { text?: unknown }).text ??
         (m as { message?: unknown }).message ??
         (m as { content?: unknown }).content ??
-        (m as { body?: unknown }).body;
+        (m as { body?: unknown }).body ??
+        (m as { reply?: unknown }).reply ??
+        (m as { response?: unknown }).response;
 
     const t = toTextFromUnknown(cand);
     return t && t.trim() ? t.trim() : null;
