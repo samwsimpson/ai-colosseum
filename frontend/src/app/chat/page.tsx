@@ -25,6 +25,7 @@ interface ServerMessage {
   // add these for conversation_meta payloads
   title?: string;
   updated_at?: string;
+  client_id?: string;
 }
 
 // Past-convo list item returned by the API
@@ -933,7 +934,7 @@ const loadConversations = useCallback(async () => {
                 console.debug('[WS<-] raw', event.data);
                 console.debug('[WS<-] parsed', msg);
                 // If the server is echoing the same client_id we sent, ignore it
-                const echoedId = (msg as any)?.client_id;
+                const echoedId = msg.client_id;
                 if (typeof echoedId === 'string' && sentClientIds.has(echoedId)) {
                   sentClientIds.delete(echoedId); // clean up once seen
                   setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
