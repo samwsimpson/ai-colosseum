@@ -109,11 +109,6 @@ function buildAuthHeaders(userToken?: string | null): Headers {
   return h;
 }
 
-const normalize = (s: string) => s.trim().toLowerCase().replace(/[\s_.-]+/g, '');
-const isSelf = (sender?: string | null, you?: string | null) => {
-  if (!sender || !you) return false;
-  return normalize(sender) === normalize(you);
-};
 
 
 // Helper: fetch with Authorization header and 1x retry on 401 using /api/refresh
@@ -189,6 +184,23 @@ async function getFreshAccessToken(): Promise<string | null> {
 
 type AgentName = 'ChatGPT' | 'Claude' | 'Gemini' | 'Mistral';
 const ALLOWED_AGENTS: AgentName[] = ['ChatGPT', 'Claude', 'Gemini', 'Mistral'];
+// ---- helpers to normalize/compare names & dedupe client echoes ----
+// one canonical normalizer: spaces, underscores, dots, and hyphens are equivalent
+const normalize = (s?: string | null) =>
+  (s ?? '').trim().toLowerCase().replace(/[\s_.-]+/g, '');
+
+// single source of truth
+const isSelf = (sender?: string | null, me?: string | null) =>
+  !!sender && !!me && normalize(sender) === normalize(me);
+
+
+// a tiny in-memory set of client message ids we've sent, so we can ignore our own echoes
+const sentClientIds = new Set<string>();
+
+// cheap uid
+const uid = () =>
+  (globalThis.crypto?.randomUUID?.() ||
+   Math.random().toString(36).slice(2) + Date.now().toString(36));
 
 export default function ChatPage() {
 
@@ -661,6 +673,9 @@ const loadConversations = useCallback(async () => {
 
 
     const handleSubmit = useCallback((e: React.FormEvent) => {
+        if (isSubmittingRef.current) return;
+        isSubmittingRef.current = true;
+        setTimeout(() => { isSubmittingRef.current = false; }, 300);
         e.preventDefault();
 
         Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
@@ -678,15 +693,20 @@ const loadConversations = useCallback(async () => {
             console.error("User name is missing, cannot send message.");
             return;
         }
+        const clientId = uid();
         const payload: Record<string, unknown> = {
+            client_id: clientId,       // ← add this
             text,
             message: text,
             user_name: userName,       // helps the server stamp the sender
             conversation_id: conversationId || undefined,
             attachments: pendingFiles.map(f => f.id)
         };
-        // Track the last user message to avoid echo rendering
+
+        // Track & remember so we can ignore our own echo from the server
         lastUserTextRef.current = text;
+        sentClientIds.add(clientId);
+
 
         try {
             const sock = ws.current;
@@ -912,6 +932,14 @@ const loadConversations = useCallback(async () => {
                 catch { return; }
                 console.debug('[WS<-] raw', event.data);
                 console.debug('[WS<-] parsed', msg);
+                // If the server is echoing the same client_id we sent, ignore it
+                const echoedId = (msg as any)?.client_id;
+                if (typeof echoedId === 'string' && sentClientIds.has(echoedId)) {
+                  sentClientIds.delete(echoedId); // clean up once seen
+                  setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+                  return;
+                }
+
                 if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
                     const id = msg.id;
                     setConversationId(curr => curr || id);
@@ -951,27 +979,30 @@ const loadConversations = useCallback(async () => {
                 if (msg.type === 'ping' || msg.type === 'pong') return;
                 const sender = isNonEmptyString(msg.sender) ? msg.sender : null;
 
+                // --- HARD self-echo guard ---
+                // If the server ever sends back a message from me (or generic "user"),
+                // do not render it. We already added my message optimistically.
+                if (sender && (isSelf(sender, userName) || normalize(sender) === 'user')) {
+                setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+                return;
+                }
+                // Also guard the case where sender is missing but text exactly matches
+                // the last thing I sent (common broadcast echo).
+                if (typeof msg.text === 'string' &&
+                    msg.text.trim().length > 0 &&
+                    lastUserTextRef.current &&
+                    msg.text.trim() === lastUserTextRef.current.trim()) {
+                setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+                return;
+                }
+                // --- /HARD self-echo guard ---
+
+
                 if (sender && typeof msg.typing === 'boolean' && ALLOWED_AGENTS.includes(sender as AgentName)) {
                     setTypingWithDelayAndTTL(sender as AgentName, msg.typing === true);
                     return;
                 }
-                // ---- Echo guard: if the server re-broadcasts our own user text without a real agent, ignore it
-                if (
-                typeof msg.text === 'string' &&
-                msg.text.trim().length > 0 &&
-                lastUserTextRef.current &&
-                msg.text.trim() === lastUserTextRef.current.trim() &&
-                (
-                    !msg.sender ||                              // no sender at all
-                    (msg.sender || '').trim().toLowerCase() === 'user' ||   // generic "user"
-                    isSelf(msg.sender, userName)                              // it's me
-                )
-                ) {
-                setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
-                // Do NOT add this to chatHistory; it's just our own message coming back
-                return;
-                }
-                // ---- /Echo guard
+                
                 if (typeof msg.text === 'string') {
                 // If this socket message is our own echo, ignore it (we already added it optimistically).
                 if (isSelf(sender, userName)) {
