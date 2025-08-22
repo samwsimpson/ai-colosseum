@@ -197,21 +197,7 @@ export default function ChatPage() {
     const [message, setMessage] = useState<string>('');
     const [chatHistory, setChatHistory] = useState<Message[]>([]);
     const [isWsOpen, setIsWsOpen] = useState<boolean>(false);
-    const [selectedFile, setSelectedFile] = useState<File | null>(null);
-    const fileInputRef = useRef<HTMLInputElement>(null);
 
-    const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files && e.target.files[0]) {
-            setSelectedFile(e.target.files[0]);
-        }
-    };
-
-    const handleRemoveFile = () => {
-        setSelectedFile(null);
-        if (fileInputRef.current) {
-            fileInputRef.current.value = '';
-        }
-    };
     // Shows a one-time banner when a past-session summary exists
     const [loadedSummary, setLoadedSummary] = useState<string | null>(null);
 
@@ -600,54 +586,41 @@ const loadConversations = useCallback(async () => {
         // keep the newest message in view
         setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 0);
     }, []);
-    const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-        if (e.target.files && e.target.files[0]) {
-            setSelectedFile(e.target.files[0]);
-        }
-    };
 
-    const handleRemoveFile = () => {
-        setSelectedFile(null);
-        if (fileInputRef.current) {
-            fileInputRef.current.value = ''; // Reset the file input element
-        }
-    };
     const handleSubmit = useCallback(async (e: React.FormEvent) => {
+        if (isSubmittingRef.current) return;
+        isSubmittingRef.current = true;
+        setTimeout(() => { isSubmittingRef.current = false; }, 300);
+
         e.preventDefault();
+
+        const text = message.trim();
+        if (!text && pendingFiles.length === 0) return;
 
         Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
         Object.values(typingTTLRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
         typingShowDelayRef.current = {};
         typingTTLRef.current = {};
-        setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
 
-        const text = message.trim();
-        if (!text && !selectedFile) return;
-
-        let file_metadata = null;
-        if (selectedFile) {
-            // Upload the file first
-            const formData = new FormData();
-            formData.append('file', selectedFile);
-
-            const uploadRes = await apiFetch('/api/upload-file', {
-                method: 'POST',
-                body: formData,
-            });
-
-            if (!uploadRes.ok) {
-                alert('File upload failed!');
-                setSelectedFile(null);
-                return;
-            }
-
-            file_metadata = await uploadRes.json();
+        if (!userName) {
+            console.error('User name is missing, cannot send message.');
+            return;
         }
 
+        const clientId = uid();
+        lastUserClientIdRef.current = clientId;
+
         const payload: Record<string, unknown> = {
+            client_id: clientId,
+            text,
             message: text,
-            file_metadata: file_metadata,
+            user_name: userName,
+            conversation_id: conversationId || undefined,
+            attachments: pendingFiles.map(f => f.id),
         };
+
+        lastUserTextRef.current = text;
 
         try {
             const sock = ws.current;
@@ -658,25 +631,22 @@ const loadConversations = useCallback(async () => {
             } else {
                 pendingSends.current.push(payload);
                 if (!sock || sock.readyState === WebSocket.CLOSED) {
-                    setWsReconnectNonce((n) => n + 1);
+                    setWsReconnectNonce(n => n + 1);
                 }
             }
 
-            // Optimistic UI update
-            addMessageToChat({ sender: userName, text });
-            if (selectedFile) {
-                addMessageToChat({ sender: userName, text: `(Uploaded file: ${selectedFile.name})` });
-            }
+            if (text) addMessageToChat({ sender: userName, text });
 
             setMessage('');
-            setSelectedFile(null); // Clear the file
+            setPendingFiles([]);
+
             if (textareaRef.current) {
                 textareaRef.current.style.height = 'auto';
             }
         } catch (err) {
             console.error('Send failed:', err);
         }
-    }, [message, userName, addMessageToChat, selectedFile]);
+    }, [message, userName, addMessageToChat, pendingFiles, conversationId]);
 
     // Create a brand-new conversation
     const handleNewConversation = () => {  
