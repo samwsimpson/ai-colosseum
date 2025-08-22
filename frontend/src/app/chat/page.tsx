@@ -216,9 +216,6 @@ const [isTyping, setIsTyping] = useState<TypingState>({
 });
 
 // === Refs for DOM elements and internal state ===
-const typingTTLRef = useRef<Partial<Record<AgentName, number>>>({});
-const typingShowDelayRef = useRef<Partial<Record<AgentName, number>>>({});
-const typingTimersRef = useRef<Partial<Record<AgentName, number>>>({});
 const chatContainerRef = useRef<HTMLDivElement | null>(null);
 const composerRef = useRef<HTMLDivElement | null>(null);
 const textareaRef = useRef<HTMLTextAreaElement | null>(null);
