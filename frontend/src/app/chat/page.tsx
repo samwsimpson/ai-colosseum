@@ -137,7 +137,9 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
 
 type AgentName = 'ChatGPT' | 'Claude' | 'Gemini' | 'Mistral';
 const ALLOWED_AGENTS: AgentName[] = ['ChatGPT', 'Claude', 'Gemini', 'Mistral'];
-
+function uid() {
+    return Math.random().toString(36).substring(2, 10);
+}
 export default function ChatPage() {
 
     const typingTTLRef = useRef<Partial<Record<AgentName, number>>>({});
