@@ -226,8 +226,6 @@ const isSelf = (sender?: string | null, me?: string | null) =>
     };
 
 
-// a tiny in-memory set of client message ids we've sent, so we can ignore our own echoes
-const sentClientIds = new Set<string>();
 
 // cheap uid
 const uid = () =>
@@ -406,7 +404,9 @@ export default function ChatPage() {
     // Prevent rapid double-submits
     const isSubmittingRef = useRef<boolean>(false);
     // Remember the last user message we sent so we can ignore server echos
-const lastUserTextRef = useRef<string | null>(null);
+    const lastUserTextRef = useRef<string | null>(null);
+    // Track which client_id belongs to the user's most recent send
+    const lastUserClientIdRef = useRef<string | null>(null);
 
     // Tracks reconnect backoff and any pending timer
     const reconnectRef = useRef<{ tries: number; timer: number | null }>({
@@ -731,6 +731,8 @@ const loadConversations = useCallback(async () => {
     }
 
     const clientId = uid();
+    lastUserClientIdRef.current = clientId;
+
     const payload: Record<string, unknown> = {
         client_id: clientId,
         text,
@@ -742,7 +744,7 @@ const loadConversations = useCallback(async () => {
 
     // remember what we sent so we can ignore any server echo
     lastUserTextRef.current = text;
-    sentClientIds.add(clientId);
+
 
     try {
         const sock = ws.current;
@@ -925,6 +927,9 @@ const loadConversations = useCallback(async () => {
             u.searchParams.set('token', token);
         }
         console.debug('[WS] connecting to', u.origin + u.pathname, 'token?', Boolean(token));
+        const dbgTxt = extractWsText(msg);
+        console.debug('[WS<-] sender=', (msg as any).sender, 'type=', (msg as any).type, 'client_id=', (msg as any).client_id, 'text=', dbgTxt?.slice(0, 80));
+
         const socket = new WebSocket(u.toString());
         currentWs = socket;
 
@@ -973,11 +978,19 @@ const loadConversations = useCallback(async () => {
                 console.debug('[WS<-] parsed', msg);
 
                 // If the server echoes our own client_id, ignore (we already drew it optimistically)
-                const echoedId = (msg as { client_id?: unknown }).client_id;
-                if (typeof echoedId === 'string' && sentClientIds.has(echoedId)) {
-                    sentClientIds.delete(echoedId);
-                    setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
-                    return;
+                // Only ignore a true echo: same client_id AND exactly the same text we just sent
+                const echoedId = (msg as { client_id?: unknown }).client_id as string | undefined;
+                const incomingTextForEchoCheck = extractWsText(msg);
+
+                if (
+                echoedId &&
+                lastUserClientIdRef.current === echoedId &&
+                incomingTextForEchoCheck &&
+                lastUserTextRef.current &&
+                incomingTextForEchoCheck.trim() === lastUserTextRef.current.trim()
+                ) {
+                setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+                return;
                 }
 
                 // Conversation id / meta / summary housekeeping
