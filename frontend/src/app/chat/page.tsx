@@ -94,6 +94,8 @@ function resolveApiBase(): string {
     return 'http://localhost:8000';
   }
 }
+// Opt-in switch: only try cookie refresh if you set NEXT_PUBLIC_USE_REFRESH=true
+const REFRESH_ENABLED = process.env.NEXT_PUBLIC_USE_REFRESH === 'true';
 const API_BASE = resolveApiBase();
 
 // Always include an Authorization header using either localStorage or userToken fallback.
@@ -126,6 +128,11 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
   // always send cookies so /api/refresh can read the refresh cookie
   let res = await fetch(url, { ...init, headers, credentials: 'include' });
   if (res.status !== 401) return res;
+    // If refresh-cookie flow is not enabled, don't hammer /api/refresh
+    if (!REFRESH_ENABLED) {
+    try { localStorage.removeItem('access_token'); } catch {}
+    return res;
+    }
 
   // Try one refresh
   const rr = await fetch(`${API_BASE}/api/refresh`, {
@@ -157,7 +164,10 @@ async function getFreshAccessToken(): Promise<string | null> {
   const existing =
     typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
   if (existing) return existing;
-
+    if (!REFRESH_ENABLED) {
+    // No cookie refresh—just use whatever is already in localStorage
+    return existing;
+    }
   try {
     const r = await fetch(`${API_BASE}/api/refresh`, {
       method: 'POST',
@@ -238,7 +248,10 @@ export default function ChatPage() {
     const [pendingFiles, setPendingFiles] = useState<UploadedAttachment[]>([]);
 
     const uploadOne = async (file: File, conversationId: string | null): Promise<UploadedAttachment> => {
-        const token = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+    const token =
+        (typeof window !== 'undefined' ? localStorage.getItem('access_token') : null) ||
+        userToken ||
+        null;
         const form = new FormData();
         form.append('file', file);
         if (conversationId) form.append('conversation_id', conversationId);
@@ -354,11 +367,12 @@ export default function ChatPage() {
 
     // --- guarded token refresh helpers (NO HOOKS INSIDE) ---
     const refreshInFlight = useRef<Promise<string | null> | null>(null);
-
     const lastRefreshAt = useRef<number>(0);
 
     const refreshTokenIfNeeded = useCallback(
-        async (force = false): Promise<string | null> => {
+    async (force = false): Promise<string | null> => {
+        if (!REFRESH_ENABLED) return null;
+
         const now = Date.now();
 
         // throttle non-forced refresh to at most once/minute
@@ -366,38 +380,38 @@ export default function ChatPage() {
         if (refreshInFlight.current) return refreshInFlight.current;
 
         refreshInFlight.current = (async () => {
-            try {
+        try {
             const res = await fetch(`${API_BASE}/api/refresh`, {
-                method: 'POST',
-                credentials: 'include',
+            method: 'POST',
+            credentials: 'include',
             });
 
             if (!res.ok) {
-                // 401/expired/etc. -> clear any stale access token and bail
-                try { localStorage.removeItem('access_token'); } catch {}
-                lastRefreshAt.current = 0;
-                return null;
+            try { localStorage.removeItem('access_token'); } catch {}
+            lastRefreshAt.current = 0;
+            return null;
             }
 
             const { token } = await res.json().catch(() => ({ token: null as string | null }));
             if (token) {
-                try { localStorage.setItem('access_token', token); } catch {}
-                lastRefreshAt.current = Date.now();
-                return token as string;
+            try { localStorage.setItem('access_token', token); } catch {}
+            lastRefreshAt.current = Date.now();
+            return token as string;
             }
 
-            // No token in response — treat as unauthenticated
             try { localStorage.removeItem('access_token'); } catch {}
             lastRefreshAt.current = 0;
             return null;
-            } finally {
-            // always clear the in-flight marker
+        } finally {
             refreshInFlight.current = null;
-            }
+        }
         })();
 
         return refreshInFlight.current;
-    }, []);
+    },
+    []
+    );
+
 
 
 
@@ -509,8 +523,9 @@ const loadConversations = useCallback(async () => {
         query.set('limit', '100');
         query.set('token', token);
 
-        const res = await apiFetch(`/api/conversations/by_token?${query.toString()}`, {
+        const res = await apiFetch('/api/conversations/by_token?limit=100', {
             cache: 'no-store',
+            headers: buildAuthHeaders(userToken),
         });
         if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
         const data: ConversationListResponse = await res.json();
@@ -818,6 +833,11 @@ const loadConversations = useCallback(async () => {
             token = null; // continue anonymously
         }
         // proceed even if token is null
+        // Fallback to the token from context if cookie-refresh didn't produce one
+        if (!token && userToken) {
+        token = userToken;
+        try { localStorage.setItem('access_token', token); } catch {}
+        }
 
 
         const base = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
