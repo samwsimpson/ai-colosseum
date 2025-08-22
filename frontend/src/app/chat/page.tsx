@@ -807,15 +807,7 @@ const loadConversations = useCallback(async () => {
     useEffect(() => {
         let currentWs: WebSocket | null = null;
         (async () => {
-        // Don't try to connect without a token.
-        if (!userToken) {
-            if (ws.current) {
-                try { ws.current.close(); } catch {}
-            }
-            ws.current = null;
-            setIsWsOpen(false);
-            return;
-        }
+
         
         // Try to top up access token if it's close to expiring (non-blocking).
         // Ensure we actually have a valid access token before connecting
@@ -864,15 +856,16 @@ const loadConversations = useCallback(async () => {
                 authFailedRef.current = false;
           
         
-                const initialPayload: any = {
+                const initialPayload: Record<string, unknown> = {
                     kind: 'start',
-                    user_name: user?.first_name || user?.email || 'Guest'
+                    user_name: userName || 'Guest',
                 };
+
                 if (conversationId) {
                     initialPayload.conversation_id = conversationId;
                 }
                 currentWs!.send(JSON.stringify(initialPayload));
-                
+
                 while (pendingSends.current.length > 0) {
                     const next = pendingSends.current.shift();
                     if (next) socket.send(JSON.stringify(next));
@@ -1175,10 +1168,8 @@ const loadConversations = useCallback(async () => {
         >
             <div className="max-w-4xl mx-auto flex flex-col space-y-4 md:space-y-6">
             {/* Conditional rendering for the initial message */}
-            {!isWsOpen && userToken ? (
-                <p className="text-center text-gray-500 py-12 text-lg">
-                Connecting to chat...
-                </p>
+            {!isWsOpen && (ws.current && ws.current.readyState === WebSocket.CONNECTING) ? (
+                <p className="text-center text-gray-500 py-12 text-lg">Connecting to chat...</p>
             ) : (
                 chatHistory.length === 0 && (
                 <p className="text-center text-gray-500 py-12 text-lg">
