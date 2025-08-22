@@ -372,6 +372,8 @@ export default function ChatPage() {
     const chatLengthRef = useRef(0);
     useEffect(() => { chatLengthRef.current = chatHistory.length; }, [chatHistory.length]);
     const pendingSends = useRef<Array<Record<string, unknown>>>([]);
+    // Prevent rapid double-submits
+    const isSubmittingRef = useRef<boolean>(false);
     // Remember the last user message we sent so we can ignore server echos
 const lastUserTextRef = useRef<string | null>(null);
 
@@ -674,68 +676,71 @@ const loadConversations = useCallback(async () => {
 
 
     const handleSubmit = useCallback((e: React.FormEvent) => {
-        if (isSubmittingRef.current) return;
-        isSubmittingRef.current = true;
-        setTimeout(() => { isSubmittingRef.current = false; }, 300);
-        e.preventDefault();
+    if (isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
+    setTimeout(() => { isSubmittingRef.current = false; }, 300);
 
-        Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-        Object.values(typingTTLRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-        typingShowDelayRef.current = {};
-        typingTTLRef.current = {};
-        setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+    e.preventDefault();
 
-        const text = message.trim();
-        if (!text && pendingFiles.length === 0) return; // Allow sending only files
-        
-        if (!userName) {
-            // Handle the case where the user is not logged in.
-            // You might want to display an error or redirect.
-            console.error("User name is missing, cannot send message.");
-            return;
+    const text = message.trim();
+
+    // allow sending file-only messages too
+    if (!text && pendingFiles.length === 0) return;
+
+    // clear any typing indicators before we submit
+    Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+    Object.values(typingTTLRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+    typingShowDelayRef.current = {};
+    typingTTLRef.current = {};
+    setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+
+    if (!userName) {
+        console.error('User name is missing, cannot send message.');
+        return;
+    }
+
+    const clientId = uid();
+    const payload: Record<string, unknown> = {
+        client_id: clientId,
+        text,
+        message: text,
+        user_name: userName,
+        conversation_id: conversationId || undefined,
+        attachments: pendingFiles.map(f => f.id),
+    };
+
+    // remember what we sent so we can ignore any server echo
+    lastUserTextRef.current = text;
+    sentClientIds.add(clientId);
+
+    try {
+        const sock = ws.current;
+        const open = sock && sock.readyState === WebSocket.OPEN;
+
+        if (open) {
+        sock!.send(JSON.stringify(payload));
+        } else {
+        // queue until socket reconnects
+        pendingSends.current.push(payload);
+        if (!sock || sock.readyState === WebSocket.CLOSED) {
+            setWsReconnectNonce(n => n + 1);
         }
-        const clientId = uid();
-        const payload: Record<string, unknown> = {
-            client_id: clientId,       // ← add this
-            text,
-            message: text,
-            user_name: userName,       // helps the server stamp the sender
-            conversation_id: conversationId || undefined,
-            attachments: pendingFiles.map(f => f.id)
-        };
-
-        // Track & remember so we can ignore our own echo from the server
-        lastUserTextRef.current = text;
-        sentClientIds.add(clientId);
-
-
-        try {
-            const sock = ws.current;
-            const open = sock && sock.readyState === WebSocket.OPEN;
-
-            if (open) {
-                sock!.send(JSON.stringify(payload));
-            } else {
-            // queue until socket is open
-            pendingSends.current.push(payload);
-            // ensure a reconnect attempt is queued if it’s closed
-                if (!sock || sock.readyState === WebSocket.CLOSED) {
-                    setWsReconnectNonce((n) => n + 1);
-                }
-            }
-
-            // optimistic UI
-            addMessageToChat({ sender: userName, text });
-            setMessage('');
-            setPendingFiles([]); // Clear pending files after sending
-
-            if (textareaRef.current) {
-                textareaRef.current.style.height = 'auto'; // collapse back to 1 line
-            }
-        } catch (err) {
-            console.error('Send failed:', err);
         }
-    }, [message, userName, addMessageToChat, pendingFiles]);
+
+        // optimistic UI for the user's text (files alone won't add a bubble)
+        if (text) addMessageToChat({ sender: userName, text });
+
+        setMessage('');
+        setPendingFiles([]);
+
+        if (textareaRef.current) {
+        textareaRef.current.style.height = 'auto';
+        }
+    } catch (err) {
+        console.error('Send failed:', err);
+    }
+    }, [message, userName, addMessageToChat, pendingFiles, conversationId]);
+
 
     // Create a brand-new conversation
     const handleNewConversation = () => {  
