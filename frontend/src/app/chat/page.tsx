@@ -197,6 +197,21 @@ export default function ChatPage() {
     const [message, setMessage] = useState<string>('');
     const [chatHistory, setChatHistory] = useState<Message[]>([]);
     const [isWsOpen, setIsWsOpen] = useState<boolean>(false);
+    const [selectedFile, setSelectedFile] = useState<File | null>(null);
+    const fileInputRef = useRef<HTMLInputElement>(null);
+
+    const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files[0]) {
+            setSelectedFile(e.target.files[0]);
+        }
+    };
+
+    const handleRemoveFile = () => {
+        setSelectedFile(null);
+        if (fileInputRef.current) {
+            fileInputRef.current.value = '';
+        }
+    };
     // Shows a one-time banner when a past-session summary exists
     const [loadedSummary, setLoadedSummary] = useState<string | null>(null);
 
@@ -585,8 +600,19 @@ const loadConversations = useCallback(async () => {
         // keep the newest message in view
         setTimeout(() => chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 0);
     }, []);
+    const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (e.target.files && e.target.files[0]) {
+            setSelectedFile(e.target.files[0]);
+        }
+    };
 
-    const handleSubmit = useCallback((e: React.FormEvent) => {
+    const handleRemoveFile = () => {
+        setSelectedFile(null);
+        if (fileInputRef.current) {
+            fileInputRef.current.value = ''; // Reset the file input element
+        }
+    };
+    const handleSubmit = useCallback(async (e: React.FormEvent) => {
         e.preventDefault();
 
         Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
@@ -596,11 +622,32 @@ const loadConversations = useCallback(async () => {
         setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
 
         const text = message.trim();
-        if (!text || !userName) return;
+        if (!text && !selectedFile) return;
 
+        let file_metadata = null;
+        if (selectedFile) {
+            // Upload the file first
+            const formData = new FormData();
+            formData.append('file', selectedFile);
 
+            const uploadRes = await apiFetch('/api/upload-file', {
+                method: 'POST',
+                body: formData,
+            });
 
-        const payload: Record<string, unknown> = { message: text };
+            if (!uploadRes.ok) {
+                alert('File upload failed!');
+                setSelectedFile(null);
+                return;
+            }
+
+            file_metadata = await uploadRes.json();
+        }
+
+        const payload: Record<string, unknown> = {
+            message: text,
+            file_metadata: file_metadata,
+        };
 
         try {
             const sock = ws.current;
@@ -609,24 +656,27 @@ const loadConversations = useCallback(async () => {
             if (open) {
                 sock!.send(JSON.stringify(payload));
             } else {
-            // queue until socket is open
-            pendingSends.current.push(payload);
-            // ensure a reconnect attempt is queued if it’s closed
-            if (!sock || sock.readyState === WebSocket.CLOSED) {
-                setWsReconnectNonce((n) => n + 1);
-            }
+                pendingSends.current.push(payload);
+                if (!sock || sock.readyState === WebSocket.CLOSED) {
+                    setWsReconnectNonce((n) => n + 1);
+                }
             }
 
-            // optimistic UI
+            // Optimistic UI update
             addMessageToChat({ sender: userName, text });
+            if (selectedFile) {
+                addMessageToChat({ sender: userName, text: `(Uploaded file: ${selectedFile.name})` });
+            }
+
             setMessage('');
+            setSelectedFile(null); // Clear the file
             if (textareaRef.current) {
-                textareaRef.current.style.height = 'auto'; // collapse back to 1 line
+                textareaRef.current.style.height = 'auto';
             }
         } catch (err) {
             console.error('Send failed:', err);
         }
-    }, [message, userName, addMessageToChat]);
+    }, [message, userName, addMessageToChat, selectedFile]);
 
     // Create a brand-new conversation
     const handleNewConversation = () => {  
@@ -1232,37 +1282,61 @@ const loadConversations = useCallback(async () => {
     </div>
   )}
 
-  <form onSubmit={handleSubmit} className="max-w-4xl mx-auto p-4 md:p-6">
-    <div className="flex gap-4">
-        <textarea
-            ref={textareaRef}
-            rows={1}
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            onInput={(e) => {
-                const ta = e.currentTarget;
-                ta.style.height = 'auto';               // shrink back down if needed
-                ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'; // cap ~5 lines
-            }}
-            onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-                e.preventDefault();
-                (e.currentTarget.form as HTMLFormElement)?.requestSubmit();
-                }
-            }}
-            placeholder="Type your message..."
-            className="flex-grow p-3 rounded-xl border border-gray-700 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200 text-sm md:text-base resize-none overflow-y-auto min-h-[44px] max-h-40"
-            disabled={!userName}
-        />      
-        <button
-            type="submit"
-            className="h-11 md:h-12 px-4 md:px-6 self-end bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 transition-colors duration-200 text-sm"
-            disabled={!userName}
-        >
-            Send
-        </button>
+<form onSubmit={handleSubmit} className="max-w-4xl mx-auto p-4 md:p-6">
+    <div className="flex flex-col gap-2">
+        {selectedFile && (
+            <div className="flex items-center gap-2 p-2 rounded-lg bg-gray-800 border border-gray-700 text-gray-300 text-sm">
+                <span>{selectedFile.name}</span>
+                <button type="button" onClick={handleRemoveFile} className="text-red-500 hover:text-red-400">
+                    &times;
+                </button>
+            </div>
+        )}
+        <div className="flex gap-4">
+            <input
+                type="file"
+                ref={fileInputRef}
+                onChange={handleFileSelect}
+                className="hidden"
+            />
+            <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="h-11 md:h-12 w-11 md:w-12 self-end bg-gray-700 text-white font-semibold rounded-xl hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 transition-colors duration-200 text-lg"
+                title="Attach a file"
+            >
+                <i className="fas fa-paperclip"></i>
+            </button>
+            <textarea
+                ref={textareaRef}
+                rows={1}
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                onInput={(e) => {
+                    const ta = e.currentTarget;
+                    ta.style.height = 'auto'; // shrink back down if needed
+                    ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'; // cap ~5 lines
+                }}
+                onKeyDown={(e) => {
+                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
+                    e.preventDefault();
+                    (e.currentTarget.form as HTMLFormElement)?.requestSubmit();
+                    }
+                }}
+                placeholder="Type your message..."
+                className="flex-grow p-3 rounded-xl border border-gray-700 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200 text-sm md:text-base resize-none overflow-y-auto min-h-[44px] max-h-40"
+                disabled={!userName}
+            />      
+            <button
+                type="submit"
+                className="h-11 md:h-12 px-4 md:px-6 self-end bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 transition-colors duration-200 text-sm"
+                disabled={!userName}
+            >
+                Send
+            </button>
+        </div>
     </div>
-  </form>
+</form>
 </div>
 {/* ===== /Composer ===== */}
 
