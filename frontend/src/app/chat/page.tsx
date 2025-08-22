@@ -274,6 +274,12 @@ export default function ChatPage() {
     const chatLengthRef = useRef(0);
     useEffect(() => { chatLengthRef.current = chatHistory.length; }, [chatHistory.length]);
     const pendingSends = useRef<Array<Record<string, unknown>>>([]);
+    // Prevent rapid double-submits
+    const isSubmittingRef = useRef<boolean>(false);
+    // Remember the last user message we sent so we can ignore server echos
+    const lastUserTextRef = useRef<string | null>(null);
+    // Track which client_id belongs to the user's most recent send
+    const lastUserClientIdRef = useRef<string | null>(null);
     // Tracks reconnect backoff and any pending timer
     const reconnectRef = useRef<{ tries: number; timer: number | null }>({
         tries: 0,
