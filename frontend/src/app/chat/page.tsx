@@ -322,8 +322,6 @@ const handleFilePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
 };
 const removePending = (id: string) => setPendingFiles(prev => prev.filter(p => p.id !== id));
 
-    // Sidebar + conversation list
-    const [conversations, setConversations] = useState<ConversationListItem[]>([]);
     // Hydrate conversations from localStorage on mount
     useEffect(() => {
         if (typeof window === 'undefined') return; // avoid SSR access
