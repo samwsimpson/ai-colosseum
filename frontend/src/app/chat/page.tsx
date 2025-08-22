@@ -109,7 +109,11 @@ function buildAuthHeaders(userToken?: string | null): Headers {
   return h;
 }
 
-
+const normalize = (s: string) => s.trim().toLowerCase().replace(/[\s_.-]+/g, '');
+const isSelf = (sender?: string | null, you?: string | null) => {
+  if (!sender || !you) return false;
+  return normalize(sender) === normalize(you);
+};
 
 
 // Helper: fetch with Authorization header and 1x retry on 401 using /api/refresh
@@ -355,6 +359,9 @@ export default function ChatPage() {
     const chatLengthRef = useRef(0);
     useEffect(() => { chatLengthRef.current = chatHistory.length; }, [chatHistory.length]);
     const pendingSends = useRef<Array<Record<string, unknown>>>([]);
+    // Remember the last user message we sent so we can ignore server echos
+const lastUserTextRef = useRef<string | null>(null);
+
     // Tracks reconnect backoff and any pending timer
     const reconnectRef = useRef<{ tries: number; timer: number | null }>({
         tries: 0,
@@ -672,9 +679,14 @@ const loadConversations = useCallback(async () => {
             return;
         }
         const payload: Record<string, unknown> = {
+            text,
             message: text,
+            user_name: userName,       // helps the server stamp the sender
+            conversation_id: conversationId || undefined,
             attachments: pendingFiles.map(f => f.id)
         };
+        // Track the last user message to avoid echo rendering
+        lastUserTextRef.current = text;
 
         try {
             const sock = ws.current;
@@ -943,22 +955,42 @@ const loadConversations = useCallback(async () => {
                     setTypingWithDelayAndTTL(sender as AgentName, msg.typing === true);
                     return;
                 }
-
+                // ---- Echo guard: if the server re-broadcasts our own user text without a real agent, ignore it
+                if (
+                typeof msg.text === 'string' &&
+                msg.text.trim().length > 0 &&
+                lastUserTextRef.current &&
+                msg.text.trim() === lastUserTextRef.current.trim() &&
+                (
+                    !msg.sender ||                              // no sender at all
+                    (msg.sender || '').trim().toLowerCase() === 'user' ||   // generic "user"
+                    isSelf(msg.sender, userName)                              // it's me
+                )
+                ) {
+                setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+                // Do NOT add this to chatHistory; it's just our own message coming back
+                return;
+                }
+                // ---- /Echo guard
                 if (typeof msg.text === 'string') {
-                // If it's one of your named agents, clear its typing; otherwise just dump typing state.
+                // If this socket message is our own echo, ignore it (we already added it optimistically).
+                if (isSelf(sender, userName)) {
+                    setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+                    return;
+                }
+
+                // If it's one of your named agents, clear its typing; else reset typing state.
                 if (sender && ALLOWED_AGENTS.includes(sender as AgentName)) {
                     setTypingWithDelayAndTTL(sender as AgentName, false);
                 } else {
                     setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
                 }
 
-                // Show *any* sender; fall back to "Assistant" if none/unknown
-                const shownSender =
-                    sender && sender.trim() ? sender.trim() : 'Assistant';
-
+                const shownSender = sender && sender.trim() ? sender.trim() : 'Assistant';
                 addMessageToChat({ sender: shownSender, text: msg.text });
                 return;
                 }
+
             },
             onclose: (ev: CloseEvent) => {
                 console.log('WebSocket closed. code=', ev.code, 'reason=', ev.reason, 'wasClean=', ev.wasClean);
@@ -1215,8 +1247,7 @@ const loadConversations = useCallback(async () => {
 
             {chatHistory.length > 0 &&
                 chatHistory.map((msg, index) => {
-                    const isUser =
-                    (msg.sender || '').trim().toLowerCase() === (userName || 'You').trim().toLowerCase();
+                    const isUser = isSelf(msg.sender, userName);
                     return (
                     <div key={index} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
                         <div
