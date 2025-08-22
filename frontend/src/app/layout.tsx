@@ -23,6 +23,9 @@ export default function RootLayout({
   if (!clientId) {
     return (
       <html lang="en">
+        <head>
+          <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css" />
+        </head>        
         <body className="flex flex-col min-h-screen bg-gray-950 text-white">
           <main className="flex-grow flex flex-col items-center justify-center p-24">
             <h1 className="text-4xl font-bold mb-4">The Colosseum</h1>

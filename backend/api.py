@@ -1,7 +1,7 @@
 import sys
 import traceback
 print("TOP OF api.py: Script starting...", file=sys.stderr)
-from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from fastapi import Request, Response
@@ -18,6 +18,10 @@ from google.auth.transport import requests as google_requests
 from google.oauth2.id_token import verify_oauth2_token
 from google.cloud.firestore_v1 import SERVER_TIMESTAMP, ArrayUnion, Increment
 from google.cloud import firestore  # for Query.DESCENDING
+from google.cloud import storage
+from werkzeug.utils import secure_filename
+import mimetypes
+import aiohttp
 # --- Firestore client (async) ---
 # Cloud Run provides default credentials, so no explicit key is required.
 # Your code uses `await` on Firestore calls, so use AsyncClient (not the sync Client).
@@ -29,10 +33,13 @@ from google_auth_oauthlib.flow import Flow
 from openai import AsyncOpenAI
 from collections import defaultdict
 from fastapi import Header
+from fastapi import UploadFile, File
+from google.cloud import storage
 load_dotenv()
 OPENAI_SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai_client = AsyncOpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
+storage_client = storage.Client()
 
 print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 3.1 - FIRESTORE) <<")
 
@@ -276,16 +283,19 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
     doc = await conv_ref.get()
     return conv_ref, (doc.to_dict() or {})
 
-async def save_message(conv_ref, *, role: str, sender: str, content: str):
+async def save_message(conv_ref, *, role: str, sender: str, content: str, file_metadata: Optional[dict] = None):
     # now = firestore.SERVER_TIMESTAMP
-
-    # save the message
-    await conv_ref.collection("messages").add({
+    data = {
         "role": role,
         "sender": sender,
         "content": content,
         "created_at": FS_TS,
-    })
+    }
+    if file_metadata:
+        data["file_metadata"] = file_metadata
+
+    # save the message
+    await conv_ref.collection("messages").add(data)
 
     # update parent conversation
     await conv_ref.set({
@@ -1145,6 +1155,78 @@ async def stripe_webhook(request: Request):
             print(f"User {customer_email} successfully subscribed to the {new_subscription_list[0].id} plan.")
 
     return {"status": "success"}
+
+# --- File Upload Endpoint ---
+async def _download_file(url: str):
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url) as response:
+            response.raise_for_status()
+            return await response.text()
+
+@app.post("/api/upload-file")
+async def upload_file(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
+    """
+    Handles file uploads, stores them in GCS, and returns a signed URL.
+    """
+    try:
+        bucket_name = os.getenv("GCS_BUCKET_NAME")
+        if not bucket_name:
+            raise HTTPException(status_code=500, detail="GCS_BUCKET_NAME not configured")
+
+        # Sanitize filename
+        filename = secure_filename(file.filename)
+        if not filename:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+
+        # Create a unique path for the blob
+        file_path = f"uploads/{current_user['id']}/{datetime.now().isoformat()}-{filename}"
+        
+        # Determine content type if not provided
+        content_type = file.content_type
+        if not content_type:
+            content_type, _ = mimetypes.guess_type(filename) or ('application/octet-stream', None)
+
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(file_path)
+
+        # Upload the file from the async stream
+        await blob.upload_from_file(file.file, content_type=content_type)
+        
+        # Generate a signed URL for temporary access (e.g., 15 minutes)
+        signed_url = blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=15),
+            method="GET"
+        )
+        
+        # Read a small amount of content for LLMs to use
+        content_for_llm = ""
+        try:
+            # Check for common text-based file types to avoid reading large binary files
+            if content_type.startswith(('text/', 'application/json', 'application/xml', 'application/javascript')):
+                content_for_llm = await _download_file(signed_url)
+                # Truncate to a reasonable size to avoid context window issues
+                if len(content_for_llm) > 10000:
+                    content_for_llm = content_for_llm[:9500] + "\n...[TRUNCATED]"
+            else:
+                content_for_llm = "[Binary file content not shown]"
+
+        except Exception as e:
+            print(f"Failed to download/read file content for LLM: {e}")
+            content_for_llm = "[Could not read file content]"
+
+        return {
+            "filename": filename,
+            "url": signed_url,
+            "content": content_for_llm,  # provide the content directly to the client
+            "content_type": content_type,
+            "size": file.size,
+        }
+
+    except Exception as e:
+        print(f"File upload failed: {e}")
+        raise HTTPException(status_code=500, detail=f"File upload failed: {e}")
+
 @app.websocket("/ws/colosseum-chat")
 async def websocket_endpoint(websocket: WebSocket, token: str):
     try:
@@ -1662,7 +1744,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             await ws.send_json({"type": "pong"})
                         continue
                         
-                    user_message = data["message"]
+                    user_message = data.get("message", "")
+                    file_metadata = data.get("file_metadata")
+
+                    # Augment the user message for the AI agents to include file content
+                    full_user_content = user_message
+                    if file_metadata:
+                        content = file_metadata.get('content', '[no content available]')
+                        filename = file_metadata.get('filename', 'a file')
+                        full_user_content = f"{user_message}\n\n[USER UPLOADED FILE]\nFilename: {filename}\nContent:\n{content}\n[END OF FILE]"
+
+                    await ws.send_json({"sender": proxy.name, "text": user_message})
+                    
+                    # Save the original user message and file metadata to Firestore
+                    await save_message(conv_ref, role="user", sender=proxy.name, content=user_message, file_metadata=file_metadata)
 
                     await ws.send_json({"sender": proxy.name, "text": user_message})
                     await save_message(conv_ref, role="user", sender=proxy.name, content=user_message)
@@ -1722,10 +1817,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # Kick off or feed the manager loop
                     if chat_task is None or chat_task.done():
                         # (Re)start the manager loop in the background
-                        chat_task = asyncio.create_task(proxy.a_initiate_chat(manager, message=user_message))
+                        chat_task = asyncio.create_task(proxy.a_initiate_chat(manager, message=full_user_content))
                     else:
                         # Feed subsequent user turns into the running loop
-                        await proxy.a_inject_user_message(user_message)
+                        await proxy.a_inject_user_message(full_user_content)
 
 
 
