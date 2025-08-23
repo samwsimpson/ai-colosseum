@@ -100,38 +100,39 @@ function buildAuthHeaders(userToken?: string | null): Headers {
 }
 
 
-
-
 // Helper: fetch with Authorization header and 1x retry on 401 using /api/refresh
 async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
-  const url =
-    typeof pathOrUrl === 'string'
-      ? (pathOrUrl.startsWith('http')
-          ? pathOrUrl
-          : `${API_BASE}${pathOrUrl.startsWith('/') ? '' : '/'}${pathOrUrl}`)
-      : pathOrUrl.toString();
+    const url =
+        typeof pathOrUrl === 'string'
+            ? (pathOrUrl.startsWith('http') ? pathOrUrl : `${API_BASE}${pathOrUrl.startsWith('/') ? '' : '/'}${pathOrUrl}`)
+            : pathOrUrl.toString();
 
-  const headers = new Headers(init.headers || {});
-  const access = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
-  if (access) headers.set('Authorization', `Bearer ${access}`);
+    const headers = new Headers(init.headers || {});
+    const access = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
+    if (access) headers.set('Authorization', `Bearer ${access}`);
 
-  // always send cookies so /api/refresh can read the refresh cookie
-  let res = await fetch(url, { ...init, headers, credentials: 'include' });
-  if (res.status !== 401) return res;
-
-  const rr = await fetch(`${API_BASE}/api/refresh`, {
-    method: 'POST',
-    credentials: 'include',
-  });
-  if (!rr.ok) return res;
-
-  const { token } = await rr.json();
-  if (token) {
-    if (typeof window !== 'undefined') localStorage.setItem('access_token', token);
-    headers.set('Authorization', `Bearer ${token}`);
-    res = await fetch(url, { ...init, headers, credentials: 'include' });
-  }
-  return res;
+    // always send cookies so /api/refresh can read the refresh cookie
+    let res = await fetch(url, { ...init, headers, credentials: 'include' });
+    
+    // If the call failed with a 401, try to refresh the token
+    if (res.status === 401) {
+        const rr = await fetch(`${API_BASE}/api/refresh`, {
+            method: 'POST',
+            credentials: 'include',
+        });
+        
+        // If the refresh succeeded, retry the original request
+        if (rr.ok) {
+            const { token } = await rr.json();
+            if (token) {
+                if (typeof window !== 'undefined') localStorage.setItem('access_token', token);
+                headers.set('Authorization', `Bearer ${token}`);
+                res = await fetch(url, { ...init, headers, credentials: 'include' });
+            }
+        }
+    }
+    
+    return res;
 }
 
 
