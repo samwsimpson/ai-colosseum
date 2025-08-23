@@ -885,21 +885,21 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
         # If you have the redirect URI here, this is an easy local/prod test:
         is_local = auth_code.redirect_uri.startswith("http://localhost") if "auth_code" in locals() else False
 
-        cookie_kwargs = dict(
-            key="refresh_token",
-            value=refresh_token,
-            max_age=REFRESH_TOKEN_EXPIRE_SECONDS,
-            httponly=True,            
-            path="/",                    # make it visible to /api/refresh
-            domain=".aicolosseum.app"
-        )
-
+        cookie_kwargs = {
+            "key": "refresh_token",
+            "value": refresh_token,
+            "max_age": REFRESH_TOKEN_EXPIRE_SECONDS,
+            "httponly": True,
+            "path": "/",
+            "secure": True,
+            "samesite": "Lax",
+            "domain": ".aicolosseum.app",
+        }
+        
         if is_local:
-            # Local dev: cookie must be readable over http://localhost
-            cookie_kwargs.update(secure=False, samesite="Lax", domain="localhost")
-        else:
-            # Prod: host-only, first-party cookie (best for same-site subdomains)           
-            cookie_kwargs.update(secure=True, samesite="Lax")
+            # Overwrite secure and domain for local dev
+            cookie_kwargs["secure"] = False
+            cookie_kwargs["domain"] = "localhost"
 
         response.set_cookie(**cookie_kwargs)
 

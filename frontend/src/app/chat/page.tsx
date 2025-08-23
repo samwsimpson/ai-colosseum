@@ -855,11 +855,6 @@ const loadConversations = useCallback(async () => {
             return;
         }
 
-
-        
-        // Try to top up access token if it's close to expiring (non-blocking).
-        refreshTokenIfNeeded();
-
         // Build the URL safely
         const base = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
         let u: URL;
@@ -1007,21 +1002,6 @@ const loadConversations = useCallback(async () => {
             }
         };
     }, [userToken, userName, addMessageToChat, wsReconnectNonce, conversationId]);
-
-        
-
-    // keep access token fresh while user is signed in
-    const refreshTimerId = useRef<number | null>(null);
-
-    useEffect(() => {
-    if (!userToken) {
-        // clear any existing timer if user logs out
-        if (refreshTimerId.current) {
-        window.clearInterval(refreshTimerId.current);
-        refreshTimerId.current = null;
-        }
-        return;
-    }
 
     // do an initial (throttled) refresh to extend session
     refreshTokenIfNeeded().catch(() => {});
