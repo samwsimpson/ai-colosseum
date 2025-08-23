@@ -891,15 +891,15 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
             max_age=REFRESH_TOKEN_EXPIRE_SECONDS,
             httponly=True,            
             path="/",                    # make it visible to /api/refresh
-            # domain is optional; omit it to bind to api.aicolosseum.app automatically
+            domain=".aicolosseum.app"
         )
 
         if is_local:
             # Local dev: cookie must be readable over http://localhost
-            cookie_kwargs.update(secure=False, samesite="Lax")
+            cookie_kwargs.update(secure=False, samesite="Lax", domain="localhost")
         else:
             # Prod: host-only, first-party cookie (best for same-site subdomains)           
-            cookie_kwargs.update(secure=True, samesite="Lax", domain=".aicolosseum.app")
+            cookie_kwargs.update(secure=True, samesite="Lax")
 
         response.set_cookie(**cookie_kwargs)
 
