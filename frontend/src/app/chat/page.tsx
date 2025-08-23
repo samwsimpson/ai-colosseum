@@ -368,40 +368,6 @@ const removePending = (id: string) => setPendingFiles(prev => prev.filter(p => p
         chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
     }, [composerHeight]);    
 
-    // A simple ref to distinguish the first render
-    
-    const refreshTokenIfNeeded = useCallback(async (force = false) => {
-        const now = Date.now();
-
-        // throttle non-forced refresh to at most once/minute
-        if (!force && now - lastRefreshAt.current < 60_000) return;
-        if (refreshInFlight.current) return refreshInFlight.current;
-
-        refreshInFlight.current = (async () => {
-            try {
-            const res = await fetch(`${API_BASE}/api/refresh`, {
-                method: 'POST',
-                credentials: 'include',
-            });
-            if (!res.ok) throw new Error('refresh failed');
-            const { token } = await res.json();
-            if (token) {
-                localStorage.setItem('access_token', token);
-                lastRefreshAt.current = Date.now();
-            } else {
-                throw new Error('no token in refresh');
-            }
-            } finally {
-            // always clear the in-flight marker
-            refreshInFlight.current = null;
-            }
-        })();
-
-        return refreshInFlight.current;
-    }, []);
-    // --- end guarded token refresh helpers ---
-
-
 
     // Unconditional scroll to the last message
     useEffect(() => {
@@ -610,35 +576,43 @@ const loadConversations = useCallback(async () => {
 
     // Handle redirection to sign-in page when userToken is not present
     useEffect(() => {
-    (async () => {
-        if (userToken) return;
+        const checkAuthAndLoad = async () => {
+            if (userToken) {
+                // A token is present in the context. We're authenticated.
+                loadConversations();
+                setWsReconnectNonce(n => n + 1);
+                return;
+            }
 
-        const hasAccess = typeof window !== 'undefined' && !!localStorage.getItem('access_token');
-        if (!hasAccess) {
-        try { await refreshTokenIfNeeded(true); } catch {}
-        }
+            // No token in context. Check localStorage.
+            const hasAccess = typeof window !== 'undefined' && !!localStorage.getItem('access_token');
+            if (hasAccess) {
+                // A token exists, but the context hasn't updated yet.
+                // We can safely assume we'll be authenticated.
+                loadConversations();
+                setWsReconnectNonce(n => n + 1);
+                return;
+            }
 
-        const tokenNow = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
-        if (!tokenNow) {
-        // clean up & redirect only if refresh didn’t produce a token
-        try { localStorage.removeItem('conversationId'); } catch {}
-        setConversationId(null);
-        setChatHistory([]);
-        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+            // No token found anywhere, so redirect to sign-in.
+            try { localStorage.removeItem('conversationId'); } catch {}
+            setConversationId(null);
+            setChatHistory([]);
+            setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
 
-        if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
-            ws.current.close(1000, 'logout');
-        }
-        ws.current = null;
+            if (ws.current && ws.current.readyState < 2) {
+                ws.current.close(1000, 'logout');
+            }
+            ws.current = null;
 
-        if (pathname !== '/sign-in') router.push('/sign-in');
-        } else {
-        // we have a token now; hydrate
-        loadConversations();
-        setWsReconnectNonce(n => n + 1);
-        }
-    })();
-    }, [userToken, pathname, router, loadConversations]);
+            if (pathname !== '/sign-in') {
+                router.push('/sign-in');
+            }
+        };
+        
+        checkAuthAndLoad();
+
+        }, [userToken, pathname, router, loadConversations]);
 
 
     useEffect(() => {
@@ -867,7 +841,12 @@ const loadConversations = useCallback(async () => {
 
         u.protocol = (u.protocol === 'https:' || u.protocol === 'wss:') ? 'wss:' : 'ws:';
         u.pathname = '/ws/colosseum-chat';
-        u.search = `?token=${encodeURIComponent(localStorage.getItem('access_token') || userToken)}`;
+        const tokenToSend = localStorage.getItem('access_token') || userToken;
+        if (!tokenToSend) {
+            console.error("Attempted to connect WebSocket without a token.");
+            return;
+        }
+        u.search = `?token=${encodeURIComponent(tokenToSend)}`;
 
         const socket = new WebSocket(u.toString());
         ws.current = socket;
@@ -1002,25 +981,6 @@ const loadConversations = useCallback(async () => {
             }
         };
     }, [userToken, userName, addMessageToChat, wsReconnectNonce, conversationId]);
-
-    // do an initial (throttled) refresh to extend session
-    refreshTokenIfNeeded().catch(() => {});
-
-    // set interval
-    if (refreshTimerId.current) window.clearInterval(refreshTimerId.current);
-    refreshTimerId.current = window.setInterval(() => {
-        refreshTokenIfNeeded().catch(() => {});
-    }, 5 * 60 * 1000);
-
-    // cleanup
-    return () => {
-        if (refreshTimerId.current) {
-        window.clearInterval(refreshTimerId.current);
-        refreshTimerId.current = null;
-        }
-    };
-    }, [userToken]);
-
 
     
     const handleResetConversation = () => {    
