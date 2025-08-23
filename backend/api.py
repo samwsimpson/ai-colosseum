@@ -884,27 +884,26 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
         # AFTER — environment-aware cookie
         # If you have the redirect URI here, this is an easy local/prod test:
         # --- BEFORE: environment-aware cookie ---
-        # Find out if we're running locally.
-        is_local = auth_code.redirect_uri.startswith("http://localhost") if "auth_code" in locals() else False
-        
+       
         # Define a base cookie with production values by default.
-        cookie_kwargs = {
-            "key": "refresh_token",
-            "value": refresh_token,
-            "max_age": REFRESH_TOKEN_EXPIRE_SECONDS,
-            "httponly": True,
-            "path": "/",
-            "secure": True,
-            "samesite": "Lax",
-            "domain": ".aicolosseum.app",
-        }
-        
-        if is_local:
-            # Overwrite only the values that need to be different for local dev
-            cookie_kwargs["secure"] = False
-            cookie_kwargs["samesite"] = "Lax"
-            cookie_kwargs["domain"] = "localhost"
+        is_local = auth_code.redirect_uri.startswith("http://localhost") if "auth_code" in locals() else False
 
+        cookie_kwargs = dict(
+            key="refresh_token",
+            value=refresh_token,
+            max_age=REFRESH_TOKEN_EXPIRE_SECONDS,
+            httponly=True,
+            path="/",
+            secure=True,
+            samesite="Lax",
+        )
+
+        if is_local:
+            cookie_kwargs["secure"] = False
+            cookie_kwargs["domain"] = "localhost"
+        else:
+            cookie_kwargs["domain"] = ".aicolosseum.app" # Set the domain explicitly for production
+            
         response.set_cookie(**cookie_kwargs)
 
         return Token(

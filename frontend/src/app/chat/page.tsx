@@ -320,7 +320,10 @@ const handleFilePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
         console.error(err);
         alert('Upload failed. Try smaller files.');
     } finally {
-        e.currentTarget.value = '';
+        // Use the ref to safely reset the input value.
+        if (fileInputRef.current) {
+            fileInputRef.current.value = '';
+        }
     }
 };
 const removePending = (id: string) => setPendingFiles(prev => prev.filter(p => p.id !== id));
