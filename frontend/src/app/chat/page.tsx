@@ -843,12 +843,43 @@ const loadConversations = useCallback(async () => {
 
         u.protocol = (u.protocol === 'https:' || u.protocol === 'wss:') ? 'wss:' : 'ws:';
         u.pathname = '/ws/colosseum-chat';
-        const tokenToSend = userToken;
-        u.search = `?token=${encodeURIComponent(tokenToSend)}`;
+        
+        // Use a function that gets the token, and if expired, refreshes it
+        async function getTokenForWs() {
+            const token = userToken;
+            if (!token) {
+                console.error("Attempted to connect WebSocket without a token.");
+                return null;
+            }
 
-        const socket = new WebSocket(u.toString());
-        ws.current = socket;
-        setIsWsOpen(false);
+            // You'll need a JWT decoder library to check for expiration
+            const decoded = JSON.parse(atob(token.split('.')[1]));
+            const now = Math.floor(Date.now() / 1000);
+            if (decoded.exp < now) {
+                // Token is expired, trigger a refresh before connecting
+                try {
+                    const res = await apiFetch('/api/refresh', { method: 'POST' });
+                    if (res.ok) {
+                        const { token: newToken } = await res.json();
+                        return newToken;
+                    }
+                } catch (e) {
+                    console.error("Failed to refresh token for WebSocket", e);
+                }
+                return null;
+            }
+            return token;
+        }
+
+        getTokenForWs().then(tokenToSend => {
+            if (!tokenToSend) {
+                // If we couldn't get a valid token, don't connect.
+                return;
+            }
+            u.search = `?token=${encodeURIComponent(tokenToSend)}`;
+            const socket = new WebSocket(u.toString());
+            ws.current = socket;
+            setIsWsOpen(false);
 
         const currentWs = socket;
         const isNonEmptyString = (v: unknown): v is string =>
