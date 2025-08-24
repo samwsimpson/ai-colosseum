@@ -887,24 +887,20 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
         # Define a base cookie with production values by default.
         is_local = auth_code.redirect_uri.startswith("http://localhost") if "auth_code" in locals() else False
 
+        # Define base cookie parameters with environment-specific values
+        is_local = auth_code.redirect_uri.startswith("http://localhost") if "auth_code" in locals() else False
+
         cookie_kwargs = dict(
             key="refresh_token",
             value=refresh_token,
             max_age=REFRESH_TOKEN_EXPIRE_SECONDS,
             httponly=True,
             path="/",
-            secure=True,
             samesite="Lax",
+            secure=not is_local,
+            domain="localhost" if is_local else ".aicolosseum.app",
         )
-
-        if is_local:
-            cookie_kwargs["secure"] = False
-            cookie_kwargs["domain"] = "localhost"
-        else:
-            cookie_kwargs["domain"] = ".aicolosseum.app" # Set the domain explicitly for production
-            
         response.set_cookie(**cookie_kwargs)
-
         return Token(
             access_token=access_token,
             token_type="bearer",
