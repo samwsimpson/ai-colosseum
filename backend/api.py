@@ -44,6 +44,7 @@ storage_client = storage.Client()
 print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 3.1 - FIRESTORE) <<")
 
 SECRET_KEY = os.getenv("SECRET_KEY")
+print(f"DEBUG: SECRET_KEY read from env is: {'[SET]' if SECRET_KEY else '[NOT SET]'}")
 if not SECRET_KEY:
     raise RuntimeError("SECRET_KEY env var is required")
 
