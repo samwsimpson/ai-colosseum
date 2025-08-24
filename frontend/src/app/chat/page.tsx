@@ -820,7 +820,7 @@ const loadConversations = useCallback(async () => {
 
 
     // WebSocket connection logic
-    useEffect(() => {
+useEffect(() => {
         // Only proceed if a userToken is present and valid.
         if (!userToken) {
             if (ws.current) {
@@ -881,134 +881,135 @@ const loadConversations = useCallback(async () => {
             ws.current = socket;
             setIsWsOpen(false);
 
-        const currentWs = socket;
-        const isNonEmptyString = (v: unknown): v is string =>
-            typeof v === 'string' && v.length > 0;
+            const currentWs = socket;
+            const isNonEmptyString = (v: unknown): v is string =>
+                typeof v === 'string' && v.length > 0;
 
-        Object.assign(currentWs, {
-            onopen: () => {
-                reconnectRef.current.tries = 0;
-                if (reconnectRef.current.timer) {
-                    window.clearTimeout(reconnectRef.current.timer);
-                    reconnectRef.current.timer = null;
-                }
-        
-                setIsWsOpen(true);
-                loadConversations();
-                authFailedRef.current = false;
-                reconnectBackoffRef.current = 1000;
-        
-                const initialPayload: Record<string, unknown> = {
-                    user_name: userName,
-                };
-                if (conversationId) {
-                    // Hydrate the conversation before connecting.
-                    hydrateConversation(conversationId);
-                    initialPayload.conversation_id = conversationId;
-                }
-                currentWs.send(JSON.stringify(initialPayload));
-        
-                while (pendingSends.current.length > 0) {
-                    const next = pendingSends.current.shift();
-                    if (next) currentWs.send(JSON.stringify(next));
-                }
-            },
-        
-            onmessage: (event: MessageEvent<string>) => {
-                let msg: ServerMessage;
-                try { msg = JSON.parse(event.data); }
-                catch { return; }
-
-                if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
-                    const id = msg.id;
-                    setConversationId(curr => curr || id);
-                    try { localStorage.setItem('conversationId', id); } catch {}
-
-                    setConversations(prev => {
-                        const rest = prev.filter(c => c.id !== id);
-                        return [{ id, title: 'New conversation', updated_at: new Date().toISOString() }, ...rest];
-                    });
-                    if (chatLengthRef.current === 0) { hydrateConversation(id); }
+            Object.assign(currentWs, {
+                onopen: () => {
+                    reconnectRef.current.tries = 0;
+                    if (reconnectRef.current.timer) {
+                        window.clearTimeout(reconnectRef.current.timer);
+                        reconnectRef.current.timer = null;
+                    }
+            
+                    setIsWsOpen(true);
                     loadConversations();
-                    return;
-                }
+                    authFailedRef.current = false;
+                    reconnectBackoffRef.current = 1000;
+            
+                    const initialPayload: Record<string, unknown> = {
+                        user_name: userName,
+                    };
+                    if (conversationId) {
+                        // Hydrate the conversation before connecting.
+                        hydrateConversation(conversationId);
+                        initialPayload.conversation_id = conversationId;
+                    }
+                    currentWs.send(JSON.stringify(initialPayload));
+            
+                    while (pendingSends.current.length > 0) {
+                        const next = pendingSends.current.shift();
+                        if (next) currentWs.send(JSON.stringify(next));
+                    }
+                },
+            
+                onmessage: (event: MessageEvent<string>) => {
+                    let msg: ServerMessage;
+                    try { msg = JSON.parse(event.data); }
+                    catch { return; }
 
-                if (msg.type === 'conversation_meta' && typeof msg.id === 'string') {
-                    const id: string = msg.id;
-                    const title: string = typeof msg.title === 'string' && msg.title.trim() ? msg.title : 'New conversation';
-                    const updated_at: string = typeof msg.updated_at === 'string' && msg.updated_at.trim() ? msg.updated_at : new Date().toISOString();
-                    setConversations(prev => {
-                        const rest = prev.filter(c => c.id !== id);
-                        return [{ id, title, updated_at }, ...rest];
-                    });
-                    setConversationId(curr => {
-                        const chosen = curr || id;
-                        try { localStorage.setItem('conversationId', chosen); } catch {}
+                    if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
+                        const id = msg.id;
+                        setConversationId(curr => curr || id);
+                        try { localStorage.setItem('conversationId', id); } catch {}
 
-                        if (chatLengthRef.current === 0) { hydrateConversation(chosen); }
-                        return chosen;
-                    });
-                    return;
-                }
+                        setConversations(prev => {
+                            const rest = prev.filter(c => c.id !== id);
+                            return [{ id, title: 'New conversation', updated_at: new Date().toISOString() }, ...rest];
+                        });
+                        if (chatLengthRef.current === 0) { hydrateConversation(id); }
+                        loadConversations();
+                        return;
+                    }
 
-                if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
-                    setLoadedSummary(msg.summary);
-                    return;
-                }
-                if (msg.type === 'ping' || msg.type === 'pong') return;
-                const sender = isNonEmptyString(msg.sender) ? msg.sender : null;
+                    if (msg.type === 'conversation_meta' && typeof msg.id === 'string') {
+                        const id: string = msg.id;
+                        const title: string = typeof msg.title === 'string' && msg.title.trim() ? msg.title : 'New conversation';
+                        const updated_at: string = typeof msg.updated_at === 'string' && msg.updated_at.trim() ? msg.updated_at : new Date().toISOString();
+                        setConversations(prev => {
+                            const rest = prev.filter(c => c.id !== id);
+                            return [{ id, title, updated_at }, ...rest];
+                        });
+                        setConversationId(curr => {
+                            const chosen = curr || id;
+                            try { localStorage.setItem('conversationId', chosen); } catch {}
 
-                if (sender && typeof msg.typing === 'boolean' && ALLOWED_AGENTS.includes(sender as AgentName)) {
-                    setTypingWithDelayAndTTL(sender as AgentName, msg.typing === true);
-                    return;
-                }
+                            if (chatLengthRef.current === 0) { hydrateConversation(chosen); }
+                            return chosen;
+                        });
+                        return;
+                    }
 
-                if (sender && typeof msg.text === 'string' && ALLOWED_AGENTS.includes(sender as AgentName)) {
-                    setTypingWithDelayAndTTL(sender as AgentName, false);
-                    addMessageToChat({ sender, text: msg.text });
-                    return;
+                    if (msg.type === 'context_summary' && typeof msg.summary === 'string' && msg.summary.trim()) {
+                        setLoadedSummary(msg.summary);
+                        return;
+                    }
+                    if (msg.type === 'ping' || msg.type === 'pong') return;
+                    const sender = isNonEmptyString(msg.sender) ? msg.sender : null;
+
+                    if (sender && typeof msg.typing === 'boolean' && ALLOWED_AGENTS.includes(sender as AgentName)) {
+                        setTypingWithDelayAndTTL(sender as AgentName, msg.typing === true);
+                        return;
+                    }
+
+                    if (sender && typeof msg.text === 'string' && ALLOWED_AGENTS.includes(sender as AgentName)) {
+                        setTypingWithDelayAndTTL(sender as AgentName, false);
+                        addMessageToChat({ sender, text: msg.text });
+                        return;
+                    }
+                },
+                onclose: (ev: CloseEvent) => {
+                    console.log('WebSocket closed. code=', ev.code, 'reason=', ev.reason, 'wasClean=', ev.wasClean);
+                    Object.values(typingTimersRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+                    typingTimersRef.current = {};
+                    Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+                    Object.values(typingTTLRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+                    typingShowDelayRef.current = {};
+                    typingTTLRef.current = {};
+                    setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+                    setIsWsOpen(false);
+                    ws.current = null;
+                    const base = 1000;
+                    const max = 15000;
+                    const tries = reconnectRef.current.tries;
+                    const nextDelay = Math.min(max, base * Math.pow(2, tries)) + Math.floor(Math.random() * 250);
+                    reconnectRef.current.tries = tries + 1;
+                    if (reconnectRef.current.timer) {
+                        window.clearTimeout(reconnectRef.current.timer);
+                    }
+                    reconnectRef.current.timer = window.setTimeout(() => {
+                        setWsReconnectNonce((n) => n + 1);
+                    }, nextDelay);
+                },
+                onerror: (event: Event) => {
+                    console.error('WebSocket error:', event);
+                    Object.values(typingTimersRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+                    typingTimersRef.current = {};                
+                    setIsWsOpen(false);
+                    Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+                    Object.values(typingTTLRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
+                    typingShowDelayRef.current = {};
+                    typingTTLRef.current = {};
+                    setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
                 }
-            },
-            onclose: (ev: CloseEvent) => {
-                console.log('WebSocket closed. code=', ev.code, 'reason=', ev.reason, 'wasClean=', ev.wasClean);
-                Object.values(typingTimersRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-                typingTimersRef.current = {};
-                Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-                Object.values(typingTTLRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-                typingShowDelayRef.current = {};
-                typingTTLRef.current = {};
-                setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
-                setIsWsOpen(false);
-                ws.current = null;
-                const base = 1000;
-                const max = 15000;
-                const tries = reconnectRef.current.tries;
-                const nextDelay = Math.min(max, base * Math.pow(2, tries)) + Math.floor(Math.random() * 250);
-                reconnectRef.current.tries = tries + 1;
-                if (reconnectRef.current.timer) {
-                    window.clearTimeout(reconnectRef.current.timer);
+            });
+            return () => {
+                if (currentWs && (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING)) {
+                    try { currentWs.close(); } catch {}
                 }
-                reconnectRef.current.timer = window.setTimeout(() => {
-                    setWsReconnectNonce((n) => n + 1);
-                }, nextDelay);
-            },
-            onerror: (event: Event) => {
-                console.error('WebSocket error:', event);
-                Object.values(typingTimersRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-                typingTimersRef.current = {};                
-                setIsWsOpen(false);
-                Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-                Object.values(typingTTLRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-                typingShowDelayRef.current = {};
-                typingTTLRef.current = {};
-                setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
-            }
+            };
         });
-        return () => {
-            if (currentWs && (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING)) {
-                try { currentWs.close(); } catch {}
-            }
-        };
     }, [userToken, userName, addMessageToChat, wsReconnectNonce, conversationId]);
 
     
