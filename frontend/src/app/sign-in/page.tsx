@@ -43,8 +43,18 @@ function SignInInner() {
           );
         }
 
-        const tokenData = await res.json(); // { access_token, user_name? }
-        handleLogin(tokenData);
+        const tokenData = await res.json();
+        const { access_token, user_name, user_id, refresh_token } = tokenData;
+
+        // Manually set the refresh token as a cookie
+        if (refresh_token) {
+          // Set the cookie with a long expiration and the correct domain
+          document.cookie = `refresh_token=${refresh_token}; path=/; max-age=${14 * 24 * 60 * 60}; secure; samesite=Lax; domain=.aicolosseum.app`;
+        }
+
+        // Use your context to update the user state and store the access token
+        handleLogin({ access_token, user_name, user_id });
+        
         router.push('/chat');
       } catch (err) {
         console.error('Sign-in failed:', err);
