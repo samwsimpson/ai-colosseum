@@ -819,10 +819,9 @@ const loadConversations = useCallback(async () => {
 
 
 
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     // WebSocket connection logic
     useEffect(() => {
-        // Don't try to connect without a token.
+        // Only proceed if a userToken is present and valid.
         if (!userToken) {
             if (ws.current) {
                 try { ws.current.close(); } catch {}
@@ -844,11 +843,7 @@ const loadConversations = useCallback(async () => {
 
         u.protocol = (u.protocol === 'https:' || u.protocol === 'wss:') ? 'wss:' : 'ws:';
         u.pathname = '/ws/colosseum-chat';
-        const tokenToSend = localStorage.getItem('access_token') || userToken;
-        if (!tokenToSend) {
-            console.error("Attempted to connect WebSocket without a token.");
-            return;
-        }
+        const tokenToSend = userToken;
         u.search = `?token=${encodeURIComponent(tokenToSend)}`;
 
         const socket = new WebSocket(u.toString());
