@@ -903,12 +903,13 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
             domain="localhost" if is_local else ".aicolosseum.app",
         )
         response.set_cookie(**cookie_kwargs)
-        return Token(
-            access_token=access_token,
-            token_type="bearer",
-            user_name=user_name,
-            user_id=user_id,
-        )
+        return {
+            "access_token": access_token,
+            "token_type": "bearer",
+            "user_name": user_name,
+            "user_id": user_id,
+            "refresh_token": refresh_token, # <- NEW: return refresh token in body
+        }
 
     except Exception as e:
         print(f"Google auth failed: {e}")
