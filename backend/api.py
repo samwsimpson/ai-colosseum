@@ -883,8 +883,7 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
         refresh_token = create_refresh_token(data={"sub": user_id})
         # AFTER — environment-aware cookie
         # If you have the redirect URI here, this is an easy local/prod test:
-        # --- BEFORE: environment-aware cookie ---
-       
+        # --- BEFORE: environment-aware cookie ---       
         # Define a base cookie with production values by default.
         is_local = auth_code.redirect_uri.startswith("http://localhost") if "auth_code" in locals() else False
 
