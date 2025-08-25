@@ -51,7 +51,6 @@ print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 3.1 - FIRESTORE) <<")
 
 SECRET_KEY = os.getenv("SECRET_KEY")
 print(f"DEBUG: SECRET_KEY read from env is: {'[SET]' if SECRET_KEY else '[NOT SET]'}")
-print(f"DEBUG: SECRET_KEY read from env is: {SECRET_KEY}")
 if not SECRET_KEY:
     raise RuntimeError("SECRET_KEY env var is required")
 
@@ -1214,7 +1213,7 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
         except Exception:
             pass
 
-        # IMPORTANT: Force IAM-based signing on Cloud Run (no private key available)
+        # IMPORTANT: IAM-based signing on Cloud Run (no private key available)
         service_account_email = os.getenv("GCP_SERVICE_ACCOUNT_EMAIL")
         if not service_account_email:
             raise HTTPException(
@@ -1222,18 +1221,20 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
                 detail="Missing GCP_SERVICE_ACCOUNT_EMAIL env var for IAM-based URL signing"
             )
 
-        # Use ADC to get the runtime credentials, then build an IAM Signer
+        # Get an OAuth access token from ADC and ensure it’s fresh
         adc_credentials, _ = google_auth_default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-        iam_signer = iam.Signer(AuthRequest(), adc_credentials, service_account_email)
+        if not adc_credentials.valid:
+            adc_credentials.refresh(AuthRequest())
 
-        # Now generate a V4 signed URL using the IAM signer (works on Cloud Run)
+        # Generate a V4 signed URL using service account email + access_token (supported in storage==2.19.0)
         signed_url = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(minutes=15),
             method="GET",
-            service_account_email=service_account_email,  # for audience
-            signer=iam_signer,                             # force IAM-based signing path
+            service_account_email=service_account_email,
+            access_token=adc_credentials.token,   # <-- key fix: triggers IAM-based signing on Cloud Run
         )
+
 
 
         # Small preview for text-like files
