@@ -17,10 +17,10 @@ interface UserContextType {
 const UserContext = createContext<UserContextType | undefined>(undefined);
 
 export const UserProvider = ({ children }: { children: React.ReactNode }) => {
-  const [userName, setUserName] = useState<string | null>(null);
-  const [userToken, setUserToken] = useState<string | null>(null);
-  const router = useRouter();
-
+    const [userName, setUserName] = useState<string | null>(null);
+    const [userToken, setUserToken] = useState<string | null>(null);
+    const router = useRouter();
+    const [userId, setUserId] = useState<string | null>(null);
     useEffect(() => {
         const storedToken = localStorage.getItem('userToken');
         if (storedToken && !userToken) {
@@ -87,7 +87,7 @@ const handleLogout = () => {
     setUserId(null); // ➕ NEW: Clear userId from state
     router.push('/');
   };
-  const [userId, setUserId] = useState<string | null>(null);
+  
   const value = {
     userName,
     userToken,
