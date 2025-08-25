@@ -10,8 +10,7 @@ interface UserContextType {
   setUserName: (name: string | null) => void;
   setUserToken: (token: string | null) => void;
   handleLogout: () => void;
-  // ➕ added:
-  handleLogin: (payload: string | { access_token?: string; token?: string; user_name?: string }) => void;
+  handleLogin: (payload: { access_token: string; user_name: string; user_id: string }) => void;
 }
 
 const UserContext = createContext<UserContextType | undefined>(undefined);
@@ -52,28 +51,17 @@ export const UserProvider = ({ children }: { children: React.ReactNode }) => {
   }, [router]);
 
   // ➕ added implementation
-  const handleLogin: UserContextType['handleLogin'] = (payload) => {
-    const token =
-      typeof payload === 'string'
-        ? payload
-        : payload.access_token ?? payload.token ?? '';
-
-    if (!token) {
-      console.error('handleLogin called without a token');
-      return;
-    }
-
-    const name = typeof payload === 'string' ? null : payload.user_name ?? null;
-
+const handleLogin = (payload: { access_token: string; user_name: string; user_id: string }) => {
     try {
-      localStorage.setItem('userToken', token);
-      if (name) localStorage.setItem('userName', name);
+      localStorage.setItem('userToken', payload.access_token);
+      localStorage.setItem('userName', payload.user_name);
+      localStorage.setItem('userId', payload.user_id);
     } catch {
       /* ignore storage errors */
     }
 
-    setUserToken(token);
-    if (name) setUserName(name);
+    setUserToken(payload.access_token);
+    setUserName(payload.user_name);
   };
 
   const handleLogout = () => {
