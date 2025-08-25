@@ -24,52 +24,44 @@ function SignInInner() {
 
     const handleGoogleSuccess = useCallback(
         async (tokenResponse: { code: string; redirect_uri: string }) => {
-        if (processedRef.current) return;
-        processedRef.current = true;
+            if (processedRef.current) return;
+            processedRef.current = true;
 
-        setIsLoading(true);
-        try {
+            setIsLoading(true);
+            try {
             const res = await fetch(`${backendUrl}/api/google-auth`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
                 code: tokenResponse.code,
                 redirect_uri: tokenResponse.redirect_uri,
-            }),
+                }),
+                credentials: 'include', // make sure the Set-Cookie stores
             });
 
             if (!res.ok) {
-            const errorData = await res.json().catch(() => ({}));
-            throw new Error(
+                const errorData = await res.json().catch(() => ({}));
+                throw new Error(
                 `Google authentication failed on backend. Details: ${JSON.stringify(errorData)}`
-            );
+                );
             }
 
             const tokenData = await res.json();
             const { access_token, user_name, user_id } = tokenData;
-            // Ensure downstream fetches have the header immediately:
+
+            // ensure downstream fetches immediately carry Authorization
             try { localStorage.setItem('access_token', access_token); } catch {}
             handleLogin({ access_token, user_name, user_id });
-            router.push('/chat');
-
-            // Manually set the refresh token as a cookie
-            if (refresh_token) {
-      
-           
-
-
-            // Use your context to update the user state and store the access token
-            handleLogin({ access_token, user_name, user_id });
-            
             router.push('/chat');
         } catch (err) {
             console.error('Sign-in failed:', err);
             setIsLoading(false);
             processedRef.current = false;
-        }
+            }
         },
         [backendUrl, handleLogin, router]
     );
+
 
     useEffect(() => {
         if (userToken) return;
