@@ -21,6 +21,28 @@ export const UserProvider = ({ children }: { children: React.ReactNode }) => {
     const [userToken, setUserToken] = useState<string | null>(null);
     const router = useRouter();
     const [userId, setUserId] = useState<string | null>(null);
+    const handleLogin = (payload: { access_token: string; user_name: string; user_id: string }) => {
+    try {
+      localStorage.setItem('userToken', payload.access_token);
+      localStorage.setItem('userName', payload.user_name);
+      localStorage.setItem('userId', payload.user_id);
+    } catch {
+      /* ignore storage errors */
+    }
+
+    setUserToken(payload.access_token);
+    setUserName(payload.user_name);
+    setUserId(payload.user_id);
+  };
+    const handleLogout = () => {
+        localStorage.removeItem('userToken');
+        localStorage.removeItem('userName');
+        localStorage.removeItem('userId'); // ➕ NEW: Clear userId from local storage
+        setUserName(null);
+        setUserToken(null);
+        setUserId(null); // ➕ NEW: Clear userId from state
+        router.push('/');
+    };
     useEffect(() => {
         const storedToken = localStorage.getItem('userToken');
         if (storedToken && !userToken) {
@@ -64,29 +86,7 @@ export const UserProvider = ({ children }: { children: React.ReactNode }) => {
     }, [userToken, userName, userId, handleLogout]);
 
   // ➕ added implementation
-  const handleLogin = (payload: { access_token: string; user_name: string; user_id: string }) => {
-    try {
-      localStorage.setItem('userToken', payload.access_token);
-      localStorage.setItem('userName', payload.user_name);
-      localStorage.setItem('userId', payload.user_id);
-    } catch {
-      /* ignore storage errors */
-    }
 
-    setUserToken(payload.access_token);
-    setUserName(payload.user_name);
-    setUserId(payload.user_id);
-  };
-
-const handleLogout = () => {
-    localStorage.removeItem('userToken');
-    localStorage.removeItem('userName');
-    localStorage.removeItem('userId'); // ➕ NEW: Clear userId from local storage
-    setUserName(null);
-    setUserToken(null);
-    setUserId(null); // ➕ NEW: Clear userId from state
-    router.push('/');
-  };
   
   const value = {
     userName,
