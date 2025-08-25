@@ -1175,33 +1175,32 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
             raise HTTPException(status_code=500, detail="GCS_BUCKET_NAME not configured")
 
         # Sanitize filename
-        filename = secure_filename(file.filename or "")
+        filename = secure_filename((file.filename or "").strip())
         if not filename:
             raise HTTPException(status_code=400, detail="Invalid filename")
 
         # Unique object path
         file_path = f"uploads/{current_user['id']}/{datetime.now(timezone.utc).isoformat()}-{filename}"
 
-        # Content-Type
+        # Content-Type with solid fallback
         content_type = file.content_type or (mimetypes.guess_type(filename)[0] or "application/octet-stream")
 
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(file_path)
 
-        # Rewind the temp file before uploading
+        # Rewind stream just in case
         try:
-            # starlette UploadFile supports async seek
-            await file.seek(0)  # no-op if not supported
+            await file.seek(0)
         except Exception:
             try:
                 file.file.seek(0)
             except Exception:
                 pass
 
-        # IMPORTANT: google-cloud-storage is synchronous — do NOT await this
+        # google-cloud-storage upload is SYNC — do NOT await
         blob.upload_from_file(file.file, content_type=content_type)
 
-        # Best-effort size computation (optional)
+        # Optional: compute size for response
         size = None
         try:
             pos = file.file.tell()
@@ -1211,7 +1210,7 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
         except Exception:
             pass
 
-        # Generate a time-limited signed URL (requires Token Creator role on the service account)
+        # Signed URL (requires Service Account Token Creator on the service account)
         signed_url = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(minutes=15),
@@ -1239,6 +1238,7 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
     except Exception as e:
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"File upload failed: {e}")
+
 
 
 @app.websocket("/ws/colosseum-chat")
