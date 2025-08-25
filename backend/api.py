@@ -1188,7 +1188,7 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(file_path)
 
-        # Rewind stream just in case
+        # Rewind stream and upload (google-cloud-storage is synchronous)
         try:
             await file.seek(0)
         except Exception:
@@ -1196,11 +1196,9 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
                 file.file.seek(0)
             except Exception:
                 pass
-
-        # google-cloud-storage upload is SYNC — do NOT await
         blob.upload_from_file(file.file, content_type=content_type)
 
-        # Optional: compute size for response
+        # (optional) compute file size for response
         size = None
         try:
             pos = file.file.tell()
@@ -1210,11 +1208,11 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
         except Exception:
             pass
 
-        # Signed URL (requires Service Account Token Creator on the service account)
+        # Generate a signed URL for temporary access (e.g., 15 minutes)
         signed_url = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(minutes=15),
-            method="GET",
+            method="GET"
         )
 
         # Small preview for text-like files
