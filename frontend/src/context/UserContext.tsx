@@ -91,11 +91,12 @@ export const UserProvider = ({ children }: { children: React.ReactNode }) => {
   const value = {
     userName,
     userToken,
+    userId, 
     setUserName,
     setUserToken,
     setUserId,
     handleLogout,
-    handleLogin, // ➕ expose it
+    handleLogin, 
   };
 
   return <UserContext.Provider value={value}>{children}</UserContext.Provider>;
