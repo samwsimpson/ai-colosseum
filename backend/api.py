@@ -1208,12 +1208,22 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
         except Exception:
             pass
 
-        # Generate a signed URL for temporary access (e.g., 15 minutes)
+        # IMPORTANT: When running on Cloud Run without a private key, you must
+        # tell the library which service account to sign as. Ensure that service
+        # account has the "Service Account Token Creator" role on itself.
+        # Generate a signed URL for temporary access (e.g. 15 minutes)
+        service_account_email = os.getenv("GCP_SERVICE_ACCOUNT_EMAIL")
+        if not service_account_email:
+            # Make it very obvious in logs if the env var wasn't set in Cloud Run.
+            raise HTTPException(status_code=500, detail="Missing GCP_SERVICE_ACCOUNT_EMAIL env var for IAM-based URL signing")
+
         signed_url = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(minutes=15),
-            method="GET"
+            method="GET",
+            service_account_email=service_account_email,  # <-- key fix
         )
+
 
         # Small preview for text-like files
         content_for_llm = "[Binary file content not shown]"
