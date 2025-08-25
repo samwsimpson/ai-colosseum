@@ -1175,58 +1175,71 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
             raise HTTPException(status_code=500, detail="GCS_BUCKET_NAME not configured")
 
         # Sanitize filename
-        filename = secure_filename(file.filename)
+        filename = secure_filename(file.filename or "")
         if not filename:
             raise HTTPException(status_code=400, detail="Invalid filename")
 
-        # Create a unique path for the blob
-        file_path = f"uploads/{current_user['id']}/{datetime.now().isoformat()}-{filename}"
-        
-        # Determine content type if not provided
-        content_type = file.content_type
-        if not content_type:
-            content_type, _ = mimetypes.guess_type(filename) or ('application/octet-stream', None)
+        # Unique object path
+        file_path = f"uploads/{current_user['id']}/{datetime.now(timezone.utc).isoformat()}-{filename}"
+
+        # Content-Type
+        content_type = file.content_type or (mimetypes.guess_type(filename)[0] or "application/octet-stream")
 
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(file_path)
 
-        # Upload the file from the async stream
-        await blob.upload_from_file(file.file, content_type=content_type)
-        
-        # Generate a signed URL for temporary access (e.g., 15 minutes)
+        # Rewind the temp file before uploading
+        try:
+            # starlette UploadFile supports async seek
+            await file.seek(0)  # no-op if not supported
+        except Exception:
+            try:
+                file.file.seek(0)
+            except Exception:
+                pass
+
+        # IMPORTANT: google-cloud-storage is synchronous — do NOT await this
+        blob.upload_from_file(file.file, content_type=content_type)
+
+        # Best-effort size computation (optional)
+        size = None
+        try:
+            pos = file.file.tell()
+            file.file.seek(0, os.SEEK_END)
+            size = file.file.tell()
+            file.file.seek(pos, os.SEEK_SET)
+        except Exception:
+            pass
+
+        # Generate a time-limited signed URL (requires Token Creator role on the service account)
         signed_url = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(minutes=15),
-            method="GET"
+            method="GET",
         )
-        
-        # Read a small amount of content for LLMs to use
-        content_for_llm = ""
+
+        # Small preview for text-like files
+        content_for_llm = "[Binary file content not shown]"
         try:
-            # Check for common text-based file types to avoid reading large binary files
-            if content_type.startswith(('text/', 'application/json', 'application/xml', 'application/javascript')):
+            if content_type.startswith(("text/", "application/json", "application/xml", "application/javascript")):
                 content_for_llm = await _download_file(signed_url)
-                # Truncate to a reasonable size to avoid context window issues
                 if len(content_for_llm) > 10000:
                     content_for_llm = content_for_llm[:9500] + "\n...[TRUNCATED]"
-            else:
-                content_for_llm = "[Binary file content not shown]"
-
         except Exception as e:
-            print(f"Failed to download/read file content for LLM: {e}")
-            content_for_llm = "[Could not read file content]"
+            print(f"Failed to read uploaded content: {e}")
 
         return {
             "filename": filename,
             "url": signed_url,
-            "content": content_for_llm,  # provide the content directly to the client
+            "content": content_for_llm,
             "content_type": content_type,
-            "size": file.size,
+            "size": size,
         }
 
     except Exception as e:
-        print(f"File upload failed: {e}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=f"File upload failed: {e}")
+
 
 @app.websocket("/ws/colosseum-chat")
 async def websocket_endpoint(websocket: WebSocket, token: str):
