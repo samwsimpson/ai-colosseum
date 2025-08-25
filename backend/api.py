@@ -5,6 +5,8 @@ from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocke
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from fastapi import Request, Response
+from fastapi import Header
+from fastapi import UploadFile, File
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
@@ -15,10 +17,15 @@ from typing import List, Dict, Any, Union, Optional
 import jwt as pyjwt
 from datetime import datetime, timedelta, timezone
 from google.auth.transport import requests as google_requests
+from google.auth.transport.requests import Request as AuthRequest
+from google.auth import iam
+from google.auth import default as google_auth_default
+from google_auth_oauthlib.flow import Flow
 from google.oauth2.id_token import verify_oauth2_token
 from google.cloud.firestore_v1 import SERVER_TIMESTAMP, ArrayUnion, Increment
 from google.cloud import firestore  # for Query.DESCENDING
 from google.cloud import storage
+
 from werkzeug.utils import secure_filename
 import mimetypes
 import aiohttp
@@ -29,12 +36,11 @@ db = firestore.AsyncClient()
 print("FIRESTORE_CLIENT_INITIALIZED: created firestore.AsyncClient()", file=sys.stderr)
 
 import stripe
-from google_auth_oauthlib.flow import Flow
+
 from openai import AsyncOpenAI
 from collections import defaultdict
-from fastapi import Header
-from fastapi import UploadFile, File
-from google.cloud import storage
+
+
 load_dotenv()
 OPENAI_SUMMARY_MODEL = os.getenv("OPENAI_SUMMARY_MODEL", "gpt-4o-mini")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
@@ -1208,20 +1214,25 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
         except Exception:
             pass
 
-        # IMPORTANT: When running on Cloud Run without a private key, you must
-        # tell the library which service account to sign as. Ensure that service
-        # account has the "Service Account Token Creator" role on itself.
-        # Generate a signed URL for temporary access (e.g. 15 minutes)
+        # IMPORTANT: Force IAM-based signing on Cloud Run (no private key available)
         service_account_email = os.getenv("GCP_SERVICE_ACCOUNT_EMAIL")
         if not service_account_email:
-            # Make it very obvious in logs if the env var wasn't set in Cloud Run.
-            raise HTTPException(status_code=500, detail="Missing GCP_SERVICE_ACCOUNT_EMAIL env var for IAM-based URL signing")
+            raise HTTPException(
+                status_code=500,
+                detail="Missing GCP_SERVICE_ACCOUNT_EMAIL env var for IAM-based URL signing"
+            )
 
+        # Use ADC to get the runtime credentials, then build an IAM Signer
+        adc_credentials, _ = google_auth_default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        iam_signer = iam.Signer(AuthRequest(), adc_credentials, service_account_email)
+
+        # Now generate a V4 signed URL using the IAM signer (works on Cloud Run)
         signed_url = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(minutes=15),
             method="GET",
-            service_account_email=service_account_email,  # <-- key fix
+            service_account_email=service_account_email,  # for audience
+            signer=iam_signer,                             # force IAM-based signing path
         )
 
 
