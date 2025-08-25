@@ -242,72 +242,39 @@ const reconnectBackoffRef = useRef(1000); // start at 1s, exponential up to 15s
 const refreshInFlight = useRef<Promise<void> | null>(null);
 const lastRefreshAt = useRef<number>(0);
 const fileInputRef = useRef<HTMLInputElement>(null);
-
-// === Helper functions for file uploads and API calls ===
-interface UploadedAttachment {
-    id: string;
-    name: string;
-    mime: string;
-    size: number;
-    signed_url?: string | null;
-}
-function resolveApiBase(): string {
-    const fromEnv = process.env.NEXT_PUBLIC_API_URL?.replace(/\/+$/, '');
-    if (fromEnv) return fromEnv;
-    const wsBase = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
-    try {
-        const u = new URL(wsBase);
-        if (u.protocol === 'ws:') u.protocol = 'http:';
-        else if (u.protocol === 'wss:') u.protocol = 'https:';
-        u.pathname = '';
-        u.search = '';
-        u.hash = '';
-        return u.toString().replace(/\/+$/, '');
-    } catch {
-        return 'http://localhost:8000';
-    }
-}
-const API_BASE = resolveApiBase();
-
-function buildAuthHeaders(userToken?: string | null): Headers {
-    const h = new Headers({ 'Content-Type': 'application/json' });
-    const local = (typeof window !== 'undefined') ? localStorage.getItem('access_token') : null;
-    const tok = (local ?? userToken) ?? '';
-    if (tok) h.set('Authorization', `Bearer ${tok}`);
-    return h;
-}
-
-async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
-    const url =
-        typeof pathOrUrl === 'string'
-        ? (pathOrUrl.startsWith('http') ? pathOrUrl : `${API_BASE}${pathOrUrl.startsWith('/') ? '' : '/'}${pathOrUrl}`)
-        : pathOrUrl.toString();
-    const headers = new Headers(init.headers || {});
-    const access = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
-    if (access) headers.set('Authorization', `Bearer ${access}`);
-    let res = await fetch(url, { ...init, headers, credentials: 'include' });
-    if (res.status !== 401) return res;
-    const rr = await fetch(`${API_BASE}/api/refresh`, { method: 'POST', credentials: 'include' });
-    if (!rr.ok) return res;
-    const { token } = await rr.json();
-    if (token) {
-        if (typeof window !== 'undefined') localStorage.setItem('access_token', token);
-        headers.set('Authorization', `Bearer ${token}`);
-        res = await fetch(url, { ...init, headers, credentials: 'include' });
-    }
-    return res;
-}
-
 const uploadOne = async (file: File): Promise<UploadedAttachment> => {
-    const formData = new FormData();
-    formData.append('file', file);
-    const res = await apiFetch(`/api/upload-file`, {
-        method: 'POST',
-        body: formData,
-    });
-    if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
-    return res.json();
+  const form = new FormData();
+  form.append("file", file);
+
+  const res = await apiFetch("/api/upload-file", {
+    method: "POST",
+    body: form,
+  });
+  if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
+
+  const raw = await res.json() as {
+    id?: string;
+    name?: string;
+    mime?: string;
+    size?: number | null;
+    signed_url?: string;
+    // legacy keys we still return from the backend
+    filename?: string;
+    url?: string;
+    content?: string;
+    content_type?: string;
+  };
+
+  return {
+    id: raw.id ?? raw.url ?? crypto.randomUUID(),
+    name: raw.name ?? raw.filename ?? file.name,
+    mime: raw.mime ?? raw.content_type ?? file.type || "application/octet-stream",
+    size: raw.size ?? file.size,
+    signed_url: raw.signed_url ?? raw.url!,
+    content: raw.content, // may be undefined for binaries; that’s fine
+  };
 };
+
 const handleFilePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files || !files.length) return;
@@ -672,6 +639,7 @@ const loadConversations = useCallback(async () => {
         const clientId = uid();
         lastUserClientIdRef.current = clientId;
 
+        // Build the base message payload
         const payload: Record<string, unknown> = {
             client_id: clientId,
             text,
@@ -680,6 +648,27 @@ const loadConversations = useCallback(async () => {
             conversation_id: conversationId || undefined,
             attachments: pendingFiles.map(f => f.id),
         };
+
+        // If there are uploaded files, include metadata the backend/agents can read
+        if (pendingFiles.length > 0) {
+        // Build a normalized list for all files
+        const file_metadata_list = pendingFiles.map((f: any) => ({
+            filename: f.name,
+            content_type: f.mime || "application/octet-stream",
+            size: typeof f.size === "number" ? f.size : undefined,
+            url: f.signed_url,               // set by /api/upload-file response
+            content: f.content ?? undefined, // optional text preview when available
+        }));
+
+        // Preferred new field (backend already supports this)
+        (payload as any).file_metadata_list = file_metadata_list;
+
+        // Back-compat: keep the single-file field as the first item (harmless if unused)
+        (payload as any).file_metadata = file_metadata_list[0];
+        }
+
+
+
 
         lastUserTextRef.current = text;
 
@@ -1031,7 +1020,12 @@ useEffect(() => {
         setTimeout(() => setWsReconnectNonce(n => n + 1), 50);
     };
 
-
+    function formatBytes(n?: number | null) {
+        if (!n || n <= 0) return '';
+        const units = ['B','KB','MB','GB','TB'];
+        const i = Math.floor(Math.log(n) / Math.log(1024));
+        return `${(n / Math.pow(1024, i)).toFixed(i ? 1 : 0)} ${units[i]}`;
+    }
 
 
 
@@ -1311,9 +1305,28 @@ useEffect(() => {
         {pendingFiles.length > 0 && (
             <div className="flex flex-wrap gap-2">
                 {pendingFiles.map(f => (
-                    <span key={f.id} className="inline-flex items-center gap-2 px-2 py-1 text-xs rounded-full bg-gray-800 border border-gray-700">
-                        <span className="truncate max-w-[180px]" title={f.name}>{f.name}</span>
-                        <button type="button" onClick={() => removePending(f.id)} className="text-gray-300 hover:text-white">×</button>
+                    <span
+                        key={f.id}
+                        className="inline-flex items-center gap-2 px-2 py-1 text-xs rounded-full bg-gray-800 border border-gray-700"
+                    >
+                        <a
+                            href={f.signed_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="truncate max-w-[180px] hover:underline"
+                            title={f.name}
+                        >
+                            {f.name}{f.size ? ` (${formatBytes(f.size)})` : ''}
+                        </a>
+                        <button
+                            type="button"
+                            onClick={(e) => { e.preventDefault(); e.stopPropagation(); removePending(f.id); }}
+                            className="text-gray-300 hover:text-white"
+                            aria-label={`Remove ${f.name}`}
+                            title="Remove"
+                        >
+                            ×
+                        </button>
                     </span>
                 ))}
             </div>

@@ -290,7 +290,15 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
     doc = await conv_ref.get()
     return conv_ref, (doc.to_dict() or {})
 
-async def save_message(conv_ref, *, role: str, sender: str, content: str, file_metadata: Optional[dict] = None):
+async def save_message(
+    conv_ref,
+    *,
+    role: str,
+    sender: str,
+    content: str,
+    file_metadata: Optional[dict] = None,
+    file_metadata_list: Optional[List[dict]] = None,
+):
     # now = firestore.SERVER_TIMESTAMP
     data = {
         "role": role,
@@ -298,8 +306,14 @@ async def save_message(conv_ref, *, role: str, sender: str, content: str, file_m
         "content": content,
         "created_at": FS_TS,
     }
+
+    # Back-compat: keep the old single-file field if present
     if file_metadata:
         data["file_metadata"] = file_metadata
+
+    # Preferred: a normalized list of attachments
+    if file_metadata_list:
+        data["attachments"] = file_metadata_list
 
     # save the message
     await conv_ref.collection("messages").add(data)
@@ -309,6 +323,7 @@ async def save_message(conv_ref, *, role: str, sender: str, content: str, file_m
         "updated_at": FS_TS,
         "message_count": Increment(1),
     }, merge=True)
+
 
 
 # --- End Conversation persistence helpers ---
@@ -487,7 +502,11 @@ async def list_messages(conv_id: str, limit: int = 50, user=Depends(get_current_
             "sender": d.get("sender"),
             "content": d.get("content"),
             "timestamp": _ts_iso(d.get("created_at")),  # ← was d.get("timestamp")
+            # preferred list, plus legacy single object for back-compat if present
+            "attachments": d.get("attachments") or ([d["file_metadata"]] if d.get("file_metadata") else []),
+            "file_metadata": d.get("file_metadata"),  # keep for legacy readers
         })
+
     msgs.reverse()
     return {"items": msgs}
 
@@ -1248,11 +1267,16 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
             print(f"Failed to read uploaded content: {e}")
 
         return {
+            # new fields that the frontend expects
+            "id": file_path,                 # stable identifier we can send back later
+            "name": filename,                # display name for the chip
+            "mime": content_type,            # aligns with frontend "mime"
+            "size": size,                    # may be None
+            "signed_url": signed_url,        # aligns with frontend "signed_url"
             "filename": filename,
             "url": signed_url,
             "content": content_for_llm,
-            "content_type": content_type,
-            "size": size,
+            "content_type": content_type,    
         }
 
     except Exception as e:
@@ -1778,24 +1802,44 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             await ws.send_json({"type": "pong"})
                         continue
                         
-                    user_message = data.get("message", "")
-                    file_metadata = data.get("file_metadata")
+                    user_message = data.get("message", "") or data.get("text", "") or ""
 
-                    # Augment the user message for the AI agents to include file content
+                    # Build what the AIs should see: original text + per-file headers + previews
                     full_user_content = user_message
-                    if file_metadata:
-                        content = file_metadata.get('content', '[no content available]')
-                        filename = file_metadata.get('filename', 'a file')
-                        full_user_content = f"{user_message}\n\n[USER UPLOADED FILE]\nFilename: {filename}\nContent:\n{content}\n[END OF FILE]"
+                    if files:
+                        blocks = []
+                        for f in files:
+                            fn = (f.get("filename") or "uploaded-file").strip()
+                            ct = (f.get("content_type") or "application/octet-stream").strip()
+                            sz = f.get("size")
+                            header = f"[Attachment: {fn} | {ct}" + (f" | {sz} bytes]" if isinstance(sz, (int, float)) else "]")
+                            preview = f.get("content")
+                            if isinstance(preview, str) and preview:
+                                # trim to keep tokens in check
+                                max_per_file = 9500
+                                safe = preview[:max_per_file] + ("\n...[TRUNCATED]" if len(preview) > max_per_file else "")
+                                blocks.append(header + "\n--- file preview start ---\n" + safe + "\n--- file preview end ---")
+                            else:
+                                url = f.get("url")
+                                blocks.append(header + (f"\n(Downloadable URL: {url})" if url else ""))
 
-                    await ws.send_json({"sender": proxy.name, "text": user_message})
-                    
-                    # Save the original user message and file metadata to Firestore
-                    await save_message(conv_ref, role="user", sender=proxy.name, content=user_message, file_metadata=file_metadata)
+                        full_user_content = (user_message + "\n\n" + "\n\n".join(blocks)).strip()
 
+                    # Echo the user's visible message once
                     await ws.send_json({"sender": proxy.name, "text": user_message})
-                    await save_message(conv_ref, role="user", sender=proxy.name, content=user_message)
+
+                    # Persist once, storing *all* attachments in a normalized list (and single legacy field if present)
+                    await save_message(
+                        conv_ref,
+                        role="user",
+                        sender=proxy.name,
+                        content=user_message,
+                        file_metadata=(data.get("file_metadata") or None),
+                        file_metadata_list=(files or None),
+                    )
+
                     await maybe_set_title(conv_ref, user_message)
+
                     # NEW: push updated title/updated_at to the client
                     try:
                         snap = await conv_ref.get()
