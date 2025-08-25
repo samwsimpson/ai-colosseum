@@ -49,7 +49,8 @@ function SignInInner() {
         // Manually set the refresh token as a cookie
         if (refresh_token) {
           // Set the cookie with a long expiration and the correct domain
-          document.cookie = `refresh_token=${refresh_token}; path=/; max-age=${14 * 24 * 60 * 60}; secure; samesite=Lax; domain=.aicolosseum.app`;
+          //document.cookie = `refresh_token=${refresh_token}; path=/; max-age=${14 * 24 * 60 * 60}; secure; samesite=Lax; domain=.aicolosseum.app`;
+          document.cookie = `refresh_token=${refresh_token}; path=/; max-age=${14 * 24 * 60 * 60}; secure; samesite=Lax;`;
         }
 
         // Use your context to update the user state and store the access token
