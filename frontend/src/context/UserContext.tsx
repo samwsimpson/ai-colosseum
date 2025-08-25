@@ -23,12 +23,11 @@ export const UserProvider = ({ children }: { children: React.ReactNode }) => {
     const [userId, setUserId] = useState<string | null>(null);
     const handleLogin = (payload: { access_token: string; user_name: string; user_id: string }) => {
     try {
-      localStorage.setItem('userToken', payload.access_token);
-      localStorage.setItem('userName', payload.user_name);
-      localStorage.setItem('userId', payload.user_id);
-    } catch {
-      /* ignore storage errors */
-    }
+        localStorage.setItem('userToken', payload.access_token);
+        localStorage.setItem('userName', payload.user_name);
+        localStorage.setItem('userId', payload.user_id);
+        localStorage.setItem('access_token', payload.access_token); 
+    } catch {}
 
     setUserToken(payload.access_token);
     setUserName(payload.user_name);
@@ -37,10 +36,11 @@ export const UserProvider = ({ children }: { children: React.ReactNode }) => {
     const handleLogout = () => {
         localStorage.removeItem('userToken');
         localStorage.removeItem('userName');
-        localStorage.removeItem('userId'); // ➕ NEW: Clear userId from local storage
+        localStorage.removeItem('userId'); 
+        localStorage.removeItem('access_token'); 
         setUserName(null);
         setUserToken(null);
-        setUserId(null); // ➕ NEW: Clear userId from state
+        setUserId(null); 
         router.push('/');
     };
     useEffect(() => {

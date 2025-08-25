@@ -9,83 +9,88 @@ import { useUser } from '@/context/UserContext';
 export const dynamic = 'force-dynamic';
 
 function SignInInner() {
-  const { userToken, handleLogin } = useUser();
-  const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
+    const { userToken, handleLogin } = useUser();
+    const router = useRouter();
+    const pathname = usePathname();
+    const searchParams = useSearchParams();
 
-  const [isLoading, setIsLoading] = useState(false);
-  const processedRef = useRef(false);
+    const [isLoading, setIsLoading] = useState(false);
+    const processedRef = useRef(false);
 
-  const backendUrl =
-    process.env.NEXT_PUBLIC_WS_URL?.replace(/\/+$/, '') || 'http://localhost:8000';
+    const wsBase = process.env.NEXT_PUBLIC_WS_URL?.replace(/\/+$/, '') || 'http://localhost:8000';
+    const backendUrl = wsBase.startsWith('ws')
+        ? wsBase.replace(/^wss?/i, (m) => (m.toLowerCase() === 'wss' ? 'https' : 'http'))
+        : wsBase;
 
-  const handleGoogleSuccess = useCallback(
-    async (tokenResponse: { code: string; redirect_uri: string }) => {
-      if (processedRef.current) return;
-      processedRef.current = true;
+    const handleGoogleSuccess = useCallback(
+        async (tokenResponse: { code: string; redirect_uri: string }) => {
+        if (processedRef.current) return;
+        processedRef.current = true;
 
-      setIsLoading(true);
-      try {
-        const res = await fetch(`${backendUrl}/api/google-auth`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            code: tokenResponse.code,
-            redirect_uri: tokenResponse.redirect_uri,
-          }),
-        });
+        setIsLoading(true);
+        try {
+            const res = await fetch(`${backendUrl}/api/google-auth`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                code: tokenResponse.code,
+                redirect_uri: tokenResponse.redirect_uri,
+            }),
+            });
 
-        if (!res.ok) {
-          const errorData = await res.json().catch(() => ({}));
-          throw new Error(
-            `Google authentication failed on backend. Details: ${JSON.stringify(errorData)}`
-          );
+            if (!res.ok) {
+            const errorData = await res.json().catch(() => ({}));
+            throw new Error(
+                `Google authentication failed on backend. Details: ${JSON.stringify(errorData)}`
+            );
+            }
+
+            const tokenData = await res.json();
+            const { access_token, user_name, user_id } = tokenData;
+            // Ensure downstream fetches have the header immediately:
+            try { localStorage.setItem('access_token', access_token); } catch {}
+            handleLogin({ access_token, user_name, user_id });
+            router.push('/chat');
+
+            // Manually set the refresh token as a cookie
+            if (refresh_token) {
+      
+           
+
+
+            // Use your context to update the user state and store the access token
+            handleLogin({ access_token, user_name, user_id });
+            
+            router.push('/chat');
+        } catch (err) {
+            console.error('Sign-in failed:', err);
+            setIsLoading(false);
+            processedRef.current = false;
         }
+        },
+        [backendUrl, handleLogin, router]
+    );
 
-        const tokenData = await res.json();
-        const { access_token, user_name, user_id, refresh_token } = tokenData;
+    useEffect(() => {
+        if (userToken) return;
+        const code = searchParams.get('code');
+        if (!code) return;
 
-        // Manually set the refresh token as a cookie
-        if (refresh_token) {
-          // Set the cookie with a long expiration and the correct domain
-          //document.cookie = `refresh_token=${refresh_token}; path=/; max-age=${14 * 24 * 60 * 60}; secure; samesite=Lax; domain=.aicolosseum.app`;
-          document.cookie = `refresh_token=${refresh_token}; path=/; max-age=${14 * 24 * 60 * 60}; secure; samesite=Lax;`;
-        }
+        const redirect_uri = `${window.location.origin}${pathname}`;
+        handleGoogleSuccess({ code, redirect_uri });
+    }, [searchParams, pathname, userToken, handleGoogleSuccess]);
 
-        // Use your context to update the user state and store the access token
-        handleLogin({ access_token, user_name, user_id });
-        
-        router.push('/chat');
-      } catch (err) {
-        console.error('Sign-in failed:', err);
-        setIsLoading(false);
-        processedRef.current = false;
-      }
-    },
-    [backendUrl, handleLogin, router]
-  );
+    useEffect(() => {
+        if (userToken) router.replace('/chat');
+    }, [userToken, router]);
 
-  useEffect(() => {
-    if (userToken) return;
-    const code = searchParams.get('code');
-    if (!code) return;
-
-    const redirect_uri = `${window.location.origin}${pathname}`;
-    handleGoogleSuccess({ code, redirect_uri });
-  }, [searchParams, pathname, userToken, handleGoogleSuccess]);
-
-  useEffect(() => {
-    if (userToken) router.replace('/chat');
-  }, [userToken, router]);
-
-  const login = useGoogleLogin({
-    flow: 'auth-code',
-    ux_mode: 'redirect',
-    redirect_uri:
-      typeof window !== 'undefined' ? `${window.location.origin}/sign-in` : undefined,
-    onError: (err) => console.error('Google init error:', err),
-  });
+    const login = useGoogleLogin({
+        flow: 'auth-code',
+        ux_mode: 'redirect',
+        redirect_uri:
+        typeof window !== 'undefined' ? `${window.location.origin}/sign-in` : undefined,
+        onError: (err) => console.error('Google init error:', err),
+    });
 
   return (
     <div className="min-h-screen w-full flex items-center justify-center bg-neutral-950 text-white">
