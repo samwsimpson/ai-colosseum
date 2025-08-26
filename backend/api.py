@@ -1191,13 +1191,12 @@ async def _download_file(url: str):
 @app.post("/api/upload-file")
 async def upload_file(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
     """
-    Handles file uploads by receiving the multipart file,
-    uploading it to GCS, saving metadata in Firestore, and
-    returning a short-lived GET signed URL for preview.
+    Receives a multipart file, uploads it to GCS, stores metadata in Firestore,
+    and returns a short-lived signed URL plus basic metadata (JSON-safe).
     """
     try:
         # --- Required env vars ---
-        bucket_name = os.getenv("GCS_BUCKET_NAME")  # NOTE: use GCS_BUCKET_NAME
+        bucket_name = os.getenv("GCS_BUCKET_NAME")
         if not bucket_name:
             raise HTTPException(status_code=500, detail="GCS_BUCKET_NAME not configured")
 
@@ -1209,14 +1208,11 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
         content_type = file.content_type or (mimetypes.guess_type(filename)[0] or "application/octet-stream")
 
         # --- Build GCS object path ---
-        # Put user id + timestamp in the path to avoid collisions
         file_path = f"uploads/{current_user['id']}/{datetime.now(timezone.utc).isoformat()}-{filename}"
 
-        # --- Upload to GCS (synchronous; do NOT 'await') ---
-        storage_client = storage.Client()
+        # --- Upload to GCS (off the event loop) ---
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(file_path)
-
         try:
             # Some UploadFile impls need this; won't hurt if not needed
             await file.seek(0)
@@ -1228,7 +1224,7 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
 
         await asyncio.to_thread(blob.upload_from_file, file.file, content_type=content_type)
 
-        # (optional) size for UI
+        # --- Optional: size for UI ---
         size = None
         try:
             pos = file.file.tell()
@@ -1238,13 +1234,10 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
         except Exception:
             pass
 
-        # --- Generate a short-lived GET signed URL (IAM-based; works on Cloud Run) ---
+        # --- Short-lived signed URL (IAM-based, Cloud Run friendly) ---
         service_account_email = os.getenv("GCP_SERVICE_ACCOUNT_EMAIL")
         if not service_account_email:
-            raise HTTPException(
-                status_code=500,
-                detail="Missing GCP_SERVICE_ACCOUNT_EMAIL env var for IAM-based URL signing",
-            )
+            raise HTTPException(status_code=500, detail="Missing GCP_SERVICE_ACCOUNT_EMAIL env var for IAM-based URL signing")
 
         adc_credentials, _ = google_auth_default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
         if not adc_credentials.valid:
@@ -1254,7 +1247,7 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
             version="v4",
             expiration=timedelta(minutes=15),
             method="GET",
-            service_account_email=service_account_email,  # IAM-based signing (no private key)
+            service_account_email=service_account_email,
             access_token=adc_credentials.token,
         )
 
@@ -1271,7 +1264,7 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
         except Exception as e:
             print(f"Failed to read uploaded content: {e}")
 
-        # --- Save an uploads doc so messages can refer to it by id ---
+        # --- Firestore: save an uploads doc so messages can refer to it by id ---
         doc_ref = db.collection("uploads").document()
         upload_doc = {
             "id": doc_ref.id,
@@ -1283,19 +1276,31 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
             "path": file_path,
             "signed_url": signed_url,
             "content": content_for_llm,
-            "created_at": FS_TS,
+            "created_at": FS_TS,   # Firestore server timestamp (Sentinel) -> DO NOT send to client
         }
-        doc_ref.set(upload_doc)
-        await doc_ref.set(upload_doc)
 
-        # Response
-        return JSONResponse(upload_doc, status_code=200)
+        # IMPORTANT: await exactly once; do not call doc_ref.set(...) without await
+        await doc_ref.set(upload_doc)  # this is AsyncDocumentReference.set(...)
+
+        # --- JSON-safe response for the frontend ---
+        response_doc = {
+            "id": doc_ref.id,
+            "name": filename,
+            "mime": content_type,
+            "size": size,
+            "signed_url": signed_url,
+            "content": content_for_llm,
+            # optionally include a human timestamp if you want:
+            # "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        return JSONResponse(response_doc, status_code=200)
 
     except HTTPException:
-        raise  # keep FastAPI semantics
+        raise
     except Exception as e:
         print("upload_file error:", repr(e))
         return JSONResponse({"error": str(e)}, status_code=500)
+
 
 
 
