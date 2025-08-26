@@ -2,11 +2,11 @@ import sys
 import traceback
 print("TOP OF api.py: Script starting...", file=sys.stderr)
 from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from fastapi import Request, Response
 from fastapi import Header
-from fastapi import UploadFile, File
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import os
@@ -1226,7 +1226,7 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
             except Exception:
                 pass
 
-        blob.upload_from_file(file.file, content_type=content_type)
+        await asyncio.to_thread(blob.upload_from_file, file.file, content_type=content_type)
 
         # (optional) size for UI
         size = None
@@ -1281,13 +1281,14 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
             "size": size,
             "bucket": bucket_name,
             "path": file_path,
-            "signed_url": signed_url,  # temporary viewer link (for your UI/agents)
-            "content": content_for_llm, # optional text preview
-            "created_at": FS_TS,        # you already have FS_TS helper
+            "signed_url": signed_url,
+            "content": content_for_llm,
+            "created_at": FS_TS,
         }
         doc_ref.set(upload_doc)
+        await doc_ref.set(upload_doc)
 
-        # --- Response for the frontend ---
+        # Response
         return JSONResponse(upload_doc, status_code=200)
 
     except HTTPException:
