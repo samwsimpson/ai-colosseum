@@ -59,6 +59,14 @@ interface BackendMessageLike {
   message?: string;
   body?: unknown;
 }
+type UploadedAttachment = {
+  id: string;
+  name: string;
+  mime: string;
+  size?: number | null;
+  signed_url: string;     // NOTE: snake_case in state for consistency
+  content?: string;       // optional preview for text files
+};
 
 type ConversationListResponse =
   | ConversationListItem[]
@@ -242,14 +250,13 @@ const reconnectBackoffRef = useRef(1000); // start at 1s, exponential up to 15s
 const refreshInFlight = useRef<Promise<void> | null>(null);
 const lastRefreshAt = useRef<number>(0);
 const fileInputRef = useRef<HTMLInputElement>(null);
+// 1) single-responsibility upload helper: returns the uploaded attachment but DOES NOT set state
+
 const uploadOne = async (file: File): Promise<UploadedAttachment> => {
   const form = new FormData();
   form.append("file", file);
 
-  const res = await apiFetch("/api/upload-file", {
-    method: "POST",
-    body: form,
-  });
+  const res = await apiFetch("/api/upload-file", { method: "POST", body: form });
   if (!res.ok) throw new Error(`Upload failed: ${res.status}`);
 
   const raw = await res.json() as {
@@ -258,11 +265,10 @@ const uploadOne = async (file: File): Promise<UploadedAttachment> => {
     mime?: string;
     size?: number | null;
     signed_url?: string;
-    // legacy keys we still return from the backend
-    filename?: string;
-    url?: string;
+    filename?: string;     // legacy
+    url?: string;          // legacy
     content?: string;
-    content_type?: string;
+    content_type?: string; // legacy
   };
 
   return {
@@ -270,32 +276,31 @@ const uploadOne = async (file: File): Promise<UploadedAttachment> => {
     name: raw.name ?? raw.filename ?? file.name,
     mime: raw.mime ?? raw.content_type ?? file.type || "application/octet-stream",
     size: raw.size ?? file.size,
-    signed_url: raw.signed_url ?? raw.url!,
-    content: raw.content, // may be undefined for binaries; that’s fine
+    signed_url: raw.signed_url ?? raw.url!,  // normalize to signed_url
+    content: raw.content,
   };
 };
 
-const handleFilePick = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || !files.length) return;
-    try {
-        const uploaded: UploadedAttachment[] = [];
-        for (let i = 0; i < files.length; i++) {
-            if (files[i] && files[i].size > 0 && files[i].name) {
-                uploaded.push(await uploadOne(files[i]));
-            }
-        }
-        setPendingFiles(prev => [...prev, ...uploaded]);
-    } catch (err) {
-        console.error(err);
-        alert('Upload failed. Try smaller files.');
-    } finally {
-        // Use the ref to safely reset the input value.
-        if (fileInputRef.current) {
-            fileInputRef.current.value = '';
-        }
-    }
-};
+async function handleFilePick(e: React.ChangeEvent<HTMLInputElement>) {
+  const files = Array.from(e.target.files || []);
+  if (!files.length) return;
+
+  setIsUploading(true);
+  try {
+    const uploaded: UploadedAttachment[] = [];
+    for (const f of files) uploaded.push(await uploadOne(f));
+    // FIX: correct spread (no ".prev" typo)
+    setPendingFiles(prev => [...prev, ...uploaded]);
+  } catch (err) {
+    console.error(err);
+    alert("Upload failed. Try smaller files.");
+  } finally {
+    setIsUploading(false);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+}
+
+
 const removePending = (id: string) => setPendingFiles(prev => prev.filter(p => p.id !== id));
 
     // Hydrate conversations from localStorage on mount
@@ -623,7 +628,9 @@ const loadConversations = useCallback(async () => {
         e.preventDefault();
 
         const text = message.trim();
-        if (!text && pendingFiles.length === 0) return;
+        const hasText = text.trim().length > 0;
+        const hasFiles = pendingFiles.length > 0;
+        if (!hasText && !hasFiles) return;
 
         Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
         Object.values(typingTTLRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
@@ -640,25 +647,30 @@ const loadConversations = useCallback(async () => {
         lastUserClientIdRef.current = clientId;
 
         // Build the base message payload
+        const attachments = pendingFiles.map(f => f.id).filter(Boolean); // IDs for server lookup
+        const file_metadata_list = pendingFiles.map(f => ({
+        id: f.id,
+        filename: f.name,
+        url: f.signed_url,
+        content_type: f.mime || "application/octet-stream",
+        size: typeof f.size === "number" ? f.size : undefined,
+        content: f.content ?? undefined,  // text preview if available
+        }));
+
+        const placeholder = hasFiles && !hasText
+            ? `(sent ${pendingFiles.length} file${pendingFiles.length > 1 ? "s" : ""})`
+            : "";
+
         const payload: Record<string, unknown> = {
             client_id: clientId,
-            text,
-            message: text,
             user_name: userName,
             conversation_id: conversationId || undefined,
-            attachments: pendingFiles.map(f => f.id),
+            attachments: pendingFiles.map(f => f.id),  // ids for server lookup
+            text: hasText ? text : placeholder,        // send BOTH keys
+            message: hasText ? text : placeholder,
+            file_metadata_list,                        // the array you built above
+            file_metadata: file_metadata_list[0],      // back-compat (ok if unused)
         };
-
-        // If there are uploaded files, include metadata the backend/agents can read
-        if (pendingFiles.length > 0) {
-        // Build a normalized list for all files
-        const file_metadata_list = pendingFiles.map((f: any) => ({
-            filename: f.name,
-            content_type: f.mime || "application/octet-stream",
-            size: typeof f.size === "number" ? f.size : undefined,
-            url: f.signed_url,               // set by /api/upload-file response
-            content: f.content ?? undefined, // optional text preview when available
-        }));
 
         // Preferred new field (backend already supports this)
         (payload as any).file_metadata_list = file_metadata_list;
@@ -685,7 +697,8 @@ const loadConversations = useCallback(async () => {
                 }
             }
 
-            if (text) addMessageToChat({ sender: userName, text });
+            addMessageToChat({ sender: userName, text: hasText ? text : placeholder });
+
 
             setMessage('');
             setPendingFiles([]);
@@ -1310,7 +1323,7 @@ useEffect(() => {
                         className="inline-flex items-center gap-2 px-2 py-1 text-xs rounded-full bg-gray-800 border border-gray-700"
                     >
                         <a
-                            href={f.signed_url}
+                            href={f.signed_url ?? (f as any).signedUrl}
                             target="_blank"
                             rel="noreferrer"
                             className="truncate max-w-[180px] hover:underline"

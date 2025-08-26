@@ -1191,38 +1191,44 @@ async def _download_file(url: str):
 @app.post("/api/upload-file")
 async def upload_file(file: UploadFile = File(...), current_user: dict = Depends(get_current_user)):
     """
-    Handles file uploads, stores them in GCS, and returns a signed URL.
+    Handles file uploads by receiving the multipart file,
+    uploading it to GCS, saving metadata in Firestore, and
+    returning a short-lived GET signed URL for preview.
     """
     try:
-        bucket_name = os.getenv("GCS_BUCKET_NAME")
+        # --- Required env vars ---
+        bucket_name = os.getenv("GCS_BUCKET_NAME")  # NOTE: use GCS_BUCKET_NAME
         if not bucket_name:
             raise HTTPException(status_code=500, detail="GCS_BUCKET_NAME not configured")
 
-        # Sanitize filename
+        # --- Filename & content-type ---
         filename = secure_filename((file.filename or "").strip())
         if not filename:
             raise HTTPException(status_code=400, detail="Invalid filename")
 
-        # Unique object path
-        file_path = f"uploads/{current_user['id']}/{datetime.now(timezone.utc).isoformat()}-{filename}"
-
-        # Content-Type with solid fallback
         content_type = file.content_type or (mimetypes.guess_type(filename)[0] or "application/octet-stream")
 
+        # --- Build GCS object path ---
+        # Put user id + timestamp in the path to avoid collisions
+        file_path = f"uploads/{current_user['id']}/{datetime.now(timezone.utc).isoformat()}-{filename}"
+
+        # --- Upload to GCS (synchronous; do NOT 'await') ---
+        storage_client = storage.Client()
         bucket = storage_client.bucket(bucket_name)
         blob = bucket.blob(file_path)
 
-        # Rewind stream and upload (google-cloud-storage is synchronous)
         try:
+            # Some UploadFile impls need this; won't hurt if not needed
             await file.seek(0)
         except Exception:
             try:
                 file.file.seek(0)
             except Exception:
                 pass
+
         blob.upload_from_file(file.file, content_type=content_type)
 
-        # (optional) compute file size for response
+        # (optional) size for UI
         size = None
         try:
             pos = file.file.tell()
@@ -1232,56 +1238,65 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
         except Exception:
             pass
 
-        # IMPORTANT: IAM-based signing on Cloud Run (no private key available)
+        # --- Generate a short-lived GET signed URL (IAM-based; works on Cloud Run) ---
         service_account_email = os.getenv("GCP_SERVICE_ACCOUNT_EMAIL")
         if not service_account_email:
             raise HTTPException(
                 status_code=500,
-                detail="Missing GCP_SERVICE_ACCOUNT_EMAIL env var for IAM-based URL signing"
+                detail="Missing GCP_SERVICE_ACCOUNT_EMAIL env var for IAM-based URL signing",
             )
 
-        # Get an OAuth access token from ADC and ensure it’s fresh
         adc_credentials, _ = google_auth_default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
         if not adc_credentials.valid:
             adc_credentials.refresh(AuthRequest())
 
-        # Generate a V4 signed URL using service account email + access_token (supported in storage==2.19.0)
         signed_url = blob.generate_signed_url(
             version="v4",
             expiration=timedelta(minutes=15),
             method="GET",
-            service_account_email=service_account_email,
-            access_token=adc_credentials.token,   # <-- key fix: triggers IAM-based signing on Cloud Run
+            service_account_email=service_account_email,  # IAM-based signing (no private key)
+            access_token=adc_credentials.token,
         )
 
-
-
-        # Small preview for text-like files
+        # --- Small preview for text-like files (safe) ---
         content_for_llm = "[Binary file content not shown]"
         try:
             if content_type.startswith(("text/", "application/json", "application/xml", "application/javascript")):
-                content_for_llm = await _download_file(signed_url)
-                if len(content_for_llm) > 10000:
-                    content_for_llm = content_for_llm[:9500] + "\n...[TRUNCATED]"
+                async with aiohttp.ClientSession() as session:
+                    async with session.get(signed_url) as resp:
+                        resp.raise_for_status()
+                        content_for_llm = await resp.text()
+                        if len(content_for_llm) > 10000:
+                            content_for_llm = content_for_llm[:9500] + "\n.[TRUNCATED]"
         except Exception as e:
             print(f"Failed to read uploaded content: {e}")
 
-        return {
-            # new fields that the frontend expects
-            "id": file_path,                 # stable identifier we can send back later
-            "name": filename,                # display name for the chip
-            "mime": content_type,            # aligns with frontend "mime"
-            "size": size,                    # may be None
-            "signed_url": signed_url,        # aligns with frontend "signed_url"
-            "filename": filename,
-            "url": signed_url,
-            "content": content_for_llm,
-            "content_type": content_type,    
+        # --- Save an uploads doc so messages can refer to it by id ---
+        doc_ref = db.collection("uploads").document()
+        upload_doc = {
+            "id": doc_ref.id,
+            "user_id": current_user["id"],
+            "name": filename,
+            "mime": content_type,
+            "size": size,
+            "bucket": bucket_name,
+            "path": file_path,
+            "signed_url": signed_url,  # temporary viewer link (for your UI/agents)
+            "content": content_for_llm, # optional text preview
+            "created_at": FS_TS,        # you already have FS_TS helper
         }
+        doc_ref.set(upload_doc)
 
+        # --- Response for the frontend ---
+        return JSONResponse(upload_doc, status_code=200)
+
+    except HTTPException:
+        raise  # keep FastAPI semantics
     except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"File upload failed: {e}")
+        print("upload_file error:", repr(e))
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 
 
 
@@ -1801,9 +1816,46 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         if data.get("type") == "ping":
                             await ws.send_json({"type": "pong"})
                         continue
+                    # Build a file list: prefer inline metadata; else resolve attachments by id
+                    files = data.get("file_metadata_list") or []
+                    if not files and data.get("file_metadata"):
+                        files = [data["file_metadata"]]
+
+                    # If only ids were sent, resolve them from Firestore
+                    if not files:
+                        att_ids = data.get("attachments") or []
+                        resolved = []
+                        for fid in att_ids:
+                            if not fid:
+                                continue
+                            try:
+                                snap = await db.collection("uploads").document(str(fid)).get()
+                                if snap.exists:
+                                    doc = snap.to_dict() or {}
+                                    resolved.append({
+                                        "id": snap.id,
+                                        "filename": doc.get("name") or doc.get("filename") or "uploaded-file",
+                                        "content_type": doc.get("mime") or doc.get("content_type") or "application/octet-stream",
+                                        "size": doc.get("size"),
+                                        "url": doc.get("signed_url") or doc.get("url"),
+                                        "content": doc.get("content"),
+                                    })
+                            except Exception as e:
+                                print(f"[ws] resolve attachment {fid} failed: {e}")
+                        files = resolved
+
+                    print(f"[ws] user message received: {len((data.get('message') or data.get('text') or ''))} chars, {len(files)} files")
                         
                     user_message = data.get("message", "") or data.get("text", "") or ""
-
+                    # --- INSERT: allow files-only turns by synthesizing a placeholder ---
+                    if not user_message:
+                        file_count = len(files or [])
+                        if file_count > 0:
+                            user_message = f"(sent {file_count} file{'s' if file_count != 1 else ''})"
+                        else:
+                            # truly empty turn; ignore silently (or send a notice if you prefer)
+                            continue
+                    # --- /INSERT ---
                     # Build what the AIs should see: original text + per-file headers + previews
                     full_user_content = user_message
                     if files:
@@ -1825,18 +1877,21 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                         full_user_content = (user_message + "\n\n" + "\n\n".join(blocks)).strip()
 
-                    # Echo the user's visible message once
-                    await ws.send_json({"sender": proxy.name, "text": user_message})
+                        # Save + echo the user turn exactly once (works for text-only and files)
+                        await save_message(
+                            conv_ref,
+                            role="user",
+                            sender=user_display_name,
+                            content=user_message,
+                            file_metadata_list=files,
+                        )
+                        await ws.send_json({
+                            "sender": proxy.name,
+                            "text": user_message,
+                            "file_metadata_list": files,
+                        })                                             
 
-                    # Persist once, storing *all* attachments in a normalized list (and single legacy field if present)
-                    await save_message(
-                        conv_ref,
-                        role="user",
-                        sender=proxy.name,
-                        content=user_message,
-                        file_metadata=(data.get("file_metadata") or None),
-                        file_metadata_list=(files or None),
-                    )
+
 
                     await maybe_set_title(conv_ref, user_message)
 
@@ -1963,16 +2018,22 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     await maybe_refresh_summary(conv_ref)
 
         
+        from starlette.websockets import WebSocketState  # add this import at the top of file if not present
+
         async def keepalive_task(ws: WebSocket):
             try:
                 while True:
                     await asyncio.sleep(20)
-                    await ws.send_json({"sender": "System", "type": "server_ping"})
-            except WebSocketDisconnect as e:
-                print(f"keepalive_task: client disconnected (code={getattr(e, 'code', 'unknown')})")
+                    if ws.application_state != WebSocketState.CONNECTED:
+                        break
+                    try:
+                        await ws.send_json({"sender": "System", "type": "server_ping"})
+                    except Exception:
+                        break
             except Exception as e:
                 print(f"keepalive_task error: {e}")
-        
+            
+                
         # We start the tasks that are truly independent and long-running
         consumer_task_coro = asyncio.create_task(
             message_consumer_task(message_output_queue, websocket, conv_ref, agent_names, safe_user_name, user_display_name)
