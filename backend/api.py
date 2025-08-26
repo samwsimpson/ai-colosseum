@@ -1499,8 +1499,22 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             # 1) Look up the upload document and permission
             doc_ref = db.collection("uploads").document(upload_id)
             snapshot = await doc_ref.get()
+
+            # If the caller passed a filename instead of the doc id, fall back to name lookup
+            if not snapshot.exists:
+                query = (db.collection("uploads")
+                        .where("user_id", "==", user["id"])
+                        .where("name", "==", upload_id)
+                        .limit(1))
+                async for doc in query.stream():
+                    snapshot = doc
+                    upload_id = doc.id  # normalize to the real id
+                    break
+
+            # Permission / existence check after fallback
             if (not snapshot.exists) or ((snapshot.to_dict() or {}).get("user_id") != user["id"]):
                 return {"error": "not_found_or_forbidden"}
+
 
             data = snapshot.to_dict() or {}
             bucket_name = data.get("bucket")
@@ -1617,7 +1631,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 "api_type": "openai"
             }],
             "temperature": 0.5,
-            "timeout": 90
+            "timeout": 90,
+            "tools": [],           # ← add this
+            "tool_choice": "none", # ← and this
         }
         claude_llm_config = {
             "config_list": [{
@@ -1680,6 +1696,35 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     for attempt in range(3):
                         try:
                             result = await super().a_generate_reply(messages=messages, sender=sender, **kwargs)
+                            # ---- Resolve OpenAI tool_calls inline to avoid dangling calls ----
+                            try:
+                                if isinstance(result, dict) and result.get("tool_calls"):
+                                    tool_text_blocks = []
+                                    for tc in result.get("tool_calls", []):
+                                        fn = (tc.get("function") or {}).get("name")
+                                        if fn == "get_upload_text":
+                                            import json  # ok if already imported elsewhere
+                                            args_raw = (tc.get("function") or {}).get("arguments") or "{}"
+                                            try:
+                                                args = json.loads(args_raw)
+                                            except Exception:
+                                                args = {}
+                                            u_id = args.get("upload_id")
+                                            mchars = int(args.get("max_chars") or 20000)
+                                            if u_id:
+                                                # Execute the tool directly and turn it into plain text
+                                                tool_res = await get_upload_text_tool(upload_id=u_id, max_chars=mchars)
+                                                mime = (tool_res or {}).get("mime", "unknown")
+                                                text = (tool_res or {}).get("text", "") or ""
+                                                tool_text_blocks.append(f"[File {u_id} | {mime}]\n{text}")
+                                    if tool_text_blocks:
+                                        # Replace the assistant's tool call with normal content
+                                        result = {"content": "\n\n".join(tool_text_blocks)}
+                            except Exception:
+                                # Degrade gracefully; never return a raw tool_calls message
+                                result = {"content": "I tried to read the file but hit an internal error. Please try again."}
+                            # ---- END resolve tool_calls ----
+
                             break
                         except Exception as e:
                             last_exc = e
@@ -1862,11 +1907,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         # === Register tool for function-calling ===
         # Let each assistant *see* the tool definition (function schema)
-        for a in agents[1:]:  # skip user_proxy at index 0
+        for a in agents[1:]:  # assistants only
+            if a.name == "ChatGPT":
+                continue
             a.register_for_llm(
                 name="get_upload_text",
                 description="Return up to max_chars of text from a user-uploaded file.",
             )(get_upload_text_tool)
+
 
         # Let the user proxy actually *execute* the tool call when the LLM requests it
         user_proxy.register_for_execution(
@@ -1999,7 +2047,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             fn = (f.get("filename") or "uploaded-file").strip()
                             ct = (f.get("content_type") or "application/octet-stream").strip()
                             sz = f.get("size")
-                            header = f"[Attachment: {fn} | {ct}" + (f" | {sz} bytes]" if isinstance(sz, (int, float)) else "]")
+                            uid = f.get("id") or f.get("upload_id")
+                            id_part = f" | upload_id={uid}" if uid else ""
+                            header = f"[Attachment: {fn} | {ct} | {sz} bytes{id_part}]"
                             preview = f.get("content")
                             if isinstance(preview, str) and preview:
                                 # trim to keep tokens in check
