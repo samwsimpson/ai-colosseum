@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useRef, useEffect, useCallback } from 'react';
+import type React from 'react';
 import { useUser } from '../../context/UserContext';
 import { usePathname, useRouter } from 'next/navigation';
 
@@ -217,6 +218,7 @@ const [showSummary, setShowSummary] = useState(false);
 const [wsReconnectNonce, setWsReconnectNonce] = useState(0);
 const [conversationId, setConversationId] = useState<string | null>(null);
 const [pendingFiles, setPendingFiles] = useState<UploadedAttachment[]>([]);
+const [, setIsUploading] = useState<boolean>(false);
 const [conversations, setConversations] = useState<ConversationListItem[]>([]);
 const [isLoadingConvs, setIsLoadingConvs] = useState(false);
 const [manageMode, setManageMode] = useState(false);
@@ -274,7 +276,7 @@ const uploadOne = async (file: File): Promise<UploadedAttachment> => {
   return {
     id: raw.id ?? raw.url ?? crypto.randomUUID(),
     name: raw.name ?? raw.filename ?? file.name,
-    mime: raw.mime ?? raw.content_type ?? file.type || "application/octet-stream",
+    mime: raw.mime ?? raw.content_type ?? file.type ?? "application/octet-stream",
     size: raw.size ?? file.size,
     signed_url: raw.signed_url ?? raw.url!,  // normalize to signed_url
     content: raw.content,
@@ -677,7 +679,7 @@ const loadConversations = useCallback(async () => {
 
         // Back-compat: keep the single-file field as the first item (harmless if unused)
         (payload as any).file_metadata = file_metadata_list[0];
-        }
+
 
 
 
