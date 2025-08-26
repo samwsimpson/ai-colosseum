@@ -1301,6 +1301,63 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
         print("upload_file error:", repr(e))
         return JSONResponse({"error": str(e)}, status_code=500)
 
+@app.get("/api/uploads/{upload_id}/text")
+async def get_upload_text(upload_id: str, max_chars: int = 20000, current_user: dict = Depends(get_current_user)):
+    """
+    Return up to `max_chars` of plain text from a previously uploaded file.
+    - For text-like mimetypes, read and return the first portion.
+    - For binary types (PDF, images), try a quick text extraction (best-effort).
+    """
+    try:
+        # 1) Look up the upload doc
+        doc_ref = db.collection("uploads").document(upload_id)
+        snapshot = await doc_ref.get()
+        if not snapshot.exists:
+            raise HTTPException(status_code=404, detail="Upload not found")
+
+        data = snapshot.to_dict() or {}
+        if data.get("user_id") != current_user["id"]:
+            raise HTTPException(status_code=403, detail="Forbidden")
+
+        bucket_name = data.get("bucket")
+        path        = data.get("path")
+        mime        = data.get("mime") or "application/octet-stream"
+        if not bucket_name or not path:
+            raise HTTPException(status_code=500, detail="Upload metadata incomplete")
+
+        # 2) Fetch object from GCS (off the event loop)
+        bucket = storage_client.bucket(bucket_name)
+        blob   = bucket.blob(path)
+
+        # Stream the first ~max_chars bytes; for text this is sufficient
+        # (we read bytes then decode; you can refine for encodings if needed)
+        def _download_head(n: int) -> bytes:
+            return blob.download_as_bytes(start=0, end=n - 1)
+
+        raw = await asyncio.to_thread(_download_head, max(4096, max_chars * 2))  # read a bit extra to be safe
+        text = ""
+        try:
+            text = raw.decode("utf-8", errors="replace")
+        except Exception:
+            text = ""
+
+        # 3) If non-text and empty decode, do best-effort extraction (optional)
+        if (not text.strip()) and (not mime.startswith("text/")):
+            # Very light-weight heuristics; expand with pdf/docx parsers when you’re ready
+            if mime in ("application/json", "application/xml", "application/javascript"):
+                text = raw.decode("utf-8", errors="replace")
+            else:
+                text = "[Binary file: no text extracted]"
+
+        if len(text) > max_chars:
+            text = text[:max_chars] + "\n.[TRUNCATED]"
+
+        return JSONResponse({"upload_id": upload_id, "mime": mime, "text": text})
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("get_upload_text error:", repr(e))
+        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 
@@ -1433,6 +1490,57 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         # Keep this list in one place
         agent_names = ["ChatGPT", "Claude", "Gemini", "Mistral"]
 
+        # === TOOL: get_upload_text (for assistants) ===
+        async def get_upload_text_tool(upload_id: str, max_chars: int = 20000) -> dict:
+            """
+            Return up to `max_chars` of text from a user-uploaded file by its upload_id.
+            Authorization: uses the current websocket user (no cross-user reads).
+            """
+            # 1) Look up the upload document and permission
+            doc_ref = db.collection("uploads").document(upload_id)
+            snapshot = await doc_ref.get()
+            if (not snapshot.exists) or ((snapshot.to_dict() or {}).get("user_id") != user["id"]):
+                return {"error": "not_found_or_forbidden"}
+
+            data = snapshot.to_dict() or {}
+            bucket_name = data.get("bucket")
+            path        = data.get("path")
+            mime        = data.get("mime") or "application/octet-stream"
+            if not bucket_name or not path:
+                return {"error": "metadata_incomplete"}
+
+            # 2) Download a head slice from GCS (off the event loop)
+            bucket = storage_client.bucket(bucket_name)
+            blob   = bucket.blob(path)
+
+            def _download_head(n: int) -> bytes:
+                # Read roughly enough bytes to decode to ~max_chars safely
+                return blob.download_as_bytes(start=0, end=max(1, n) - 1)
+
+            raw = await asyncio.to_thread(_download_head, max(4096, max_chars * 2))
+            try:
+                text = raw.decode("utf-8", errors="replace")
+            except Exception:
+                text = ""
+
+            # 3) Light fallback for non-text types
+            if (not text.strip()) and (not mime.startswith("text/")):
+                if mime in ("application/json", "application/xml", "application/javascript"):
+                    try:
+                        text = raw.decode("utf-8", errors="replace")
+                    except Exception:
+                        text = ""
+                if not text:
+                    text = "[Binary file: no text extracted]"
+
+            if len(text) > max_chars:
+                text = text[:max_chars] + "\n.[TRUNCATED]"
+
+            # Return a compact, model-friendly object
+            return {"upload_id": upload_id, "mime": mime, "text": text}
+        # === END TOOL ===
+
+
         # --- randomized opening greeting (guarded: once per WS; skip if recently greeted) ---
         try:
             import random
@@ -1482,6 +1590,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 "Be concise, direct, and avoid conversational fillers like 'As an AI...' or 'I apologize...' unless you are correcting a factual error. "
                 "Do not comment on other assistants' turns or try to hand off the conversation. "
             )
+            
+            # Tooling available to you:
+            # - get_upload_text(upload_id: string, max_chars: integer) -> { "mime": string, "text": string }
+            #   Use this whenever the user's provided `content` preview is insufficient.
+            #   The `upload_id` is the `id` found in file attachments (file_metadata_list / attachments).
+            #   Ask for only what you need (e.g., 10k–20k chars) to keep responses focused.
 
             return (
                 f"{base}\n\n"
@@ -1746,6 +1860,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             proxy_for_forward=user_proxy,
         ))
 
+        # === Register tool for function-calling ===
+        # Let each assistant *see* the tool definition (function schema)
+        for a in agents[1:]:  # skip user_proxy at index 0
+            a.register_for_llm(
+                name="get_upload_text",
+                description="Return up to max_chars of text from a user-uploaded file.",
+            )(get_upload_text_tool)
+
+        # Let the user proxy actually *execute* the tool call when the LLM requests it
+        user_proxy.register_for_execution(
+            name="get_upload_text"
+        )(get_upload_text_tool)
+        # === END Registration ===
+
         print("AGENTS IN GROUPCHAT:")
         for a in agents:
             print(f" - {a.name}")
@@ -1769,6 +1897,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 f"Attribution rules:\n"
                 f"• When listing who said what, copy the exact speaker names from the transcript; do not infer or rename.\n"
                 f"• Never attribute any assistant's message to {safe_user_name}.\n"
+                f"• If the user attached files, you may call get_upload_text(upload_id, max_chars) to read more from them when the preview is insufficient.\n"
                 f"• If an assistant did not provide a number, say 'not provided' for that assistant only.\n"
                 "Memory: This conversation is persistent. Rely on the 'Conversation summary' for prior context."
             )
