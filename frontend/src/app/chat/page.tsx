@@ -66,8 +66,10 @@ type UploadedAttachment = {
   mime: string;
   size?: number | null;
   signed_url: string;     // NOTE: snake_case in state for consistency
+  signedUrl?: string;     // legacy camelCase (optional)
   content?: string;       // optional preview for text files
 };
+
 
 type ConversationListResponse =
   | ConversationListItem[]
@@ -182,7 +184,8 @@ export default function ChatPage() {
 
     /** Only show bubble if the agent is still "typing" after showDelayMs.
      *  When shown, auto-clear after ttlMs unless a message/false arrives. */
-    const setTypingWithDelayAndTTL = (agent: AgentName, value: boolean, showDelayMs = 400, ttlMs = 12000) => {
+    const setTypingWithDelayAndTTL = useCallback((agent: AgentName, value: boolean, showDelayMs = 400, ttlMs = 12000) => {
+
         if (!value) {
             // cancel pending show + ttl, hide immediately
             clearTypingShowDelay(agent);
@@ -203,7 +206,7 @@ export default function ChatPage() {
             delete typingTTLRef.current[agent];
             }, ttlMs);
         }, showDelayMs);
-    };    
+    }, []);
 
 const { userName, userToken } = useUser();
 const router = useRouter();
@@ -674,11 +677,6 @@ const loadConversations = useCallback(async () => {
             file_metadata: file_metadata_list[0],      // back-compat (ok if unused)
         };
 
-        // Preferred new field (backend already supports this)
-        (payload as any).file_metadata_list = file_metadata_list;
-
-        // Back-compat: keep the single-file field as the first item (harmless if unused)
-        (payload as any).file_metadata = file_metadata_list[0];
 
 
 
@@ -714,7 +712,7 @@ const loadConversations = useCallback(async () => {
     }, [message, userName, addMessageToChat, pendingFiles, conversationId]);
 
     // Create a brand-new conversation
-    const handleNewConversation = () => {  
+    const handleNewConversation = useCallback(() => {  
         setConversationId(null);
         try { localStorage.removeItem('conversationId'); } catch {}
         setLoadedSummary(null);
@@ -727,7 +725,7 @@ const loadConversations = useCallback(async () => {
         ws.current = null;
         // The WebSocket reconnect effect will fire automatically because conversationId changed to null.
         // We do not need a manual timeout or nonce bump here.
-    };
+    }, []);
 
 
     // Rename the selected conversation
@@ -1017,9 +1015,10 @@ useEffect(() => {
                 }
             };
         });
-    }, [userToken, userName, addMessageToChat, wsReconnectNonce, conversationId]);
+    }, [userToken, userName, addMessageToChat, wsReconnectNonce, conversationId, hydrateConversation, loadConversations, setTypingWithDelayAndTTL]);
 
-    
+
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const handleResetConversation = () => {    
         setConversationId(null);
         setLoadedSummary(null);          // <- add this line
@@ -1325,7 +1324,7 @@ useEffect(() => {
                         className="inline-flex items-center gap-2 px-2 py-1 text-xs rounded-full bg-gray-800 border border-gray-700"
                     >
                         <a
-                            href={f.signed_url ?? (f as any).signedUrl}
+                            href={f.signed_url ?? f.signedUrl}
                             target="_blank"
                             rel="noreferrer"
                             className="truncate max-w-[180px] hover:underline"
