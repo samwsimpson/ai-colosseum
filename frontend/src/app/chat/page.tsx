@@ -157,56 +157,38 @@ function uid() {
 }
 export default function ChatPage() {
 
-    const typingTTLRef = useRef<Partial<Record<AgentName, number>>>({});
-    const typingShowDelayRef = useRef<Partial<Record<AgentName, number>>>({});
-    const typingTimersRef = useRef<Partial<Record<AgentName, number>>>({});    
-    const clearTypingTimer = (agent: AgentName) => {
-        const id = typingTimersRef.current[agent];
-        if (typeof id === 'number') {
-         window.clearTimeout(id);
-            delete typingTimersRef.current[agent];
-        }
-    };
-    const clearTypingTTL = (agent: AgentName) => {
-        const id = typingTTLRef.current[agent];
-        if (typeof id === 'number') {
-            window.clearTimeout(id);
-            delete typingTTLRef.current[agent];
-        }
-    };
-    const clearTypingShowDelay = (agent: AgentName) => {
-        const id = typingShowDelayRef.current[agent];
-        if (typeof id === 'number') {
-            window.clearTimeout(id);
-            delete typingShowDelayRef.current[agent];
-        }
-    };
+    interface TypingTimers { showDelay: number | null; ttl: number | null; }
+    const typingTimersRef = useRef<Partial<Record<AgentName, TypingTimers>>>({});
 
     /** Only show bubble if the agent is still "typing" after showDelayMs.
-     *  When shown, auto-clear after ttlMs unless a message/false arrives. */
-    const setTypingWithDelayAndTTL = useCallback((agent: AgentName, value: boolean, showDelayMs = 400, ttlMs = 12000) => {
+     * When shown, auto-clear after ttlMs unless a message/false arrives. */
+    const setTypingWithDelayAndTTL = useCallback(
+    (agent: AgentName, value: boolean, showDelayMs = 400, ttlMs = 12000) => {
+        const timers = typingTimersRef.current[agent] ?? { showDelay: null, ttl: null };
+
+        if (timers.showDelay) window.clearTimeout(timers.showDelay);
+        if (timers.ttl) window.clearTimeout(timers.ttl);
 
         if (!value) {
-            // cancel pending show + ttl, hide immediately
-            clearTypingShowDelay(agent);
-            clearTypingTTL(agent);
-            setIsTyping(prev => ({ ...prev, [agent]: false }));
-            return;
+        setIsTyping(prev => ({ ...prev, [agent]: false }));
+        delete typingTimersRef.current[agent];
+        return;
         }
 
-        // schedule showing after a short delay
-        clearTypingShowDelay(agent);
-        typingShowDelayRef.current[agent] = window.setTimeout(() => {
-            setIsTyping(prev => ({ ...prev, [agent]: true }));
+        timers.showDelay = window.setTimeout(() => {
+        setIsTyping(prev => ({ ...prev, [agent]: true }));
 
-            // (re)start TTL once it’s actually visible
-            clearTypingTTL(agent);
-            typingTTLRef.current[agent] = window.setTimeout(() => {
+        if (timers.ttl) window.clearTimeout(timers.ttl);
+        timers.ttl = window.setTimeout(() => {
             setIsTyping(prev => ({ ...prev, [agent]: false }));
-            delete typingTTLRef.current[agent];
-            }, ttlMs);
+            if (typingTimersRef.current[agent]) delete typingTimersRef.current[agent];
+        }, ttlMs);
         }, showDelayMs);
-    }, []);
+
+        typingTimersRef.current[agent] = timers;
+    },
+    []
+    );
 
 const { userName, userToken } = useUser();
 const router = useRouter();
@@ -484,23 +466,36 @@ const loadConversations = useCallback(async () => {
                 : [];
 
         // Normalize & sort by updated_at or created_at
+        type Loose = Record<string, unknown>;
+
+        const parseDateMs = (v: unknown): number => {
+        if (v instanceof Date) return v.getTime();
+        if (typeof v === 'number') return Number.isFinite(v) ? v : 0;
+        if (typeof v === 'string') {
+            const t = Date.parse(v);
+            return Number.isFinite(t) ? t : 0;
+        }
+        return 0;
+        };
+
+        const pickTimestampMs = (o: Loose): number => {
+        return parseDateMs(
+            o['updated_at'] ?? o['updatedAt'] ?? o['last_updated'] ?? o['created_at'] ?? o['createdAt']
+        );
+        };
+
+        const getStr = (o: Loose, k: string): string | null =>
+        typeof o[k] === 'string' ? (o[k] as string) : null;
+
         const normalized: ConversationListItem[] = raw
-            .map((c) => ({
-                id: String(c.id),
-                title: (c.title && String(c.title)) || 'Untitled',
-                updated_at:
-                    c.updated_at ??
-                    (c as { updatedAt?: string }).updatedAt ??
-                    (c as { last_updated?: string }).last_updated,
-                created_at:
-                    c.created_at ?? (c as { createdAt?: string }).createdAt ?? null,
-            }))
-            .filter((c) => !!c.id)
-            .sort((a, b) => {
-                const ta = Date.parse(String(a.updated_at ?? a.created_at ?? ''));
-                const tb = Date.parse(String(b.updated_at ?? b.created_at ?? ''));
-                return (tb || 0) - (ta || 0);
-            });
+        .filter((c: Loose) => c?.id != null)
+        .sort((a: Loose, b: Loose) => pickTimestampMs(b) - pickTimestampMs(a))
+        .map((c: Loose) => ({
+            id: String(c.id),
+            title: (typeof c.title === 'string' && c.title) ? c.title : 'Untitled',
+            updated_at: getStr(c, 'updated_at') ?? getStr(c, 'updatedAt') ?? getStr(c, 'last_updated'),
+            created_at: getStr(c, 'created_at') ?? getStr(c, 'createdAt'),
+        }));
 
         // De-duplicate by id
         const seen: Record<string, true> = {};
@@ -637,11 +632,14 @@ const loadConversations = useCallback(async () => {
         const hasFiles = pendingFiles.length > 0;
         if (!hasText && !hasFiles) return;
 
-        Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-        Object.values(typingTTLRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-        typingShowDelayRef.current = {};
-        typingTTLRef.current = {};
+        Object.keys(typingTimersRef.current).forEach(k => {
+            const t = typingTimersRef.current[k as AgentName];
+            if (t?.showDelay) window.clearTimeout(t.showDelay);
+            if (t?.ttl) window.clearTimeout(t.ttl);
+        });
+        typingTimersRef.current = {};
         setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+
 
         if (!userName) {
             console.error('User name is missing, cannot send message.');
@@ -823,9 +821,31 @@ const loadConversations = useCallback(async () => {
     }, [userToken, selectedIds, conversationId, loadConversations, handleNewConversation, setConversations]);
 
 
+    const resetWebSocket = useCallback(() => {
+    // Clear all typing timers
+    Object.keys(typingTimersRef.current).forEach(key => {
+        const agent = key as AgentName;
+        const timers = typingTimersRef.current[agent];
+        if (!timers) return;
+        if (timers.showDelay) window.clearTimeout(timers.showDelay);
+        if (timers.ttl) window.clearTimeout(timers.ttl);
+    });
+    typingTimersRef.current = {};
+
+    setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+    setIsWsOpen(false);
+
+    // Close and null socket (guarded)
+    if (ws.current) {
+        try {
+        if (ws.current.readyState < 2) ws.current.close();
+        } catch { /* ignore */ }
+        finally { ws.current = null; }
+    }
+    }, []);
 
     // WebSocket connection logic
-useEffect(() => {
+    useEffect(() => {
         // Only proceed if a userToken is present and valid.
         if (!userToken) {
             if (ws.current) {
@@ -858,20 +878,24 @@ useEffect(() => {
             }
 
             // You'll need a JWT decoder library to check for expiration
-            const decoded = JSON.parse(atob(token.split('.')[1]));
-            const now = Math.floor(Date.now() / 1000);
-            if (decoded.exp < now) {
-                // Token is expired, trigger a refresh before connecting
-                try {
-                    const res = await apiFetch('/api/refresh', { method: 'POST' });
-                    if (res.ok) {
-                        const { token: newToken } = await res.json();
-                        return newToken;
+            try {
+                const decoded = JSON.parse(atob(token.split('.')[1] || ''));
+                const now = Math.floor(Date.now() / 1000);
+                if (decoded?.exp && decoded.exp < now) {
+                    try {
+                        const res = await apiFetch('/api/refresh', { method: 'POST' });
+                        if (res.ok) {
+                            const { token: newToken } = await res.json();
+                            return newToken;
+                        }
+                    } catch (e) {
+                        console.error("Failed to refresh token for WebSocket", e);
                     }
-                } catch (e) {
-                    console.error("Failed to refresh token for WebSocket", e);
+                    return null;
                 }
-                return null;
+            } catch {
+            // If we can’t decode, treat as unusable and don’t connect
+            return null;
             }
             return token;
         }
@@ -975,45 +999,31 @@ useEffect(() => {
                     }
                 },
                 onclose: (ev: CloseEvent) => {
-                    console.log('WebSocket closed. code=', ev.code, 'reason=', ev.reason, 'wasClean=', ev.wasClean);
-                    Object.values(typingTimersRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-                    typingTimersRef.current = {};
-                    Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-                    Object.values(typingTTLRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-                    typingShowDelayRef.current = {};
-                    typingTTLRef.current = {};
-                    setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
-                    setIsWsOpen(false);
-                    ws.current = null;
+                    resetWebSocket();
+
                     const base = 1000;
                     const max = 15000;
                     const tries = reconnectRef.current.tries;
                     const nextDelay = Math.min(max, base * Math.pow(2, tries)) + Math.floor(Math.random() * 250);
                     reconnectRef.current.tries = tries + 1;
-                    if (reconnectRef.current.timer) {
-                        window.clearTimeout(reconnectRef.current.timer);
-                    }
-                    reconnectRef.current.timer = window.setTimeout(() => {
-                        setWsReconnectNonce((n) => n + 1);
-                    }, nextDelay);
+
+                    if (reconnectRef.current.timer) window.clearTimeout(reconnectRef.current.timer);
+                    reconnectRef.current.timer = window.setTimeout(() => setWsReconnectNonce(n => n + 1), nextDelay);
                 },
                 onerror: (event: Event) => {
                     console.error('WebSocket error:', event);
-                    Object.values(typingTimersRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-                    typingTimersRef.current = {};                
-                    setIsWsOpen(false);
-                    Object.values(typingShowDelayRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-                    Object.values(typingTTLRef.current).forEach(id => typeof id === 'number' && window.clearTimeout(id));
-                    typingShowDelayRef.current = {};
-                    typingTTLRef.current = {};
-                    setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+                    resetWebSocket();
                 }
             });
             return () => {
-                if (currentWs && (currentWs.readyState === WebSocket.OPEN || currentWs.readyState === WebSocket.CONNECTING)) {
-                    try { currentWs.close(); } catch {}
+                resetWebSocket();
+                // Optional: zero-out backoff so a fresh mount starts fresh
+                reconnectRef.current.tries = 0;
+                if (reconnectRef.current.timer) {
+                    window.clearTimeout(reconnectRef.current.timer);
+                    reconnectRef.current.timer = undefined;
                 }
-            };
+            };            
         });
     }, [userToken, userName, addMessageToChat, wsReconnectNonce, conversationId, hydrateConversation, loadConversations, setTypingWithDelayAndTTL]);
 

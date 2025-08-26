@@ -1632,8 +1632,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             }],
             "temperature": 0.5,
             "timeout": 90,
-            "tools": [],           # ← add this
-            "tool_choice": "none", # ← and this
         }
         claude_llm_config = {
             "config_list": [{
