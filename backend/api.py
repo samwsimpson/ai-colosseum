@@ -1757,7 +1757,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                     # Guard: show a short message instead of pure silence
                     if not out_text:
-                        out_text = "…(no content returned; please ask again or address me by name)"                        
+                        out_text = "…(no content returned; please ask again or address me by name)"              
+
+                    # Make sure the value we return up the stack is text, not a raw dict
+                    result = out_text
 
                     # NEW: proactively forward the assistant's reply to the browser
                     if out_text:
@@ -1783,7 +1786,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     except Exception:
                         pass
 
+                # Final safety: never return a non-string or empty payload
+                if not isinstance(result, str):
+                    try:
+                        result = (result.get("content") or result.get("text") or "").strip()
+                    except Exception:
+                        result = ""
+
+                if not result:
+                    result = "…(no content returned; please ask again or address me by name)"
+
                 return result
+
 
         class WebSocketUserProxyAgent(autogen.UserProxyAgent):
             """
