@@ -599,7 +599,7 @@ const loadConversations = useCallback(async () => {
         const data: ConversationListResponse = await res.json();
 
         // Flatten various response shapes
-        const raw: ConversationListItem[] =
+        const raw: unknown[] =
             Array.isArray(data)
                 ? data
                 : Array.isArray((data as { items?: ConversationListItem[] })?.items)
@@ -636,26 +636,26 @@ const loadConversations = useCallback(async () => {
         const getStr = (o: Loose, k: string): string | null =>
         typeof o[k] === 'string' ? (o[k] as string) : null;
 
-        const normalized: ConversationListItem[] = raw
-        .filter((c: Loose) => c?.id != null)
-        .sort((a: Loose, b: Loose) => pickTimestampMs(b) - pickTimestampMs(a))
-        .map((c: Loose) => {
-            const updated =
-            getStr(c, 'updated_at') ??
-            getStr(c, 'updatedAt') ??
-            getStr(c, 'last_updated') ??
-            undefined; // coerce null -> undefined
+        const normalized: ConversationListItem[] = (raw as Loose[])
+            .filter((c) => c?.id != null)
+            .sort((a, b) => pickTimestampMs(b) - pickTimestampMs(a))
+            .map((c) => {
+                const updated =
+                getStr(c, 'updated_at') ??
+                getStr(c, 'updatedAt') ??
+                getStr(c, 'last_updated') ??
+                undefined; // coerce null -> undefined
 
-            const created =
-            getStr(c, 'created_at') ??
-            getStr(c, 'createdAt') ??
-            null; // allow null
+                const created =
+                getStr(c, 'created_at') ??
+                getStr(c, 'createdAt') ??
+                null; // allow null
 
-            return {
-            id: String(c.id),
-            title: (typeof c.title === 'string' && c.title) ? c.title : 'Untitled',
-            updated_at: updated,
-            created_at: created,
+                return {
+                id: String(c.id),
+                title: (typeof c.title === 'string' && c.title) ? c.title : 'Untitled',
+                updated_at: updated,
+                created_at: created,
             };
         });
 
