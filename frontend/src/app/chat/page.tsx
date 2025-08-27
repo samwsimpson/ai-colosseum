@@ -1268,9 +1268,11 @@ const loadConversations = useCallback(async () => {
 
 
     return (
-    <div className="flex h-screen w-full bg-gray-950 text-white font-sans antialiased">
+    <div className="flex h-screen w-full bg-gray-950 text-white font-sans antialiased pt-[72px]">
+
         {/* LEFT SIDEBAR */}
-        <aside className="hidden md:flex md:flex-col fixed left-0 top-[72px] bottom-0 w-72 border-r border-gray-800 bg-gray-900 z-20">
+        <aside className="hidden md:flex md:flex-col fixed left-0 top-0 bottom-0 w-72 border-r border-gray-800 bg-gray-900 z-20">
+
 
 
 
@@ -1404,8 +1406,8 @@ const loadConversations = useCallback(async () => {
         <div className="flex-1 flex flex-col md:pl-72 md:pr-72 min-w-0">
         <main
             ref={chatContainerRef}
-            className="flex-1 overflow-y-auto pt-[72px] bg-gray-900 custom-scrollbar"
-            style={{ paddingBottom: composerHeight + 24 }}  // extra 24px breathing room
+            className="flex-1 overflow-y-auto bg-gray-900 custom-scrollbar"
+            style={{ paddingBottom: composerHeight + 24 }}
         >
             <div className="max-w-4xl mx-auto flex flex-col space-y-4 md:space-y-6">
             {/* Conditional rendering for the initial message */}
@@ -1629,7 +1631,8 @@ const loadConversations = useCallback(async () => {
 
         </div>
 {/* RIGHT SIDEBAR — Uploaded files (always visible) */}
-<aside className="hidden md:flex md:flex-col fixed right-0 top-[72px] bottom-0 w-72 border-l border-gray-800 bg-gray-900 z-20">
+<aside className="hidden md:flex md:flex-col fixed right-0 top-0 bottom-0 w-72 border-l border-gray-800 bg-gray-900 z-20">
+
 
   <div className="p-4 border-b border-gray-800">
     <div className="font-semibold">Uploads</div>
