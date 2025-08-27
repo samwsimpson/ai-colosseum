@@ -2319,8 +2319,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             pass
 
 if __name__ == "__main__":
-import uvicorn, os
-uvicorn.run("api:app",
+    import uvicorn, os
+    uvicorn.run("api:app",
             host="0.0.0.0",
             port=int(os.getenv("PORT", "8080")),
             lifespan="on",
