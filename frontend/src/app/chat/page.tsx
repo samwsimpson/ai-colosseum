@@ -1270,8 +1270,7 @@ const loadConversations = useCallback(async () => {
     return (
     <div className="flex h-screen w-full bg-gray-950 text-white font-sans antialiased">
         {/* LEFT SIDEBAR */}
-        <aside className="hidden md:flex md:flex-col fixed right-0 top-[72px] bottom-0 w-72 border-l border-gray-800 bg-gray-900 z-20">
-
+        <aside className="hidden md:flex md:flex-col fixed left-0 top-[72px] bottom-0 w-72 border-r border-gray-800 bg-gray-900 z-20">
 
 
 
@@ -1630,7 +1629,8 @@ const loadConversations = useCallback(async () => {
 
         </div>
 {/* RIGHT SIDEBAR — Uploaded files (always visible) */}
-<aside className="hidden md:flex fixed right-0 top-[72px] bottom-0 w-72 border-l border-gray-800 bg-gray-900 z-20">
+<aside className="hidden md:flex md:flex-col fixed right-0 top-[72px] bottom-0 w-72 border-l border-gray-800 bg-gray-900 z-20">
+
   <div className="p-4 border-b border-gray-800">
     <div className="font-semibold">Uploads</div>
   </div>
@@ -1639,7 +1639,8 @@ const loadConversations = useCallback(async () => {
     {uploadsList.length === 0 ? (
       <div className="p-4 text-sm text-gray-400">No uploads yet</div>
     ) : (
-      <ul className="w-full divide-y divide-gray-800">
+      <ul className="w-full divide-y divide-gray-800 flex flex-col">
+
         {uploadsList.map((u, i) => (
           <li key={`${u.id}-${i}`} className="px-3 py-2">
             <div className="flex items-center justify-between gap-3">
