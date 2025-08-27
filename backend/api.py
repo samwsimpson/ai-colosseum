@@ -25,6 +25,8 @@ from google.oauth2.id_token import verify_oauth2_token
 from google.cloud.firestore_v1 import SERVER_TIMESTAMP, ArrayUnion, Increment
 from google.cloud import firestore  # for Query.DESCENDING
 from google.cloud import storage
+from starlette.websockets import WebSocketState
+
 
 from werkzeug.utils import secure_filename
 import mimetypes
@@ -1864,15 +1866,20 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 # Keep base behavior for Autogen bookkeeping
                 return await super().a_receive(message, sender=sender, request_reply=request_reply, silent=silent)
 
+  
             async def a_generate_reply(
                 self,
                 messages: List[Dict[str, Any]] | None = None,
                 sender: autogen.ConversableAgent | None = None,
                 **kwargs,
             ) -> Union[str, Dict, None]:
-                # Block until a user message is received
                 user_input = await self._user_input_queue.get()
+                if isinstance(user_input, dict):
+                    # Already a ChatCompletion-style message (e.g., with image_url parts)
+                    return user_input
                 return {"content": user_input, "role": "user", "name": self.name}
+
+
 
             async def a_inject_user_message(self, message: str):
                 await self._user_input_queue.put(message)        
@@ -2159,15 +2166,28 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # Kick off or feed the manager loop
                     if chat_task is None or chat_task.done():
                         # (Re)start the manager loop in the background
-                        initial_payload = openai_parts if image_urls else full_user_content
+                        initial_payload = (
+                            {"role": "user", "content": openai_parts}
+                            if image_urls
+                            else full_user_content
+                        )                        
+
                         chat_task = asyncio.create_task(
                             proxy.a_initiate_chat(manager, message=initial_payload)
                         )
 
+
                     else:
                         # Feed subsequent user turns into the running loop
-                        next_payload = openai_parts if image_urls else full_user_content
+                        next_payload = (
+                            {"role": "user", "content": openai_parts}
+                            if image_urls
+                            else full_user_content
+                        )                        
+
                         await proxy.a_inject_user_message(next_payload)
+
+
 
                 except WebSocketDisconnect:
                     print("main_chat_loop: WebSocket disconnected.")
@@ -2230,7 +2250,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     await maybe_refresh_summary(conv_ref)
 
         
-        from starlette.websockets import WebSocketState  # add this import at the top of file if not present
+        
 
         async def keepalive_task(ws: WebSocket):
             try:
