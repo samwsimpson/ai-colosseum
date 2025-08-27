@@ -1423,47 +1423,7 @@ const loadConversations = useCallback(async () => {
             )}
 
             {chatHistory.length > 0 && (
-                <>
-                    {/* Uploaded files panel */}
-                    {uploadsList.length > 0 && (
-                    <div className="mb-4 rounded-xl border border-gray-700/60 bg-gray-900/50 p-3">
-                        <div className="flex items-center justify-between">
-                        <div className="text-sm font-semibold">
-                            Uploaded files <span className="text-gray-400">({uploadsList.length})</span>
-                        </div>
-                        <button
-                            type="button"
-                            onClick={() => setShowUploads(s => !s)}
-                            className="text-xs underline"
-                        >
-                            {showUploads ? 'hide' : 'show'}
-                        </button>
-                        </div>
-
-                        {showUploads && (
-                        <ul className="mt-2 max-h-48 overflow-y-auto space-y-1 text-sm">
-                            {uploadsList.map((u, i) => (
-                            <li key={`${u.id}-${i}`} className="flex items-center justify-between gap-3">
-                                <a
-                                href={u.signed_url || '#'}
-                                target="_blank"
-                                rel="noreferrer"
-                                onClick={(e) => { if (!u.signed_url) e.preventDefault(); }}
-                                className="truncate hover:underline"
-                                title={u.name}
-                                >
-                                {u.name}
-                                </a>
-                                <span className="shrink-0 text-xs text-gray-400">
-                                {u.created_at ? new Date(u.created_at).toLocaleString() : ''}
-                                {typeof u.size === 'number' ? ` • ${formatBytes(u.size)}` : ''}
-                                </span>
-                            </li>
-                            ))}
-                        </ul>
-                        )}
-                    </div>
-                    )}
+                <>                    
 
                     {chatHistory.map((msg, index) => {
                     const isUser =
@@ -1494,7 +1454,7 @@ const loadConversations = useCallback(async () => {
                     );
                     })}
                 </>
-                )}
+            )}
 
 
             <div className="flex flex-col space-y-2">
@@ -1551,12 +1511,58 @@ const loadConversations = useCallback(async () => {
             <div ref={chatEndRef} />
             </div>
         </main>
+        {/* RIGHT SIDEBAR — Uploaded files */}
+        <aside className="hidden md:flex flex-col w-72 border-l border-gray-800 bg-gray-900 pt-[72px] z-[60]">
+        <div className="p-4 border-b border-gray-800 flex items-center justify-between">
+            <div className="font-semibold">Uploads</div>
+            <button
+            type="button"
+            onClick={() => setShowUploads(s => !s)}
+            className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+            title={showUploads ? "Hide files" : "Show files"}
+            >
+            {showUploads ? 'Hide' : 'Show'}
+            </button>
+        </div>
 
+        <div className="flex-1 min-w-0 overflow-y-auto custom-scrollbar">
+            {uploadsList.length === 0 ? (
+            <div className="p-4 text-sm text-gray-400">No uploads yet</div>
+            ) : (
+            showUploads && (
+                <ul className="w-full divide-y divide-gray-800">
+                {uploadsList.map((u, i) => (
+                    <li key={`${u.id}-${i}`} className="px-3 py-2">
+                    <div className="flex items-center justify-between gap-3">
+                        <a
+                        href={u.signed_url || '#'}
+                        target="_blank"
+                        rel="noreferrer"
+                        onClick={(e) => { if (!u.signed_url) e.preventDefault(); }}
+                        className="truncate hover:underline"
+                        title={u.name}
+                        >
+                        {u.name}
+                        </a>
+                    </div>
+                    <div className="mt-1 text-[11px] text-gray-400">
+                        {(u.created_at ? new Date(u.created_at).toLocaleString() : '')}
+                        {typeof u.size === 'number' ? ` • ${formatBytes(u.size)}` : ''}
+                        {u.agent ? ` • by ${u.agent}` : (u.from ? ` • ${u.from}` : '')}
+                    </div>
+                    </li>
+                ))}
+                </ul>
+            )
+            )}
+        </div>
+        </aside>
+               
         {/* INPUT FORM — fixed on mobile, static on desktop so it doesn't cover the sidebar */}
 {/* ===== Composer (fixed footer) ===== */}
 <div
     ref={composerRef}
-    className="fixed bottom-0 left-0 right-0 md:left-72 z-50 bg-gray-900 border-t border-gray-800"
+    className="fixed bottom-0 left-0 right-0 md:left-72 md:right-72 z-50 bg-gray-900 border-t border-gray-800"
 >
   {/* Summary banner (if you have one) can live above the form if you like */}
   {loadedSummary && (
