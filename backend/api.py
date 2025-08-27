@@ -152,6 +152,22 @@ async def health_check():
 @app.get("/")
 async def root_ok():
     return {"status": "ok"}
+@app.get("/_ah/health")
+async def gclb_health():
+    return {"status": "ok"}
+
+@app.head("/")
+async def root_head():
+    return Response(status_code=200)
+
+@app.head("/health")
+async def health_head():
+    return Response(status_code=200)
+
+@app.head("/_ah/health")
+async def gclb_health_head():
+    return Response(status_code=200)
+
 # CORS: only enable in local/dev; prod relies on Google Load Balancer
 ENABLE_APP_CORS = os.getenv("ENABLE_APP_CORS", "0")  # "1" to enable locally
 
@@ -332,33 +348,29 @@ async def save_message(
 
 @app.on_event("startup")
 async def startup_event():
-    print("STARTUP EVENT: Initializing Firestore...")
-    try:
-        subscriptions_ref = db.collection('subscriptions')
-        print("STARTUP EVENT: subscriptions_ref created")
-        plans = {
-            'Free': {'monthly_limit': 5, 'price_id': 'free_price_id_placeholder'},
-            'Starter': {'monthly_limit': 25, 'price_id': 'starter_price_id_placeholder'},
-            'Pro': {'monthly_limit': 200, 'price_id': 'pro_price_id_placeholder'},
-            'Enterprise': {'monthly_limit': None, 'price_id': 'enterprise_price_id_placeholder'},
-        }
-        print("STARTUP EVENT: Plans defined")
-        
-        for name, data in plans.items():
-            print(f"STARTUP EVENT: Checking for subscription plan: {name}")
-            doc_ref = subscriptions_ref.document(name)
-            print(f"STARTUP EVENT: doc_ref for {name} created")
-            doc = await doc_ref.get()
-            print(f"STARTUP EVENT: doc.exists for {name}: {doc.exists}")
-            if not doc.exists:
-                print(f"STARTUP EVENT: Plan '{name}' not found. Creating it.")
-                await doc_ref.set(data)
-                print(f"Created subscription plan: {name}")
-            else:
-                print(f"Plan '{name}' already exists.")
-        print("STARTUP EVENT: Firestore initialization complete.")
-    except Exception as e:
-        print(f"STARTUP EVENT: Failed to initialize Firestore collections: {e}")
+    print("STARTUP EVENT: scheduling Firestore init in background...")
+
+    async def _init_subscriptions():
+        try:
+            subscriptions_ref = db.collection('subscriptions')
+            plans = {
+                'Free':       {'monthly_limit': 5,   'price_id': 'free_price_id_placeholder'},
+                'Starter':    {'monthly_limit': 25,  'price_id': 'starter_price_id_placeholder'},
+                'Pro':        {'monthly_limit': 200, 'price_id': 'pro_price_id_placeholder'},
+                'Enterprise': {'monthly_limit': None,'price_id': 'enterprise_price_id_placeholder'},
+            }
+            for name, data in plans.items():
+                doc_ref = subscriptions_ref.document(name)
+                doc = await doc_ref.get()
+                if not doc.exists:
+                    await doc_ref.set(data)
+            print("STARTUP EVENT: Firestore init done.")
+        except Exception as e:
+            print("STARTUP EVENT: Firestore init failed:", e)
+
+    # do not await; let the server become 'ready' immediately
+    asyncio.create_task(_init_subscriptions())
+
 
 @app.get("/api/users/me")
 async def read_users_me(current_user: dict = Depends(get_current_user)):
@@ -2305,3 +2317,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             await websocket.send_json({"sender": "System", "text": f"Error: {e}"})
         except WebSocketDisconnect:
             pass
+
+if __name__ == "__main__":
+import uvicorn, os
+uvicorn.run("api:app",
+            host="0.0.0.0",
+            port=int(os.getenv("PORT", "8080")),
+            lifespan="on",
+            log_level="info")
