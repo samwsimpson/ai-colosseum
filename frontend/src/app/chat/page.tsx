@@ -1270,7 +1270,8 @@ const loadConversations = useCallback(async () => {
     return (
     <div className="flex h-screen w-full bg-gray-950 text-white font-sans antialiased">
         {/* LEFT SIDEBAR */}
-        <aside className="hidden md:flex flex-col w-72 border-r border-gray-800 bg-gray-900 pt-[72px] z-[60]">
+        <aside className="hidden md:flex fixed left-0 top-[72px] bottom-0 w-72 border-r border-gray-800 bg-gray-900 z-30">
+
 
         <div className="p-4 border-b border-gray-800 flex items-center justify-between">
         <div className="font-semibold">Conversations</div>
@@ -1399,7 +1400,7 @@ const loadConversations = useCallback(async () => {
         </aside>
 
         {/* MAIN COLUMN (YOUR EXISTING CHAT UI, UNCHANGED) */}
-        <div className="flex-1 flex flex-col min-w-0">
+        <div className="flex-1 flex flex-col md:pr-72 min-w-0">
         <main
             ref={chatContainerRef}
             className="flex-1 overflow-y-auto pt-[72px] bg-gray-900 custom-scrollbar"
@@ -1627,7 +1628,7 @@ const loadConversations = useCallback(async () => {
 
         </div>
 {/* RIGHT SIDEBAR — Uploaded files (always visible) */}
-<aside className="hidden md:flex flex-col w-72 border-l border-gray-800 bg-gray-900 pt-[72px] z-[60]">
+<aside className="hidden md:flex fixed right-0 top-[72px] bottom-0 w-72 border-l border-gray-800 bg-gray-900 z-30">
   <div className="p-4 border-b border-gray-800">
     <div className="font-semibold">Uploads</div>
   </div>
