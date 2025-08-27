@@ -1399,7 +1399,7 @@ const loadConversations = useCallback(async () => {
         </aside>
 
         {/* MAIN COLUMN (YOUR EXISTING CHAT UI, UNCHANGED) */}
-        <div className="flex-1 flex flex-col">
+        <div className="flex-1 flex flex-col min-w-0">
         <main
             ref={chatContainerRef}
             className="flex-1 overflow-y-auto pt-[72px] bg-gray-900 custom-scrollbar"
@@ -1622,6 +1622,10 @@ const loadConversations = useCallback(async () => {
 </form>
 </div>
 {/* ===== /Composer ===== */}
+
+
+
+        </div>
 {/* RIGHT SIDEBAR — Uploaded files (always visible) */}
 <aside className="hidden md:flex flex-col w-72 border-l border-gray-800 bg-gray-900 pt-[72px] z-[60]">
   <div className="p-4 border-b border-gray-800">
@@ -1657,10 +1661,7 @@ const loadConversations = useCallback(async () => {
       </ul>
     )}
   </div>
-</aside>
-
-
-        </div>
+</aside>        
         <style jsx global>{`
         /* Works on Firefox */
         .custom-scrollbar {
