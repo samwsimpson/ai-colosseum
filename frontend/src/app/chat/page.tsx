@@ -639,12 +639,26 @@ const loadConversations = useCallback(async () => {
         const normalized: ConversationListItem[] = raw
         .filter((c: Loose) => c?.id != null)
         .sort((a: Loose, b: Loose) => pickTimestampMs(b) - pickTimestampMs(a))
-        .map((c: Loose) => ({
+        .map((c: Loose) => {
+            const updated =
+            getStr(c, 'updated_at') ??
+            getStr(c, 'updatedAt') ??
+            getStr(c, 'last_updated') ??
+            undefined; // coerce null -> undefined
+
+            const created =
+            getStr(c, 'created_at') ??
+            getStr(c, 'createdAt') ??
+            null; // allow null
+
+            return {
             id: String(c.id),
             title: (typeof c.title === 'string' && c.title) ? c.title : 'Untitled',
-            updated_at: getStr(c, 'updated_at') ?? getStr(c, 'updatedAt') ?? getStr(c, 'last_updated'),
-            created_at: getStr(c, 'created_at') ?? getStr(c, 'createdAt'),
-        }));
+            updated_at: updated,
+            created_at: created,
+            };
+        });
+
 
         // De-duplicate by id
         const seen: Record<string, true> = {};
