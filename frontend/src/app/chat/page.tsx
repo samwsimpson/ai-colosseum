@@ -152,6 +152,18 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
 
 type AgentName = 'ChatGPT' | 'Claude' | 'Gemini' | 'Mistral';
 const ALLOWED_AGENTS: AgentName[] = ['ChatGPT', 'Claude', 'Gemini', 'Mistral'];
+interface UploadListItem {
+  id: string;
+  name: string;
+  mime: string;
+  size?: number | null;
+  signed_url?: string;
+  created_at?: string | null;
+  ts?: number;                      // numeric timestamp for sorting
+  from: 'user' | 'assistant';
+  agent?: AgentName;
+}
+
 function uid() {
     return Math.random().toString(36).substring(2, 10);
 }
@@ -197,6 +209,8 @@ const pathname = usePathname();
 // === State for the UI and chat logic ===
 const [message, setMessage] = useState<string>('');
 const [chatHistory, setChatHistory] = useState<Message[]>([]);
+const [uploadsList, setUploadsList] = useState<UploadListItem[]>([]);
+const [showUploads, setShowUploads] = useState<boolean>(false);
 const [isWsOpen, setIsWsOpen] = useState<boolean>(false);
 const [loadedSummary, setLoadedSummary] = useState<string | null>(null);
 const [showSummary, setShowSummary] = useState(false);
@@ -215,6 +229,73 @@ const [isTyping, setIsTyping] = useState<TypingState>({
     Gemini: false,
     Mistral: false,
 });
+// Extract any upload/file metadata from a raw message payload (server formats vary)
+const extractUploadsFromRawMessage = useCallback((raw: unknown): UploadListItem[] => {
+  const out: UploadListItem[] = [];
+  if (!raw || typeof raw !== "object") return out;
+
+  const r = raw as Record<string, unknown>;
+  const senderStr = typeof r.sender === "string" ? r.sender : undefined;
+  const agent = senderStr && (ALLOWED_AGENTS as string[]).includes(senderStr) ? (senderStr as AgentName) : undefined;
+  const from: "user" | "assistant" = agent ? "assistant" : (r.role === "user" ? "user" : "assistant");
+
+  const arrays: unknown[] = [];
+  const take = (v: unknown) => { if (Array.isArray(v)) arrays.push(...v); };
+
+  take(r.file_metadata_list);
+  take(r.files);
+  take(r.attachments);
+  take(r.uploads);
+  take(r.file_metadata);
+
+  const inferNameFromUrl = (s: string): string => {
+    try {
+      const url = new URL(s, typeof window !== "undefined" ? window.location.href : "https://example.com/");
+      const last = url.pathname.split("/").pop();
+      return last && last.trim() ? last : "file";
+    } catch {
+      const parts = s.split("/");
+      return parts[parts.length - 1] || "file";
+    }
+  };
+
+  const toItem = (v: unknown): UploadListItem | null => {
+    if (!v || typeof v !== "object") return null;
+    const o = v as Record<string, unknown>;
+
+    const signed =
+      (typeof o.signed_url === "string" && o.signed_url) ||
+      (typeof o.url === "string" && o.url) ||
+      undefined;
+
+    const name =
+      (typeof o.name === "string" && o.name) ||
+      (typeof o.filename === "string" && o.filename) ||
+      (signed ? inferNameFromUrl(signed) : "file");
+
+    const mime =
+      (typeof o.mime === "string" && o.mime) ||
+      (typeof o.content_type === "string" && o.content_type) ||
+      "application/octet-stream";
+
+    const size = typeof o.size === "number" ? o.size : null;
+    const created_at = typeof o.created_at === "string" ? o.created_at : null;
+    const id =
+      (typeof o.id === "string" && o.id) ||
+      signed ||
+      name ||
+      crypto.randomUUID();
+
+    const ts = created_at ? Date.parse(created_at) : Date.now();
+    return { id, name, mime, size, signed_url: signed, created_at, ts, from, agent };
+  };
+
+  for (const v of arrays) {
+    const i = toItem(v);
+    if (i) out.push(i);
+  }
+  return out;
+}, []);
 
 // === Refs for DOM elements and internal state ===
 const chatContainerRef = useRef<HTMLDivElement | null>(null);
@@ -237,6 +318,44 @@ const reconnectBackoffRef = useRef(1000); // start at 1s, exponential up to 15s
 const refreshInFlight = useRef<Promise<void> | null>(null);
 const lastRefreshAt = useRef<number>(0);
 const fileInputRef = useRef<HTMLInputElement>(null);
+// Normalize a wide variety of LLM message payloads into a plain string
+function normalizeToPlainText(input: unknown): string {
+  if (input == null) return "";
+
+  // If the whole message object is passed, look for common fields
+  if (typeof input === "object") {
+    const obj = input as any;
+
+    // If { text } present
+    if (typeof obj.text === "string") return obj.text;
+
+    // If { message } present
+    if (typeof obj.message === "string") return obj.message;
+
+    // If { content } present, can be string or array (OpenAI-style)
+    if (typeof obj.content === "string") return obj.content;
+    if (Array.isArray(obj.content)) {
+      const parts = obj.content
+        .map((p: any) => {
+          if (typeof p === "string") return p;
+          if (p && typeof p.text === "string") return p.text;
+          if (p && p.type === "text" && p.text) return p.text;
+          return "";
+        })
+        .filter(Boolean);
+      return parts.join(" ").trim();
+    }
+
+    // Some backends use { body }
+    if (typeof obj.body === "string") return obj.body;
+  }
+
+  // If it’s already a string
+  if (typeof input === "string") return input;
+
+  return "";
+}
+
 // 1) single-responsibility upload helper: returns the uploaded attachment but DOES NOT set state
 
 const uploadOne = async (file: File): Promise<UploadedAttachment> => {
@@ -408,6 +527,28 @@ const removePending = (id: string) => setPendingFiles(prev => prev.filter(p => p
             const text = toText(m.content ?? m.text ?? m.message ?? m.body ?? '');
             return { sender, model, text };
             });
+
+            // Seed the uploads list from any historical messages that contain files
+            const seedUploads: UploadListItem[] = [];
+            for (const m of items) {
+            const got = extractUploadsFromRawMessage(m);
+            if (got.length) seedUploads.push(...got);
+            }
+            if (seedUploads.length) {
+            setUploadsList(prev => {
+                const seen = new Set(prev.map(u => `${u.id}|${u.signed_url ?? ""}`));
+                const merged = [...prev];
+                for (const u of seedUploads) {
+                const key = `${u.id}|${u.signed_url ?? ""}`;
+                if (!seen.has(key)) {
+                    merged.push(u);
+                    seen.add(key);
+                }
+                }
+                merged.sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0));
+                return merged;
+            });
+            }
 
             setChatHistory(prev => (prev.length === 0 ? normalized : prev));
         } catch {
@@ -699,6 +840,23 @@ const loadConversations = useCallback(async () => {
 
 
             setMessage('');
+            if (pendingFiles.length > 0) {
+                const nowIso = new Date().toISOString();
+                setUploadsList(prev => [
+                    ...prev,
+                    ...pendingFiles.map(f => ({
+                    id: f.id,
+                    name: f.name,
+                    mime: f.mime,
+                    size: f.size,
+                    signed_url: f.signed_url,
+                    created_at: nowIso,
+                    ts: Date.now(),
+                    from: 'user' as const,
+                    })),
+                ].sort((a, b) => (b.ts || 0) - (a.ts || 0)));
+            }
+
             setPendingFiles([]);
 
             if (textareaRef.current) {
@@ -869,6 +1027,8 @@ const loadConversations = useCallback(async () => {
         u.protocol = (u.protocol === 'https:' || u.protocol === 'wss:') ? 'wss:' : 'ws:';
         u.pathname = '/ws/colosseum-chat';
         
+        let cleanup: (() => void) | null = null;
+
         // Use a function that gets the token, and if expired, refreshes it
         async function getTokenForWs() {
             const token = userToken;
@@ -894,8 +1054,8 @@ const loadConversations = useCallback(async () => {
                     return null;
                 }
             } catch {
-            // If we can’t decode, treat as unusable and don’t connect
-            return null;
+                // If we can't decode, still try the token — the server will enforce validity.
+                return token;
             }
             return token;
         }
@@ -919,8 +1079,8 @@ const loadConversations = useCallback(async () => {
                     reconnectRef.current.tries = 0;
                     if (reconnectRef.current.timer) {
                         window.clearTimeout(reconnectRef.current.timer);
-                        reconnectRef.current.timer = null;
                     }
+                    reconnectRef.current.timer = null;
             
                     setIsWsOpen(true);
                     loadConversations();
@@ -947,6 +1107,15 @@ const loadConversations = useCallback(async () => {
                     let msg: ServerMessage;
                     try { msg = JSON.parse(event.data); }
                     catch { return; }
+
+                    // Normalize a sender string we can trust for typing + message routing
+                    const sender =
+                    typeof (msg as any).sender === 'string' && (msg as any).sender.trim()
+                        ? (msg as any).sender.trim()
+                        : typeof (msg as any).model === 'string'
+                        ? (msg as any).model.trim()
+                        : '';
+
 
                     if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
                         const id = msg.id;
@@ -985,18 +1154,42 @@ const loadConversations = useCallback(async () => {
                         return;
                     }
                     if (msg.type === 'ping' || msg.type === 'pong') return;
-                    const sender = isNonEmptyString(msg.sender) ? msg.sender : null;
-
                     if (sender && typeof msg.typing === 'boolean' && ALLOWED_AGENTS.includes(sender as AgentName)) {
                         setTypingWithDelayAndTTL(sender as AgentName, msg.typing === true);
                         return;
                     }
 
-                    if (sender && typeof msg.text === 'string' && ALLOWED_AGENTS.includes(sender as AgentName)) {
+                    // Accept multiple server payload shapes, not just `text`
+                    const unifiedText = normalizeToPlainText(
+                        (msg as any).text ?? (msg as any).content ?? (msg as any).message ?? msg
+                    );
+
+                    if (sender && ALLOWED_AGENTS.includes(sender as AgentName) && unifiedText.trim().length > 0) {
                         setTypingWithDelayAndTTL(sender as AgentName, false);
-                        addMessageToChat({ sender, text: msg.text });
+                        addMessageToChat({ sender, text: unifiedText });
+
+                        // Also capture any uploads attached to this payload
+                        const got = extractUploadsFromRawMessage(msg);
+                        if (got.length) {
+                            setUploadsList(prev => {
+                            const seen = new Set(prev.map(u => `${u.id}|${u.signed_url ?? ""}`));
+                            const merged = [...prev];
+                            for (const u of got) {
+                                const item = { ...u, from: "assistant" as const, agent: sender as AgentName };
+                                const key = `${item.id}|${item.signed_url ?? ""}`;
+                                if (!seen.has(key)) {
+                                merged.push(item);
+                                seen.add(key);
+                                }
+                            }
+                            merged.sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0));
+                            return merged;
+                            });
+                        }
                         return;
                     }
+
+
                 },
                 onclose: (ev: CloseEvent) => {
                     resetWebSocket();
@@ -1015,16 +1208,18 @@ const loadConversations = useCallback(async () => {
                     resetWebSocket();
                 }
             });
-            return () => {
+            cleanup = () => {
                 resetWebSocket();
                 // Optional: zero-out backoff so a fresh mount starts fresh
                 reconnectRef.current.tries = 0;
                 if (reconnectRef.current.timer) {
                     window.clearTimeout(reconnectRef.current.timer);
-                    reconnectRef.current.timer = undefined;
+                    reconnectRef.current.timer = null;
                 }
-            };            
+            };           
         });
+        return () => { if (cleanup) cleanup(); };
+
     }, [userToken, userName, addMessageToChat, wsReconnectNonce, conversationId, hydrateConversation, loadConversations, setTypingWithDelayAndTTL]);
 
 
@@ -1207,14 +1402,55 @@ const loadConversations = useCallback(async () => {
                 )
             )}
 
-            {chatHistory.length > 0 &&
-                chatHistory.map((msg, index) => {
+            {chatHistory.length > 0 && (
+                <>
+                    {/* Uploaded files panel */}
+                    {uploadsList.length > 0 && (
+                    <div className="mb-4 rounded-xl border border-gray-700/60 bg-gray-900/50 p-3">
+                        <div className="flex items-center justify-between">
+                        <div className="text-sm font-semibold">
+                            Uploaded files <span className="text-gray-400">({uploadsList.length})</span>
+                        </div>
+                        <button
+                            type="button"
+                            onClick={() => setShowUploads(s => !s)}
+                            className="text-xs underline"
+                        >
+                            {showUploads ? 'hide' : 'show'}
+                        </button>
+                        </div>
+
+                        {showUploads && (
+                        <ul className="mt-2 max-h-48 overflow-y-auto space-y-1 text-sm">
+                            {uploadsList.map((u, i) => (
+                            <li key={`${u.id}-${i}`} className="flex items-center justify-between gap-3">
+                                <a
+                                href={u.signed_url || '#'}
+                                target="_blank"
+                                rel="noreferrer"
+                                onClick={(e) => { if (!u.signed_url) e.preventDefault(); }}
+                                className="truncate hover:underline"
+                                title={u.name}
+                                >
+                                {u.name}
+                                </a>
+                                <span className="shrink-0 text-xs text-gray-400">
+                                {u.created_at ? new Date(u.created_at).toLocaleString() : ''}
+                                {typeof u.size === 'number' ? ` • ${formatBytes(u.size)}` : ''}
+                                </span>
+                            </li>
+                            ))}
+                        </ul>
+                        )}
+                    </div>
+                    )}
+
+                    {chatHistory.map((msg, index) => {
                     const isUser =
-                    (msg.sender || '').trim().toLowerCase() === (userName || 'You').trim().toLowerCase();
+                        (msg.sender || '').trim().toLowerCase() === (userName || 'You').trim().toLowerCase();
                     return (
-                    <div key={index} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
-                        <div
-                        className={`relative p-3 md:p-4 max-w-[80%] text-white rounded-2xl md:rounded-3xl shadow-lg transition-all duration-200 ease-in-out transform hover:scale-[1.01] ${
+                        <div key={index} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
+                        <div className={`relative p-3 md:p-4 max-w-[80%] text-white rounded-2xl md:rounded-3xl shadow-lg transition-all duration-200 ease-in-out transform hover:scale-[1.01] ${
                             isUser
                             ? 'bg-blue-600 text-white rounded-tr-none'
                             : msg.sender === 'Claude'
@@ -1224,20 +1460,21 @@ const loadConversations = useCallback(async () => {
                             : msg.sender === 'Gemini'
                             ? 'bg-gray-600 text-white rounded-bl-none'
                             : msg.sender === 'Mistral'
-                            ? 'bg-gray-500 text-white rounded-bl-none'
+                            ? 'bg-green-800 text-white rounded-bl-none'
                             : 'bg-gray-700 text-gray-200 rounded-bl-none'
-                        }`}
-                        >
-                        {!isUser && (
+                        }`}>
+                            {!isUser && (
                             <div className="text-xs text-gray-300 mb-1 font-semibold">{msg.sender}</div>
-                        )}
-                        <pre className="whitespace-pre-wrap font-sans text-sm md:text-base leading-relaxed">
+                            )}
+                            <pre className="whitespace-pre-wrap font-sans text-sm md:text-base leading-relaxed">
                             {msg.text}
-                        </pre>
+                            </pre>
                         </div>
-                    </div>
+                        </div>
                     );
-                })}
+                    })}
+                </>
+                )}
 
 
             <div className="flex flex-col space-y-2">
