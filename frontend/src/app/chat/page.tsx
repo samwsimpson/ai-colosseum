@@ -1113,12 +1113,12 @@ const loadConversations = useCallback(async () => {
                     catch { return; }
 
                     // Normalize a sender string we can trust for typing + message routing
-                    const sender =
                     const m = msg as Record<string, unknown>;
                     const sender =
-                        (typeof m.sender === 'string' && m.sender.trim()) ? m.sender.trim()
+                    (typeof m.sender === 'string' && m.sender.trim()) ? m.sender.trim()
                         : (typeof m.model === 'string' && m.model.trim()) ? m.model.trim()
                         : '';
+
 
 
 
