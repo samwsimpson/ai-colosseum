@@ -2074,6 +2074,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                         full_user_content = (user_message + "\n\n" + "\n\n".join(blocks)).strip()
 
+                        # Build OpenAI vision parts if any images are attached (always define)
+                        image_urls = [
+                            (f.get("url") or "")
+                            for f in (files or [])
+                            if str(f.get("content_type") or "").startswith("image/") and (f.get("url") or "")
+                        ]
+
+                        openai_parts = [{"type": "text", "text": full_user_content}]
+                        for u in image_urls:
+                            openai_parts.append({"type": "image_url", "image_url": {"url": u}})
+
+
                         # Save + echo the user turn exactly once (works for text-only and files)
                         await save_message(
                             conv_ref,
@@ -2147,12 +2159,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # Kick off or feed the manager loop
                     if chat_task is None or chat_task.done():
                         # (Re)start the manager loop in the background
-                        chat_task = asyncio.create_task(proxy.a_initiate_chat(manager, message=full_user_content))
+                        initial_payload = openai_parts if image_urls else full_user_content
+                        chat_task = asyncio.create_task(
+                            proxy.a_initiate_chat(manager, message=initial_payload)
+                        )
+
                     else:
                         # Feed subsequent user turns into the running loop
-                        await proxy.a_inject_user_message(full_user_content)
-
-
+                        next_payload = openai_parts if image_urls else full_user_content
+                        await proxy.a_inject_user_message(next_payload)
 
                 except WebSocketDisconnect:
                     print("main_chat_loop: WebSocket disconnected.")
