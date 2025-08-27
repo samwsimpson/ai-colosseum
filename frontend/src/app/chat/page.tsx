@@ -320,41 +320,48 @@ const lastRefreshAt = useRef<number>(0);
 const fileInputRef = useRef<HTMLInputElement>(null);
 // Normalize a wide variety of LLM message payloads into a plain string
 function normalizeToPlainText(input: unknown): string {
-  if (input == null) return "";
+  if (input == null) return '';
 
-  // If the whole message object is passed, look for common fields
-  if (typeof input === "object") {
-    const obj = input as any;
+  if (typeof input === 'object') {
+    const obj = input as Record<string, unknown>;
 
-    // If { text } present
-    if (typeof obj.text === "string") return obj.text;
+    if (typeof obj.text === 'string') return obj.text;
+    if (typeof obj.message === 'string') return obj.message;
 
-    // If { message } present
-    if (typeof obj.message === "string") return obj.message;
+    const content = obj.content as unknown;
+    if (typeof content === 'string') return content;
 
-    // If { content } present, can be string or array (OpenAI-style)
-    if (typeof obj.content === "string") return obj.content;
-    if (Array.isArray(obj.content)) {
-      const parts = obj.content
-        .map((p: any) => {
-          if (typeof p === "string") return p;
-          if (p && typeof p.text === "string") return p.text;
-          if (p && p.type === "text" && p.text) return p.text;
-          return "";
+    if (Array.isArray(content)) {
+      const parts = content
+        .map((p: unknown) => {
+          if (typeof p === 'string') return p;
+
+          const asText = p as { text?: unknown };
+          if (asText && typeof asText.text === 'string') return asText.text;
+
+          const asTyped = p as { type?: unknown; text?: unknown };
+          if (
+            asTyped &&
+            typeof asTyped.type === 'string' &&
+            asTyped.type === 'text' &&
+            typeof asTyped.text === 'string'
+          ) {
+            return asTyped.text;
+          }
+          return '';
         })
         .filter(Boolean);
-      return parts.join(" ").trim();
+      return parts.join(' ').trim();
     }
 
-    // Some backends use { body }
-    if (typeof obj.body === "string") return obj.body;
+    if (typeof obj.body === 'string') return obj.body;
   }
 
-  // If it’s already a string
-  if (typeof input === "string") return input;
+  if (typeof input === 'string') return input;
 
-  return "";
+  return '';
 }
+
 
 // 1) single-responsibility upload helper: returns the uploaded attachment but DOES NOT set state
 
@@ -554,7 +561,8 @@ const removePending = (id: string) => setPendingFiles(prev => prev.filter(p => p
         } catch {
             /* noop */
         }
-        }, [userName]);
+        }, [userName, userToken, extractUploadsFromRawMessage]);
+
 
 
 
@@ -664,8 +672,7 @@ const loadConversations = useCallback(async () => {
     // Also try once on mount using whatever token is already in localStorage.
     // Covers refreshes where context isn't ready yet.
     useEffect(() => {
-        loadConversations();
-        // eslint-disable-next-line react-hooks/exhaustive-deps
+        loadConversations();        
     }, []);
 
     const handleOpenConversation = async (id: string) => {
@@ -790,8 +797,7 @@ const loadConversations = useCallback(async () => {
         const clientId = uid();
         lastUserClientIdRef.current = clientId;
 
-        // Build the base message payload
-        const attachments = pendingFiles.map(f => f.id).filter(Boolean); // IDs for server lookup
+        // Build the base message payload        
         const file_metadata_list = pendingFiles.map(f => ({
         id: f.id,
         filename: f.name,
@@ -1070,9 +1076,7 @@ const loadConversations = useCallback(async () => {
             ws.current = socket;
             setIsWsOpen(false);
 
-            const currentWs = socket;
-            const isNonEmptyString = (v: unknown): v is string =>
-                typeof v === 'string' && v.length > 0;
+            const currentWs = socket;            
 
             Object.assign(currentWs, {
                 onopen: () => {
@@ -1110,11 +1114,12 @@ const loadConversations = useCallback(async () => {
 
                     // Normalize a sender string we can trust for typing + message routing
                     const sender =
-                    typeof (msg as any).sender === 'string' && (msg as any).sender.trim()
-                        ? (msg as any).sender.trim()
-                        : typeof (msg as any).model === 'string'
-                        ? (msg as any).model.trim()
+                    const m = msg as Record<string, unknown>;
+                    const sender =
+                        (typeof m.sender === 'string' && m.sender.trim()) ? m.sender.trim()
+                        : (typeof m.model === 'string' && m.model.trim()) ? m.model.trim()
                         : '';
+
 
 
                     if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
@@ -1161,8 +1166,9 @@ const loadConversations = useCallback(async () => {
 
                     // Accept multiple server payload shapes, not just `text`
                     const unifiedText = normalizeToPlainText(
-                        (msg as any).text ?? (msg as any).content ?? (msg as any).message ?? msg
+                        (m.text as unknown) ?? (m.content as unknown) ?? (m.message as unknown) ?? msg
                     );
+
 
                     if (sender && ALLOWED_AGENTS.includes(sender as AgentName) && unifiedText.trim().length > 0) {
                         setTypingWithDelayAndTTL(sender as AgentName, false);
