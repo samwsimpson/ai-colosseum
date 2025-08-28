@@ -2074,6 +2074,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # --- /INSERT ---
                     # Build what the AIs should see: original text + per-file headers + previews
                     full_user_content = user_message
+                    
+                    # --- NEW: Initialize variables here to prevent crashes ---
+                    image_urls = []
+                    openai_parts = [{"type": "text", "text": full_user_content}]
+                    
                     if files:
                         blocks = []
                         for f in files:
@@ -2093,7 +2098,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                                 url = f.get("url")
                                 blocks.append(header + (f"\n(Downloadable URL: {url})" if url else ""))
                         full_user_content = (user_message + "\n\n" + "\n\n".join(blocks)).strip()
-                        # Build OpenAI vision parts if any images are attached (always define)
+                        # Build OpenAI vision parts if any images are attached
                         image_urls = [
                             (f.get("url") or "")
                             for f in (files or [])
@@ -2102,6 +2107,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         openai_parts = [{"type": "text", "text": full_user_content}]
                         for u in image_urls:
                             openai_parts.append({"type": "image_url", "image_url": {"url": u}})
+                    
+                    # ... rest of the code is here, which now safely uses image_urls and openai_parts
                     
                     # Correct indentation starts here 👇
                     # Save + echo the user turn exactly once (works for text-only and files)
