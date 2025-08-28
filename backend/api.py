@@ -2093,21 +2093,16 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             else:
                                 url = f.get("url")
                                 blocks.append(header + (f"\n(Downloadable URL: {url})" if url else ""))
-
                         full_user_content = (user_message + "\n\n" + "\n\n".join(blocks)).strip()
-
                         # Build OpenAI vision parts if any images are attached (always define)
                         image_urls = [
                             (f.get("url") or "")
                             for f in (files or [])
                             if str(f.get("content_type") or "").startswith("image/") and (f.get("url") or "")
                         ]
-
                         openai_parts = [{"type": "text", "text": full_user_content}]
                         for u in image_urls:
                             openai_parts.append({"type": "image_url", "image_url": {"url": u}})
-
-
                     # Save + echo the user turn exactly once (works for text-only and files)
                     await save_message(
                         conv_ref,
@@ -2121,9 +2116,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         "text": user_message,
                         "file_metadata_list": files,
                     })                                             
-
-
-
                     await maybe_set_title(conv_ref, user_message)
 
                     # NEW: push updated title/updated_at to the client
