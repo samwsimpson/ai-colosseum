@@ -1544,7 +1544,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     pass
 
         raw_user_name = (initial_config.get('user_name') or 'User').strip()
-        safe_user_name = re.sub(r'[^A-Za-z0-9_-]', '_', raw_user_name) or 'User'  # <-- no spaces/specials for the LLM API
+        safe_user_name = re.sub(r'[^A-Za-z0-9_-]', '_', raw_user_name) or 'User'
         user_display_name = raw_user_name.replace('_', ' ').strip()               # <-- pretty name for your UI
 
         # Keep this list in one place
@@ -2215,6 +2215,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # Kick off or feed the manager loop
                     if chat_task is None or chat_task.done():
                         # (Re)start the manager loop in the background
+                        chat_task = asyncio.create_task(
+                            main_chat_loop(websocket, user_proxy, manager, conv_ref)
+                        )
 
                     else:
                         # Feed subsequent user turns into the running loop
