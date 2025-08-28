@@ -1391,19 +1391,22 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         user_subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
         user_subscription_data = user_subscription_doc.to_dict()
 
-        if user_subscription_data['monthly_limit'] is not None:
-            first_day_of_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)          
-            conversation_count_query = (
-                db.collection('conversations')
-                .where('user_id', '==', user['id'])
-                .where('subscription_id', '==', user_data['subscription_id'])
-                .where('created_at', '>=', first_day_of_month)
-            )
-            conversation_count = 0
-            async for _ in conversation_count_query.stream():
-                conversation_count += 1
+        monthly_limit = user_subscription_data.get('monthly_limit')
+        if monthly_limit is not None:
 
-            if conversation_count >= user_subscription_data['monthly_limit']:
+            monthly_limit = user_subscription_data.get('monthly_limit')
+            if monthly_limit is not None:
+                first_day_of_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                conversation_count_query = (
+                    db.collection('conversations')
+                    .where('user_id', '==', user['id'])
+                    .where('subscription_id', '==', user_data['subscription_id'])
+                    .where('created_at', '>=', first_day_of_month)
+                )
+                conversation_count = 0
+                async for _ in conversation_count_query.stream():
+                    conversation_count += 1
+                if conversation_count >= monthly_limit:
                 await websocket.send_json({
                     "sender": "System",
                     "text": "Your monthly conversation limit has been reached. Please upgrade your plan to continue."
