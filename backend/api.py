@@ -1685,11 +1685,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self._message_output_queue = message_output_queue
                 self._proxy_for_forward = proxy_for_forward
 
-            async def a_receive(self, message, sender=None, request_reply=False, silent=False):
-                # Just receive. Do NOT toggle typing here; only toggle in a_generate_reply when we are actually speaking.
-                return await super().a_receive(message, sender=sender, request_reply=request_reply, silent=silent)
-
-
             async def a_generate_reply(self, messages=None, sender=None, **kwargs):
                 print(f"[manager->assistant] speaker={self.name}")
 
@@ -1880,22 +1875,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 return await super().a_receive(message, sender=sender, request_reply=request_reply, silent=silent)
 
   
-            async def a_generate_reply(
-                self,
-                messages: List[Dict[str, Any]] | None = None,
-                sender: autogen.ConversableAgent | None = None,
-                **kwargs,
-            ) -> Union[str, Dict, None]:
-                user_input = await self._user_input_queue.get()
-                if isinstance(user_input, dict):
-                    # Already a ChatCompletion-style message (e.g., with image_url parts)
-                    return user_input
-                return {"content": user_input, "role": "user", "name": self.name}
 
-
-
-            async def a_inject_user_message(self, message: str):
-                await self._user_input_queue.put(message)        
 
         # ---- build roster ----
         user_proxy = WebSocketUserProxyAgent(
