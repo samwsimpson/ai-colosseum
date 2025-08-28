@@ -1517,7 +1517,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         try:
             snap = await conv_ref.get()
             doc = snap.to_dict() or {}
-            await ws.send_json({
+            await websocket.send_json({
                 "sender": "System",
                 "type": "conversation_meta",
                 "id": conv_ref.id,
@@ -1528,6 +1528,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             print("[ws] conversation_meta send failed:", e)
 
         message_output_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
+        incoming_queue = asyncio.Queue()
         user_input_queue: asyncio.Queue = asyncio.Queue()
 
         def queue_send_nowait(payload: dict):
@@ -2164,7 +2165,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     try:
                         snap = await conv_ref.get()
                         doc = snap.to_dict() or {}
-                        await ws.send_json({
+                        await websocket.send_json({
                             "sender": "System",
                             "type": "conversation_meta",
                             "id": conv_ref.id,
@@ -2203,9 +2204,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                     if not has_any:
                         opener = random.choice([a.name for a in agents if getattr(a, "name", "") in agent_names])
-                        await ws.send_json({"type": "typing", "sender": opener, "typing": True})
+                        await websocket.send_json({"type": "typing", "sender": opener, "typing": True})
                         await asyncio.sleep(random.uniform(0.4, 1.2))
-                        await ws.send_json({
+                        await websocket.send_json({
                             "sender": opener,
                             "text": random.choice([
                                 f"Hi {user_display_name}, what can I help you with today?",
