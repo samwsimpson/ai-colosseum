@@ -2168,7 +2168,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         )                        
                         print(">>> kickoff: sending initial_payload to manager via proxy | preview=", str(initial_payload)[:200])
 
-                        await manager.a_receive(initial_payload, sender=proxy)
+                        await manager.a_receive(initial_payload, sender=user_proxy_agent)
 
 
                     else:
@@ -2179,7 +2179,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             else full_user_content
                         )                        
 
-                        await manager.a_receive(next_payload, sender=proxy)
+                        await manager.a_receive(next_payload, sender=user_proxy_agent)
 
 
 
