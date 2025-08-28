@@ -26,7 +26,7 @@ from google.cloud.firestore_v1 import SERVER_TIMESTAMP, ArrayUnion, Increment
 from google.cloud import firestore  # for Query.DESCENDING
 from google.cloud import storage
 from starlette.websockets import WebSocketState
-
+import secrets
 
 from werkzeug.utils import secure_filename
 import mimetypes
@@ -51,13 +51,58 @@ storage_client = storage.Client()
 
 print(">> THE COLOSSEUM BACKEND IS RUNNING (LATEST VERSION 3.1 - FIRESTORE) <<")
 
-SECRET_KEY = os.getenv("SECRET_KEY")
-print(f"DEBUG: SECRET_KEY read from env is: {'[SET]' if SECRET_KEY else '[NOT SET]'}")
-if not SECRET_KEY:
-    raise RuntimeError("SECRET_KEY env var is required")
+# --- SECRET_KEY resolver: prod-safe, dev-friendly ---
+def _resolve_secret_key() -> str:
+    # 1) Plain env var
+    env_val = (os.getenv("SECRET_KEY") or "").strip()
+    if env_val:
+        return env_val
+
+    # 2) Optional: file-based secret (e.g., mounted secret or volume)
+    key_file = os.getenv("SECRET_KEY_FILE")
+    if key_file:
+        try:
+            with open(key_file, "r", encoding="utf-8") as f:
+                file_val = f.read().strip()
+                if file_val:
+                    return file_val
+        except Exception as e:
+            print(f"WARNING: Failed to read SECRET_KEY_FILE={key_file}: {e}", file=sys.stderr)
+
+    # 3) Optional: Google Secret Manager (lazy import; only if name provided)
+    sm_name = os.getenv("SECRET_KEY_SECRET_NAME")
+    if sm_name and os.getenv("K_SERVICE"):  # only try GSM when running on Cloud Run
+        try:
+            from google.cloud import secretmanager  # lazy import to avoid hard dep if unused
+            client = secretmanager.SecretManagerServiceClient()
+            # support both ".../secrets/<name>" and full ".../versions/<ver>"
+            if "/versions/" not in sm_name:
+                sm_name = f"{sm_name}/versions/latest"
+            resp = client.access_secret_version(name=sm_name)
+            sm_val = resp.payload.data.decode("utf-8").strip()
+            if sm_val:
+                return sm_val
+        except Exception as e:
+            print(f"ERROR: Secret Manager fetch failed for SECRET_KEY: {e}", file=sys.stderr)
+
+    # 4) Dev-only fallback when NOT on Cloud Run
+    if not os.getenv("K_SERVICE"):
+        tmp = secrets.token_urlsafe(64)
+        print("WARNING: SECRET_KEY not set; using ephemeral DEV key", file=sys.stderr, flush=True)
+        return tmp
+
+    # 5) Still missing in production → fail fast with a clear message
+    raise RuntimeError(
+        "SECRET_KEY is required in production. "
+        "Set one of: SECRET_KEY (env), SECRET_KEY_FILE (path), or SECRET_KEY_SECRET_NAME (GSM)."
+    )
+
+SECRET_KEY = _resolve_secret_key()
+print(f"DEBUG: SECRET_KEY resolver => {'[SET]' if SECRET_KEY else '[NOT SET]'}", file=sys.stderr)
 
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
+
 
 # Prevent duplicate greetings on rapid reconnects for the same (user, conversation)
 import time
