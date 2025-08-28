@@ -1393,20 +1393,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         monthly_limit = user_subscription_data.get('monthly_limit')
         if monthly_limit is not None:
-
-            monthly_limit = user_subscription_data.get('monthly_limit')
-            if monthly_limit is not None:
-                first_day_of_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-                conversation_count_query = (
-                    db.collection('conversations')
-                    .where('user_id', '==', user['id'])
-                    .where('subscription_id', '==', user_data['subscription_id'])
-                    .where('created_at', '>=', first_day_of_month)
-                )
-                conversation_count = 0
-                async for _ in conversation_count_query.stream():
-                    conversation_count += 1
-                if conversation_count >= monthly_limit:
+            first_day_of_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+            conversation_count_query = (
+                db.collection('conversations')
+                .where('user_id', '==', user['id'])
+                .where('subscription_id', '==', user_data['subscription_id'])
+                .where('created_at', '>=', first_day_of_month)
+            )
+            conversation_count = 0
+            async for _ in conversation_count_query.stream():
+                conversation_count += 1
+            if conversation_count >= monthly_limit:
+                # Correct indentation starts here 👇
                 await websocket.send_json({
                     "sender": "System",
                     "text": "Your monthly conversation limit has been reached. Please upgrade your plan to continue."
@@ -2064,6 +2062,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     print(f"[ws] user message received: {len((data.get('message') or data.get('text') or ''))} chars, {len(files)} files")
                         
                     user_message = data.get("message", "") or data.get("text", "") or ""
+                    
                     # --- INSERT: allow files-only turns by synthesizing a placeholder ---
                     if not user_message:
                         file_count = len(files or [])
@@ -2103,6 +2102,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         openai_parts = [{"type": "text", "text": full_user_content}]
                         for u in image_urls:
                             openai_parts.append({"type": "image_url", "image_url": {"url": u}})
+                    
+                    # Correct indentation starts here 👇
                     # Save + echo the user turn exactly once (works for text-only and files)
                     await save_message(
                         conv_ref,
