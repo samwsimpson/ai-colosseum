@@ -25,6 +25,8 @@ from google.oauth2.id_token import verify_oauth2_token
 from google.cloud.firestore_v1 import SERVER_TIMESTAMP, ArrayUnion, Increment
 from google.cloud import firestore  # for Query.DESCENDING
 from google.cloud import storage
+from starlette.websockets import WebSocketState
+
 
 from werkzeug.utils import secure_filename
 import mimetypes
@@ -150,6 +152,22 @@ async def health_check():
 @app.get("/")
 async def root_ok():
     return {"status": "ok"}
+@app.get("/_ah/health")
+async def gclb_health():
+    return {"status": "ok"}
+
+@app.head("/")
+async def root_head():
+    return Response(status_code=200)
+
+@app.head("/health")
+async def health_head():
+    return Response(status_code=200)
+
+@app.head("/_ah/health")
+async def gclb_health_head():
+    return Response(status_code=200)
+
 # CORS: only enable in local/dev; prod relies on Google Load Balancer
 ENABLE_APP_CORS = os.getenv("ENABLE_APP_CORS", "0")  # "1" to enable locally
 
@@ -330,33 +348,29 @@ async def save_message(
 
 @app.on_event("startup")
 async def startup_event():
-    print("STARTUP EVENT: Initializing Firestore...")
-    try:
-        subscriptions_ref = db.collection('subscriptions')
-        print("STARTUP EVENT: subscriptions_ref created")
-        plans = {
-            'Free': {'monthly_limit': 5, 'price_id': 'free_price_id_placeholder'},
-            'Starter': {'monthly_limit': 25, 'price_id': 'starter_price_id_placeholder'},
-            'Pro': {'monthly_limit': 200, 'price_id': 'pro_price_id_placeholder'},
-            'Enterprise': {'monthly_limit': None, 'price_id': 'enterprise_price_id_placeholder'},
-        }
-        print("STARTUP EVENT: Plans defined")
-        
-        for name, data in plans.items():
-            print(f"STARTUP EVENT: Checking for subscription plan: {name}")
-            doc_ref = subscriptions_ref.document(name)
-            print(f"STARTUP EVENT: doc_ref for {name} created")
-            doc = await doc_ref.get()
-            print(f"STARTUP EVENT: doc.exists for {name}: {doc.exists}")
-            if not doc.exists:
-                print(f"STARTUP EVENT: Plan '{name}' not found. Creating it.")
-                await doc_ref.set(data)
-                print(f"Created subscription plan: {name}")
-            else:
-                print(f"Plan '{name}' already exists.")
-        print("STARTUP EVENT: Firestore initialization complete.")
-    except Exception as e:
-        print(f"STARTUP EVENT: Failed to initialize Firestore collections: {e}")
+    print("STARTUP EVENT: scheduling Firestore init in background...")
+
+    async def _init_subscriptions():
+        try:
+            subscriptions_ref = db.collection('subscriptions')
+            plans = {
+                'Free':       {'monthly_limit': 5,   'price_id': 'free_price_id_placeholder'},
+                'Starter':    {'monthly_limit': 25,  'price_id': 'starter_price_id_placeholder'},
+                'Pro':        {'monthly_limit': 200, 'price_id': 'pro_price_id_placeholder'},
+                'Enterprise': {'monthly_limit': None,'price_id': 'enterprise_price_id_placeholder'},
+            }
+            for name, data in plans.items():
+                doc_ref = subscriptions_ref.document(name)
+                doc = await doc_ref.get()
+                if not doc.exists:
+                    await doc_ref.set(data)
+            print("STARTUP EVENT: Firestore init done.")
+        except Exception as e:
+            print("STARTUP EVENT: Firestore init failed:", e)
+
+    # do not await; let the server become 'ready' immediately
+    asyncio.create_task(_init_subscriptions())
+
 
 @app.get("/api/users/me")
 async def read_users_me(current_user: dict = Depends(get_current_user)):
@@ -1377,8 +1391,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         user_subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
         user_subscription_data = user_subscription_doc.to_dict()
 
-        if user_subscription_data['monthly_limit'] is not None:
-            first_day_of_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)          
+        monthly_limit = user_subscription_data.get('monthly_limit')
+        if monthly_limit is not None:
+            first_day_of_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
             conversation_count_query = (
                 db.collection('conversations')
                 .where('user_id', '==', user['id'])
@@ -1388,8 +1403,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             conversation_count = 0
             async for _ in conversation_count_query.stream():
                 conversation_count += 1
-
-            if conversation_count >= user_subscription_data['monthly_limit']:
+            if conversation_count >= monthly_limit:
+                # Correct indentation starts here 👇
                 await websocket.send_json({
                     "sender": "System",
                     "text": "Your monthly conversation limit has been reached. Please upgrade your plan to continue."
@@ -1670,11 +1685,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 self._message_output_queue = message_output_queue
                 self._proxy_for_forward = proxy_for_forward
 
-            async def a_receive(self, message, sender=None, request_reply=False, silent=False):
-                # Just receive. Do NOT toggle typing here; only toggle in a_generate_reply when we are actually speaking.
-                return await super().a_receive(message, sender=sender, request_reply=request_reply, silent=silent)
-
-
             async def a_generate_reply(self, messages=None, sender=None, **kwargs):
                 print(f"[manager->assistant] speaker={self.name}")
 
@@ -1864,18 +1874,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 # Keep base behavior for Autogen bookkeeping
                 return await super().a_receive(message, sender=sender, request_reply=request_reply, silent=silent)
 
-            async def a_generate_reply(
-                self,
-                messages: List[Dict[str, Any]] | None = None,
-                sender: autogen.ConversableAgent | None = None,
-                **kwargs,
-            ) -> Union[str, Dict, None]:
-                # Block until a user message is received
-                user_input = await self._user_input_queue.get()
-                return {"content": user_input, "role": "user", "name": self.name}
+  
 
-            async def a_inject_user_message(self, message: str):
-                await self._user_input_queue.put(message)        
 
         # ---- build roster ----
         user_proxy = WebSocketUserProxyAgent(
@@ -2042,6 +2042,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     print(f"[ws] user message received: {len((data.get('message') or data.get('text') or ''))} chars, {len(files)} files")
                         
                     user_message = data.get("message", "") or data.get("text", "") or ""
+                    
                     # --- INSERT: allow files-only turns by synthesizing a placeholder ---
                     if not user_message:
                         file_count = len(files or [])
@@ -2053,6 +2054,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # --- /INSERT ---
                     # Build what the AIs should see: original text + per-file headers + previews
                     full_user_content = user_message
+                    
+                    # --- NEW: Initialize variables here to prevent crashes ---
+                    image_urls = []
+                    openai_parts = [{"type": "text", "text": full_user_content}]
+                    
                     if files:
                         blocks = []
                         for f in files:
@@ -2071,25 +2077,33 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             else:
                                 url = f.get("url")
                                 blocks.append(header + (f"\n(Downloadable URL: {url})" if url else ""))
-
                         full_user_content = (user_message + "\n\n" + "\n\n".join(blocks)).strip()
-
-                        # Save + echo the user turn exactly once (works for text-only and files)
-                        await save_message(
-                            conv_ref,
-                            role="user",
-                            sender=user_display_name,
-                            content=user_message,
-                            file_metadata_list=files,
-                        )
-                        await ws.send_json({
-                            "sender": proxy.name,
-                            "text": user_message,
-                            "file_metadata_list": files,
-                        })                                             
-
-
-
+                        # Build OpenAI vision parts if any images are attached
+                        image_urls = [
+                            (f.get("url") or "")
+                            for f in (files or [])
+                            if str(f.get("content_type") or "").startswith("image/") and (f.get("url") or "")
+                        ]
+                        openai_parts = [{"type": "text", "text": full_user_content}]
+                        for u in image_urls:
+                            openai_parts.append({"type": "image_url", "image_url": {"url": u}})
+                    
+                    # ... rest of the code is here, which now safely uses image_urls and openai_parts
+                    
+                    # Correct indentation starts here 👇
+                    # Save + echo the user turn exactly once (works for text-only and files)
+                    await save_message(
+                        conv_ref,
+                        role="user",
+                        sender=user_display_name,
+                        content=user_message,
+                        file_metadata_list=files,
+                    )
+                    await ws.send_json({
+                        "sender": proxy.name,
+                        "text": user_message,
+                        "file_metadata_list": files,
+                    })                                             
                     await maybe_set_title(conv_ref, user_message)
 
                     # NEW: push updated title/updated_at to the client
@@ -2147,10 +2161,25 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # Kick off or feed the manager loop
                     if chat_task is None or chat_task.done():
                         # (Re)start the manager loop in the background
-                        chat_task = asyncio.create_task(proxy.a_initiate_chat(manager, message=full_user_content))
+                        initial_payload = (
+                            {"role": "user", "content": openai_parts}
+                            if image_urls
+                            else full_user_content
+                        )                        
+                        print(">>> kickoff: sending initial_payload to manager via proxy | preview=", str(initial_payload)[:200])
+
+                        await manager.a_receive(initial_payload, sender=user_proxy_agent)
+
+
                     else:
                         # Feed subsequent user turns into the running loop
-                        await proxy.a_inject_user_message(full_user_content)
+                        next_payload = (
+                            {"role": "user", "content": openai_parts}
+                            if image_urls
+                            else full_user_content
+                        )                        
+
+                        await manager.a_receive(next_payload, sender=user_proxy_agent)
 
 
 
@@ -2199,7 +2228,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 if text or is_typing_event:
                     payload = dict(msg)
                     payload["text"] = text  # ensure sanitized text goes out
-                    await ws.send_json(payload)
+                    # Guard against races / closed socket
+                    if ws.application_state != WebSocketState.CONNECTED:
+                        break
+                    try:
+                        await ws.send_json(payload)
+                    except Exception as e:
+                        print("[ws] send failed:", e)
+                        break
                 else:
                     # nothing to show
                     continue
@@ -2215,7 +2251,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     await maybe_refresh_summary(conv_ref)
 
         
-        from starlette.websockets import WebSocketState  # add this import at the top of file if not present
+        
 
         async def keepalive_task(ws: WebSocket):
             try:
@@ -2270,3 +2306,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             await websocket.send_json({"sender": "System", "text": f"Error: {e}"})
         except WebSocketDisconnect:
             pass
+
+if __name__ == "__main__":
+    import uvicorn, os
+    uvicorn.run("api:app",
+            host="0.0.0.0",
+            port=int(os.getenv("PORT", "8080")),
+            lifespan="on",
+            log_level="info")
