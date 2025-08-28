@@ -2188,7 +2188,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         )                        
 
                         chat_task = asyncio.create_task(
-                            proxy.a_receive(initial_payload, manager)
+                            manager.a_receive(initial_payload, sender=proxy)
                         )
 
 
@@ -2200,7 +2200,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             else full_user_content
                         )                        
 
-                        await proxy.a_inject_user_message(next_payload)
+                        await manager.a_receive(next_payload, sender=proxy)
 
 
 
@@ -2249,7 +2249,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                 if text or is_typing_event:
                     payload = dict(msg)
                     payload["text"] = text  # ensure sanitized text goes out
-                    await ws.send_json(payload)
+                    # Guard against races / closed socket
+                    if ws.application_state != WebSocketState.CONNECTED:
+                        break
+                    try:
+                        await ws.send_json(payload)
+                    except Exception as e:
+                        print("[ws] send failed:", e)
+                        break
                 else:
                     # nothing to show
                     continue
