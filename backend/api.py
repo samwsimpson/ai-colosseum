@@ -2042,6 +2042,15 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     print(f"[ws] user message received: {len((data.get('message') or data.get('text') or ''))} chars, {len(files)} files")
                         
                     user_message = data.get("message", "") or data.get("text", "") or ""
+                    # Allow files-only turns; ignore truly empty turns.
+                    if not user_message:
+                        file_count = len(files or [])
+                        if file_count > 0:
+                            user_message = f"(sent {file_count} file{'s' if file_count != 1 else ''})"
+                        else:
+                            # nothing to process; do not wake agents
+                            continue
+
                     
                     # --- INSERT: allow files-only turns by synthesizing a placeholder ---
                     if not user_message:
@@ -2149,9 +2158,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                     if not has_any:
                         opener = random.choice([a.name for a in agents if getattr(a, "name", "") in agent_names])
-                        await websocket.send_json({"sender": opener, "typing": True})
+                        await ws.send_json({"type": "typing", "sender": opener, "typing": True})
                         await asyncio.sleep(random.uniform(0.4, 1.2))
-                        await websocket.send_json({
+                        await ws.send_json({
                             "sender": opener,
                             "text": random.choice([
                                 f"Hi {user_display_name}, what can I help you with today?",
@@ -2161,26 +2170,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # Kick off or feed the manager loop
                     if chat_task is None or chat_task.done():
                         # (Re)start the manager loop in the background
-                        initial_payload = (
-                            {"role": "user", "content": openai_parts}
-                            if image_urls
-                            else full_user_content
-                        )
-                        print(">>> kickoff: sending initial_payload to manager via proxy | preview=", str(initial_payload)[:200])
-
-                        # IMPORTANT: use the user WebSocket proxy to start the manager loop
+                        # Always send plain text into the manager to keep all agents happy.
                         chat_task = asyncio.create_task(
-                            proxy.a_initiate_chat(manager, message=initial_payload)
+                            proxy.a_initiate_chat(manager, message=full_user_content)
                         )
                     else:
                         # Feed subsequent user turns into the running loop
-                        next_payload = (
-                            {"role": "user", "content": openai_parts}
-                            if image_urls
-                            else full_user_content
-                        )
-                        # IMPORTANT: inject subsequent user turns through the proxy
-                        await proxy.a_inject_user_message(next_payload)
+                        # Subsequent turns -> also text only.
+                        await proxy.a_inject_user_message(full_user_content)
 
 
 
