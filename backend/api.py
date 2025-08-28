@@ -2181,7 +2181,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                         )                        
 
                         chat_task = asyncio.create_task(
-                            proxy.a_initiate_chat(manager, message=initial_payload)
+                            proxy.a_receive(initial_payload, manager)
                         )
 
 
