@@ -1472,7 +1472,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         try:
             snap = await conv_ref.get()
             doc = snap.to_dict() or {}
-            await websocket.send_json({
+            await ws.send_json({
                 "sender": "System",
                 "type": "conversation_meta",
                 "id": conv_ref.id,
@@ -2119,7 +2119,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     try:
                         snap = await conv_ref.get()
                         doc = snap.to_dict() or {}
-                        await websocket.send_json({
+                        await ws.send_json({
                             "sender": "System",
                             "type": "conversation_meta",
                             "id": conv_ref.id,
@@ -2170,10 +2170,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     # Kick off or feed the manager loop
                     if chat_task is None or chat_task.done():
                         # (Re)start the manager loop in the background
-                        # Always send plain text into the manager to keep all agents happy.
-                        chat_task = asyncio.create_task(
-                            proxy.a_initiate_chat(manager, message=full_user_content)
-                        )
+
                     else:
                         # Feed subsequent user turns into the running loop
                         # Subsequent turns -> also text only.
