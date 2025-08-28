@@ -2186,10 +2186,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             if image_urls
                             else full_user_content
                         )                        
+                        print(">>> kickoff: sending initial_payload to manager via proxy | preview=", str(initial_payload)[:200])
 
-                        chat_task = asyncio.create_task(
-                            manager.a_receive(initial_payload, sender=proxy)
-                        )
+                        await manager.a_receive(initial_payload, sender=proxy)
 
 
                     else:
