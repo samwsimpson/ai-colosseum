@@ -2042,202 +2042,154 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         
         # --- NEW CODE: Redesigned chat loop to prevent deadlock ---
         
-        async def main_chat_loop(ws: WebSocket, proxy: WebSocketUserProxyAgent, manager, conv_ref):
-            is_first_message = True
-            chat_task: Optional[asyncio.Task] = None
+# The corrected main_chat_loop function
+async def main_chat_loop(ws: WebSocket, proxy: WebSocketUserProxyAgent, manager, conv_ref):
+    is_first_message = True
+    
+    # This queue holds user messages to be processed sequentially
+    user_message_queue = asyncio.Queue()
 
+    # The task that drives the Autogen conversation
+    async def run_autogen_chat():
+        while True:
+            # Wait for the next user message to arrive
+            full_user_content = await user_message_queue.get()
             
+            # Use a dummy first message to kick off the conversation
+            messages = [{
+                "role": "user",
+                "content": full_user_content,
+                "name": proxy.name,
+            }]
             
+            await proxy.a_initiate_chat(
+                manager,
+                message=messages,
+                clear_history=False,
+            )
+            
+            # Signal that this message has been processed
+            user_message_queue.task_done()
 
-            while True:
-                try:
-                    data = await ws.receive_json()
-                    
-                    if isinstance(data, dict) and data.get("type") in ("ping", "pong"):
-                        if data.get("type") == "ping":
-                            await ws.send_json({"type": "pong"})
+    # Start the Autogen chat task as a background process
+    autogen_task = asyncio.create_task(run_autogen_chat())
+
+    while True:
+        try:
+            # Wait for user input from the WebSocket
+            data = await ws.receive_json()
+
+            # --- Message processing logic (same as before) ---
+            if isinstance(data, dict) and data.get("type") in ("ping", "pong"):
+                if data.get("type") == "ping":
+                    await ws.send_json({"type": "pong"})
+                continue
+            
+            files = data.get("file_metadata_list") or []
+            if not files and data.get("file_metadata"):
+                files = [data["file_metadata"]]
+
+            if not files:
+                att_ids = data.get("attachments") or []
+                resolved = []
+                for fid in att_ids:
+                    if not fid:
                         continue
-                    # Build a file list: prefer inline metadata; else resolve attachments by id
-                    files = data.get("file_metadata_list") or []
-                    if not files and data.get("file_metadata"):
-                        files = [data["file_metadata"]]
-
-                    # If only ids were sent, resolve them from Firestore
-                    if not files:
-                        att_ids = data.get("attachments") or []
-                        resolved = []
-                        for fid in att_ids:
-                            if not fid:
-                                continue
-                            try:
-                                snap = await db.collection("uploads").document(str(fid)).get()
-                                if snap.exists:
-                                    doc = snap.to_dict() or {}
-                                    resolved.append({
-                                        "id": snap.id,
-                                        "filename": doc.get("name") or doc.get("filename") or "uploaded-file",
-                                        "content_type": doc.get("mime") or doc.get("content_type") or "application/octet-stream",
-                                        "size": doc.get("size"),
-                                        "url": doc.get("signed_url") or doc.get("url"),
-                                        "content": doc.get("content"),
-                                    })
-                            except Exception as e:
-                                print(f"[ws] resolve attachment {fid} failed: {e}")
-                        files = resolved
-
-                    print(f"[ws] user message received: {len((data.get('message') or data.get('text') or ''))} chars, {len(files)} files")
-                        
-                    user_message = data.get("message", "") or data.get("text", "") or ""
-                    # Allow files-only turns; ignore truly empty turns.
-                    if not user_message:
-                        file_count = len(files or [])
-                        if file_count > 0:
-                            user_message = f"(sent {file_count} file{'s' if file_count != 1 else ''})"
-                        else:
-                            # nothing to process; do not wake agents
-                            continue
-
-                    
-                    # --- INSERT: allow files-only turns by synthesizing a placeholder ---
-                    if not user_message:
-                        file_count = len(files or [])
-                        if file_count > 0:
-                            user_message = f"(sent {file_count} file{'s' if file_count != 1 else ''})"
-                        else:
-                            # truly empty turn; ignore silently (or send a notice if you prefer)
-                            continue
-                    # --- /INSERT ---
-                    # Build what the AIs should see: original text + per-file headers + previews
-                    full_user_content = user_message
-                    
-                    # --- NEW: Initialize variables here to prevent crashes ---
-                    image_urls = []
-                    openai_parts = [{"type": "text", "text": full_user_content}]
-                    
-                    if files:
-                        blocks = []
-                        for f in files:
-                            fn = (f.get("filename") or "uploaded-file").strip()
-                            ct = (f.get("content_type") or "application/octet-stream").strip()
-                            sz = f.get("size")
-                            uid = f.get("id") or f.get("upload_id")
-                            id_part = f" | upload_id={uid}" if uid else ""
-                            header = f"[Attachment: {fn} | {ct} | {sz} bytes{id_part}]"
-                            preview = f.get("content")
-                            if isinstance(preview, str) and preview:
-                                # trim to keep tokens in check
-                                max_per_file = 9500
-                                safe = preview[:max_per_file] + ("\n...[TRUNCATED]" if len(preview) > max_per_file else "")
-                                blocks.append(header + "\n--- file preview start ---\n" + safe + "\n--- file preview end ---")
-                            else:
-                                url = f.get("url")
-                                blocks.append(header + (f"\n(Downloadable URL: {url})" if url else ""))
-                        full_user_content = (user_message + "\n\n" + "\n\n".join(blocks)).strip()
-                        # Build OpenAI vision parts if any images are attached
-                        image_urls = [
-                            (f.get("url") or "")
-                            for f in (files or [])
-                            if str(f.get("content_type") or "").startswith("image/") and (f.get("url") or "")
-                        ]
-                        openai_parts = [{"type": "text", "text": full_user_content}]
-                        for u in image_urls:
-                            openai_parts.append({"type": "image_url", "image_url": {"url": u}})
-                    
-                    # ... rest of the code is here, which now safely uses image_urls and openai_parts
-                    
-                    # Correct indentation starts here 👇
-                    # Save + echo the user turn exactly once (works for text-only and files)
-                    await save_message(
-                        conv_ref,
-                        role="user",
-                        sender=user_display_name,
-                        content=user_message,
-                        file_metadata_list=files,
-                    )
-                    await ws.send_json({
-                        "sender": proxy.name,
-                        "text": user_message,
-                        "file_metadata_list": files,
-                    })                                             
-                    await maybe_set_title(conv_ref, user_message)
-
-                    # NEW: push updated title/updated_at to the client
                     try:
-                        snap = await conv_ref.get()
-                        doc = snap.to_dict() or {}
-                        await websocket.send_json({
-                            "sender": "System",
-                            "type": "conversation_meta",
-                            "id": conv_ref.id,
-                            "title": (doc.get("title") or "New conversation"),
-                            "updated_at": _ts_iso(doc.get("updated_at") or doc.get("created_at")),
-                        })
-                    except Exception as e:
-                        print("[ws] conversation_meta (post-title) send failed:", e)
-
-                    # If the user addressed everyone, give the manager a gentle, explicit hint
-                    EVERYONE_PAT = re.compile(r"\b(everyone|all of you|each of you|all|y['’]all|you guys|all the models)\b", re.I)
-                    if EVERYONE_PAT.search(user_message or ""):
-                        try:
-                            groupchat.messages.append({
-                                "role": "system",
-                                "content": (
-                                    f"Manager directive: The user's last message addressed EVERYONE. "
-                                    f"Schedule one concise reply from each assistant — ChatGPT, Claude, Gemini, and Mistral — even if content overlaps; "
-                                    f"do not skip due to redundancy. After all four respond, select {safe_user_name}."
-                                    f"If the user says only “thanks”, “thank you”, “ok”, or similar pleasantry, have the *last assistant who spoke* reply briefly."
-                                    f"When the user addresses “everyone”, schedule one concise response per assistant. Do not suppress responses due to redundancy."
-                                    f"Ground your reply only in this chat. If you reference earlier statements, quote or paraphrase them from the visible messages. If unsure, ask a brief clarification instead of guessing."
-
-                                )
-
+                        snap = await db.collection("uploads").document(str(fid)).get()
+                        if snap.exists:
+                            doc = snap.to_dict() or {}
+                            resolved.append({
+                                "id": snap.id,
+                                "filename": doc.get("name") or doc.get("filename") or "uploaded-file",
+                                "content_type": doc.get("mime") or doc.get("content_type") or "application/octet-stream",
+                                "size": doc.get("size"),
+                                "url": doc.get("signed_url") or doc.get("url"),
+                                "content": doc.get("content"),
                             })
-                        except Exception as _:
-                            pass
-                    # --- randomized opening greeting on brand-new conversations ---
-                    try:
-                        snap = await conv_ref.get()
-                        doc = snap.to_dict() or {}
-                        has_any = (doc.get("message_count") or 0) > 0
-                    except Exception:
-                        has_any = True
+                    except Exception as e:
+                        print(f"[ws] resolve attachment {fid} failed: {e}")
+                files = resolved
+                    
+            user_message = data.get("message", "") or data.get("text", "") or ""
+            
+            if not user_message:
+                file_count = len(files or [])
+                if file_count > 0:
+                    user_message = f"(sent {file_count} file{'s' if file_count != 1 else ''})"
+                else:
+                    continue
 
-                    if not has_any:
-                        opener = random.choice([a.name for a in agents if getattr(a, "name", "") in agent_names])
-                        await websocket.send_json({"type": "typing", "sender": opener, "typing": True})
-                        await asyncio.sleep(random.uniform(0.4, 1.2))
-                        await websocket.send_json({
-                            "sender": opener,
-                            "text": random.choice([
-                                f"Hi {user_display_name}, what can I help you with today?",
-                                "Hello! Ready when you are.",
-                            ])
-                        })
-                    # Kick off or feed the manager loop
-                    if chat_task is None or chat_task.done():
-                        # (Re)start the manager loop in the background
-                        chat_task = asyncio.create_task(
-                            main_chat_loop(websocket, user_proxy, manager, conv_ref)
-                        )
-
+            full_user_content = user_message
+            image_urls = []
+            openai_parts = [{"type": "text", "text": full_user_content}]
+            
+            if files:
+                blocks = []
+                for f in files:
+                    fn = (f.get("filename") or "uploaded-file").strip()
+                    ct = (f.get("content_type") or "application/octet-stream").strip()
+                    sz = f.get("size")
+                    uid = f.get("id") or f.get("upload_id")
+                    id_part = f" | upload_id={uid}" if uid else ""
+                    header = f"[Attachment: {fn} | {ct} | {sz} bytes{id_part}]"
+                    preview = f.get("content")
+                    if isinstance(preview, str) and preview:
+                        max_per_file = 9500
+                        safe = preview[:max_per_file] + ("\n...[TRUNCATED]" if len(preview) > max_per_file else "")
+                        blocks.append(header + "\n--- file preview start ---\n" + safe + "\n--- file preview end ---")
                     else:
-                        # Feed subsequent user turns into the running loop
-                        # Subsequent turns -> also text only.
-                        await proxy.a_inject_user_message(full_user_content)
+                        url = f.get("url")
+                        blocks.append(header + (f"\n(Downloadable URL: {url})" if url else ""))
+                full_user_content = (user_message + "\n\n" + "\n\n".join(blocks)).strip()
+                image_urls = [
+                    (f.get("url") or "")
+                    for f in (files or [])
+                    if str(f.get("content_type") or "").startswith("image/") and (f.get("url") or "")
+                ]
+                openai_parts = [{"type": "text", "text": full_user_content}]
+                for u in image_urls:
+                    openai_parts.append({"type": "image_url", "image_url": {"url": u}})
+            
+            # Save and echo the user turn
+            await save_message(
+                conv_ref,
+                role="user",
+                sender=proxy.name,
+                content=user_message,
+                file_metadata_list=files,
+            )
+            await ws.send_json({
+                "sender": proxy.name,
+                "text": user_message,
+                "file_metadata_list": files,
+            })
+            await maybe_set_title(conv_ref, user_message)
+
+            # Update conversation meta
+            try:
+                snap = await conv_ref.get()
+                doc = snap.to_dict() or {}
+                await ws.send_json({
+                    "sender": "System",
+                    "type": "conversation_meta",
+                    "id": conv_ref.id,
+                    "title": (doc.get("title") or "New conversation"),
+                    "updated_at": _ts_iso(doc.get("updated_at") or doc.get("created_at")),
+                })
+            except Exception as e:
+                print("[ws] conversation_meta (post-title) send failed:", e)
+
+            # Add the user message to the queue to be processed by the Autogen task
+            await user_message_queue.put(full_user_content)
 
 
-
-
-                except WebSocketDisconnect:
-                    print("main_chat_loop: WebSocket disconnected.")
-                    if chat_task and not chat_task.done():
-                        chat_task.cancel()
-                    break
-                except Exception as e:
-                    print(f"main_chat_loop error: {e}")
-                    if chat_task and not chat_task.done():
-                        chat_task.cancel()
-                    break
+        except WebSocketDisconnect:
+            print("main_chat_loop: WebSocket disconnected.")
+            break
+        except Exception as e:
+            print(f"main_chat_loop error: {e}")
+            break
                     
         # This task sends AI messages from the output queue to the WebSocket
         # single, canonical version
@@ -2313,20 +2265,31 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             
                 
         # We start the tasks that are truly independent and long-running
+#
         consumer_task_coro = asyncio.create_task(
             message_consumer_task(message_output_queue, websocket, conv_ref, agent_names, safe_user_name, user_display_name)
         )
-        main_chat_loop_coro = asyncio.create_task(
-            main_chat_loop(websocket, user_proxy, manager, conv_ref)
-        )
         keepalive_task_coro = asyncio.create_task(keepalive_task(websocket))
-
+        
         try:
-            await asyncio.gather(
-                consumer_task_coro,
-                main_chat_loop_coro,
-                keepalive_task_coro
-            )
+            # The single, main chat loop that handles all WebSocket traffic
+            await main_chat_loop(websocket, user_proxy, manager, conv_ref)
+
+        except WebSocketDisconnect:
+            print("WebSocket closed normally.")
+        except Exception as e:
+            tb = traceback.format_exc()
+            print(f"General exception in main loop: {e}\n{tb}")
+            try:
+                await websocket.send_json({"sender": "System", "text": f"Error: {e}"})
+            except Exception:
+                pass
+        finally:
+            # Clean up all background tasks gracefully
+            for t in (consumer_task_coro, keepalive_task_coro):
+                if not t.done():
+                    t.cancel()
+            await asyncio.gather(consumer_task_coro, keepalive_task_coro, return_exceptions=True)
         except WebSocketDisconnect:
             print("WebSocket closed normally.")
         except Exception as e:
