@@ -1728,8 +1728,9 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
             async def a_generate_reply(self, messages=None, sender=None, **kwargs):
                 print(f"[manager->assistant] speaker={self.name}")
-                # --- VISION BRIDGE (non-invasive) ---
-                # 1) Gather image attachments from the last user turn
+                # --- VISION BRIDGE (runs ONLY if current turn included images) ---
+
+                # 1) Collect image attachments from the last user turn
                 files = []
                 try:
                     files = self._proxy_for_forward.get_last_user_files()
@@ -1738,14 +1739,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
                 image_items: list[tuple[str, str]] = []  # (url, mime)
                 for f in files or []:
-                    ct = (f.get("content_type") or f.get("mime") or "").strip()
+                    ct = (f.get("content_type") or f.get("mime") or "").strip().lower()
                     url = (f.get("url") or f.get("signed_url") or "").strip()
                     if ct.startswith("image/") and url:
                         image_items.append((url, ct))
 
-                # If no images, proceed with the normal flow.
                 if image_items:
-                    # 2) Extract the latest user text for this turn
+                    # 2) Find the latest user text (if any) to pair with the images
                     latest_user_text = ""
                     try:
                         for m in reversed(messages or []):
@@ -1755,63 +1755,75 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                     except Exception:
                         latest_user_text = ""
 
-                    # 3) Route by provider
+                    # 3) Detect provider more robustly
                     cfg_list = (self.llm_config or {}).get("config_list") or []
                     cfg = cfg_list[0] if cfg_list else {}
+                    model_name = (cfg.get("model") or "").lower()
                     api_type = (cfg.get("api_type") or "").lower()
-                    model_name = cfg.get("model") or ""
-                    temperature = (self.llm_config or {}).get("temperature", 0.7)
+                    api_base = (cfg.get("api_base") or cfg.get("base_url") or "").lower()
+
+                    def _provider() -> str:
+                        if "anthropic" in api_type or "anthropic" in api_base or "claude" in model_name:
+                            return "anthropic"
+                        if "google" in api_type or "gemini" in model_name:
+                            return "google"
+                        if "mistral" in api_type or "mistral" in model_name:
+                            return "mistral"
+                        # default treat as openai if not matched
+                        if "openai" in api_type or model_name.startswith(("gpt-", "o1", "o3")):
+                            return "openai"
+                        return (api_type or "openai")
+
+                    which = _provider()
+                    temperature = float((self.llm_config or {}).get("temperature", 0.7))
 
                     out_text = ""
                     try:
-                        if api_type == "openai":
-                            # OpenAI (ChatGPT / GPT-4o) — pass as image_url parts
+                        if which == "openai":
+                            # OpenAI (e.g., gpt-4o)
                             if openai_client is not None:
-                                parts = [{"type": "text", "text": latest_user_text}]
-                                # pass a few images max; most models handle multiple
+                                parts = [{"type": "text", "text": latest_user_text or "Please acknowledge receipt of the image and describe non-identifying visual details."}]
                                 for (u, _ct) in image_items[:3]:
                                     parts.append({"type": "image_url", "image_url": {"url": u}})
                                 resp = await openai_client.chat.completions.create(
-                                    model = model_name or "gpt-4o",
+                                    model = cfg.get("model") or "gpt-4o",
                                     messages = [
                                         {"role": "system", "content": self.system_message or ""},
                                         {"role": "user",   "content": parts},
                                     ],
-                                    temperature = float(temperature or 0.7),
+                                    temperature = temperature,
                                     max_tokens = 800,
                                 )
                                 out_text = ((resp.choices[0].message.content or "").strip())
 
-                        elif api_type == "anthropic":
-                            # Claude 3.x — url-based images
+                        elif which == "anthropic":
+                            # Claude 3.x (URL-based images)
                             try:
                                 from anthropic import AsyncAnthropic
                                 anthropic_client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
-                                content_parts = [{"type": "text", "text": latest_user_text}]
+                                content_parts = [{"type": "text", "text": latest_user_text or "Please acknowledge receipt of the image and describe non-identifying visual details."}]
                                 for (u, ct) in image_items[:3]:
                                     content_parts.append({
                                         "type": "image",
                                         "source": {"type": "url", "url": u, "media_type": (ct or "image/png")}
                                     })
                                 ar = await anthropic_client.messages.create(
-                                    model = model_name or "claude-3-5-sonnet-20240620",
+                                    model = cfg.get("model") or "claude-3-5-sonnet-20240620",
                                     system = self.system_message or "",
                                     max_tokens = 800,
                                     messages = [{"role": "user", "content": content_parts}],
                                 )
-                                # Anthropic returns a list of content blocks
+                                # Anthropic returns content blocks; join text parts only
                                 out_text = "".join([getattr(b, "text", "") for b in (ar.content or [])]).strip()
                             except Exception:
-                                # if anthropic SDK unavailable, fall back to normal path below
-                                pass
+                                pass  # fall through to normal path
 
-                        elif api_type == "google":
-                            # Gemini — requires inline_data bytes; fetch via aiohttp
+                        elif which == "google":
+                            # Gemini (inline_data requires bytes)
                             try:
                                 import google.generativeai as genai
                                 genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
-                                # Fetch up to 3 images as bytes
-                                inline_parts = [latest_user_text]
+                                inline_parts = [latest_user_text or "Please acknowledge receipt of the image and describe non-identifying visual details."]
                                 async with aiohttp.ClientSession() as session:
                                     for (u, ct) in image_items[:3]:
                                         async with session.get(u) as r:
@@ -1823,31 +1835,32 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                                                     "data": base64.b64encode(data).decode("ascii"),
                                                 }
                                             })
-                                # Gemini SDK is sync; run in thread so we don't block the loop
                                 import asyncio
                                 loop = asyncio.get_event_loop()
                                 def _call_gemini():
-                                    m = genai.GenerativeModel(model_name or "gemini-1.5-pro")
+                                    m = genai.GenerativeModel(cfg.get("model") or "gemini-1.5-pro")
                                     res = m.generate_content(inline_parts)
                                     return (getattr(res, "text", "") or "").strip()
                                 out_text = await loop.run_in_executor(None, _call_gemini)
                             except Exception:
-                                # if gemini SDK missing or fetch fails, fall back
-                                pass
+                                pass  # fall through to normal path
 
-                    except Exception as _vision_err:
-                        # swallow and fall back to normal path
+                        # Mistral: no vision path; fall through
+
+                    except Exception:
                         out_text = ""
 
-                    # If we produced a vision response, short-circuit the normal flow
                     if out_text:
                         try:
+                            # Emit as the assistant’s message & stop
                             self._message_output_queue.put_nowait({"sender": self.name, "text": out_text})
                             self._message_output_queue.put_nowait({"sender": self.name, "typing": False, "text": ""})
                         except Exception:
                             pass
                         return out_text
+
                 # --- /VISION BRIDGE ---
+
 
                 # turn typing on for the assistant
                 try:
@@ -2242,7 +2255,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             id_part = f" | upload_id={uid}" if uid else ""
                             header = f"[Attachment: {fn} | {ct} | {sz} bytes{id_part}]"
                             preview = f.get("content")
-                            if isinstance(preview, str) and preview:
+                            is_texty = ct.startswith("text/") or ct in ("application/json", "application/xml", "application/javascript")
+                            if is_texty and isinstance(preview, str) and preview:
                                 # trim to keep tokens in check
                                 max_per_file = 9500
                                 safe = preview[:max_per_file] + ("\n...[TRUNCATED]" if len(preview) > max_per_file else "")
@@ -2250,6 +2264,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
                             else:
                                 url = f.get("url")
                                 blocks.append(header + (f"\n(Downloadable URL: {url})" if url else ""))
+
 
                         full_user_content = (user_message + "\n\n" + "\n\n".join(blocks)).strip()
 
