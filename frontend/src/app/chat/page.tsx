@@ -701,7 +701,7 @@ const loadConversations = useCallback(async () => {
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
-    
+
     useEffect(() => {
         // Whenever we switch conversations (including when the server assigns a new one),
         // start the uploads list empty; hydrateConversation will refill it.
@@ -1639,16 +1639,32 @@ const loadConversations = useCallback(async () => {
         {uploadsList.map((u, i) => (
           <li key={`${u.id}-${i}`} className="px-3 py-2">
             <div className="flex items-center justify-between gap-3">
-              <a
-                href={u.signed_url || '#'}
-                target="_blank"
-                rel="noreferrer"
-                onClick={(e) => { if (!u.signed_url) e.preventDefault(); }}
-                className="truncate hover:underline"
-                title={u.name}
-              >
-                {u.name}
-              </a>
+                <a
+                    href="#"
+                    className="truncate hover:underline"
+                    title={u.name}
+                    onClick={async (e) => {
+                        e.preventDefault();
+                        try {
+                        // Always ask the backend for a fresh signed URL
+                        const res = await apiFetch(`/api/uploads/${encodeURIComponent(u.id)}/url`, { cache: 'no-store' });
+                        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                        const data = await res.json();
+                        const fresh = (data && (data.signed_url || data.url)) as string | undefined;
+                        if (fresh) {
+                            window.open(fresh, '_blank', 'noopener,noreferrer');
+                        } else {
+                            alert('Could not get a download link. Try reloading the conversation or re-uploading the file.');
+                        }
+                        } catch (err) {
+                            console.error('open upload failed', err);
+                            alert('Link expired and could not be refreshed. Please reload the conversation or re-upload.');
+                        }
+                    }}
+                >
+                    {u.name}
+                </a>
+
             </div>
             <div className="mt-1 text-[11px] text-gray-400">
               {(u.created_at ? new Date(u.created_at).toLocaleString() : '')}

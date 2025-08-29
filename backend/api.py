@@ -1300,6 +1300,55 @@ async def upload_file(file: UploadFile = File(...), current_user: dict = Depends
     except Exception as e:
         print("upload_file error:", repr(e))
         return JSONResponse({"error": str(e)}, status_code=500)
+@app.get("/api/uploads/{upload_id}/url")
+async def get_upload_signed_url(upload_id: str, current_user: dict = Depends(get_current_user)):
+    """
+    Return a fresh short-lived signed URL for an uploaded file.
+    Prevents 'ExpiredToken' by generating on demand instead of using a stored link.
+    """
+    try:
+        # Look up the upload document
+        doc_ref = db.collection("uploads").document(upload_id)
+        snap = await doc_ref.get()
+        if not snap.exists:
+            raise HTTPException(status_code=404, detail="Upload not found")
+
+        data = snap.to_dict() or {}
+        # Make sure the caller owns this file
+        if (data.get("user_id") or "") != current_user["id"]:
+            raise HTTPException(status_code=403, detail="Not authorized to access this file")
+
+        bucket_name = data.get("bucket")
+        path = data.get("path")
+        if not bucket_name or not path:
+            raise HTTPException(status_code=500, detail="Upload missing bucket/path")
+
+        # Generate a new signed URL (V4) using IAM credentials
+        service_account_email = os.getenv("GCP_SERVICE_ACCOUNT_EMAIL")
+        if not service_account_email:
+            raise HTTPException(status_code=500, detail="Missing GCP_SERVICE_ACCOUNT_EMAIL env var for IAM-based URL signing")
+
+        adc_credentials, _ = google_auth_default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        if not adc_credentials.valid:
+            adc_credentials.refresh(AuthRequest())
+
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(path)
+
+        fresh_url = blob.generate_signed_url(
+            version="v4",
+            expiration=timedelta(minutes=10),   # good for immediate download
+            method="GET",
+            service_account_email=service_account_email,
+            access_token=adc_credentials.token,
+        )
+
+        return JSONResponse({"signed_url": fresh_url})
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("get_upload_signed_url error:", repr(e))
+        return JSONResponse({"error": "Could not generate download URL"}, status_code=500)
 
 @app.get("/api/uploads/{upload_id}/text")
 async def get_upload_text(upload_id: str, max_chars: int = 20000, current_user: dict = Depends(get_current_user)):
