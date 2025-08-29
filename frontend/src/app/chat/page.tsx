@@ -541,20 +541,9 @@ const removePending = (id: string) => setPendingFiles(prev => prev.filter(p => p
             if (got.length) seedUploads.push(...got);
             }
             if (seedUploads.length) {
-            setUploadsList(prev => {
-                const seen = new Set(prev.map(u => `${u.id}|${u.signed_url ?? ""}`));
-                const merged = [...prev];
-                for (const u of seedUploads) {
-                const key = `${u.id}|${u.signed_url ?? ""}`;
-                if (!seen.has(key)) {
-                    merged.push(u);
-                    seen.add(key);
-                }
-                }
-                merged.sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0));
-                return merged;
-            });
+                setUploadsList(seedUploads.sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0)));
             }
+
 
             setChatHistory(prev => (prev.length === 0 ? normalized : prev));
         } catch {
@@ -700,7 +689,7 @@ const loadConversations = useCallback(async () => {
     setShowSummary(false);
     setChatHistory([]);
     setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
-
+    setUploadsList([]);
     hydrateConversation(id);
     };
 
@@ -712,6 +701,12 @@ const loadConversations = useCallback(async () => {
     } catch {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
+    
+    useEffect(() => {
+        // Whenever we switch conversations (including when the server assigns a new one),
+        // start the uploads list empty; hydrateConversation will refill it.
+        setUploadsList([]);
+    }, [conversationId]);
 
     // Handle redirection to sign-in page when userToken is not present
     useEffect(() => {
@@ -893,6 +888,7 @@ const loadConversations = useCallback(async () => {
         setLoadedSummary(null);
         setShowSummary(false);
         setChatHistory([]);
+        setUploadsList([]);  // ← clear uploads for a fresh convo
         setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
         if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
             ws.current.close(1000, 'new-conversation');
