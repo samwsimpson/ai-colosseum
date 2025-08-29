@@ -1555,14 +1555,6 @@ const loadConversations = useCallback(async () => {
                         key={f.id}
                         className="inline-flex items-center gap-2 px-2 py-1 text-xs rounded-full bg-gray-800 border border-gray-700"
                     >
-                        {/\.(png|jpe?g|gif|webp|svg)$/i.test(f.name || '') && (f.signed_url || f.signedUrl) ? (
-                            <img
-                                src={f.signed_url ?? f.signedUrl}
-                                alt=""
-                                className="h-6 w-6 rounded object-cover mr-1"
-                            />
-                        ) : null}
-
                         <a
                             href={f.signed_url ?? f.signedUrl}
                             target="_blank"
@@ -1591,7 +1583,7 @@ const loadConversations = useCallback(async () => {
                 ref={fileInputRef}
                 onChange={handleFilePick}
                 className="hidden"
-                accept="image/*,.txt,md,json,js,ts,tsx,jsx,py,java,go,rb,php,css,html,sql,yaml,yml,sh,c,cpp,cs,rs,kt"
+                accept=".txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.java,.go,.rb,.php,.css,.html,.sql,.yaml,.yml,.sh,.c,.cpp,.cs,.rs,.kt"
                 multiple
             />
             <button
@@ -1655,16 +1647,6 @@ const loadConversations = useCallback(async () => {
         {uploadsList.map((u, i) => (
           <li key={`${u.id}-${i}`} className="px-3 py-2">
             <div className="flex items-center justify-between gap-3">
-                {/\.(png|jpe?g|gif|webp|svg)$/i.test(u.name || '') && u.signed_url ? (
-                    <div className="mb-1">
-                        <img
-                        src={u.signed_url}
-                        alt=""
-                        className="h-16 w-full rounded object-cover border border-gray-800"
-                        />
-                    </div>
-                ) : null}
-
               <a
                 href={u.signed_url || '#'}
                 target="_blank"
