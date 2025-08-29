@@ -435,7 +435,7 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
     }
 
 # === Conversations REST ===
-from typing import Optional, List
+
 from pydantic import BaseModel, constr
 
 def _ts_iso(v):
@@ -475,7 +475,7 @@ async def list_conversations(user=Depends(get_current_user)):
         })
     return {"items": items}
 
-from typing import Dict
+
 
 @app.get("/api/conversations/by_token")
 async def list_conversations_by_token(
@@ -630,7 +630,7 @@ async def export_conversation(conv_id: str, user=Depends(get_current_user)):
 
 
 # ---------- ADMIN BACKFILL (one-off) ----------
-from typing import Dict, List, Optional, Tuple
+
 from pydantic import BaseModel
 
 class BackfillRequest(BaseModel):
@@ -970,10 +970,10 @@ async def google_auth(auth_code: GoogleAuthCode, response: Response):
         # If you have the redirect URI here, this is an easy local/prod test:
         # --- BEFORE: environment-aware cookie ---       
         # Define a base cookie with production values by default.
-        is_local = auth_code.redirect_uri.startswith("http://localhost") if "auth_code" in locals() else False
+        
 
         # Define base cookie parameters with environment-specific values
-        is_local = auth_code.redirect_uri.startswith("http://localhost") if "auth_code" in locals() else False
+        is_local = (auth_code.redirect_uri or "").startswith("http://localhost")
 
         cookie_kwargs = dict(
             key="refresh_token",
@@ -1418,10 +1418,147 @@ async def get_upload_text(upload_id: str, max_chars: int = 20000, current_user: 
         print("get_upload_text error:", repr(e))
         return JSONResponse({"error": str(e)}, status_code=500)
 
+# The corrected websocket_endpoint function, followed by its helper functions
+
+
+class WebSocketUserProxyAgent(autogen.UserProxyAgent):
+    def __init__(self, *args, message_output_queue: asyncio.Queue, assistant_name_set: set[str], **kwargs):
+        super().__init__(*args, **kwargs)
+        self._message_output_queue = message_output_queue
+        self._user_input_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._assistant_name_set = set(assistant_name_set)
+        self._assistant_name_lower = {n.lower(): n for n in self._assistant_name_set}
+        self._last_text_by_sender: dict[str, str] = {}
+        self._assistant_names_list = sorted(list(self._assistant_name_set))
+
+    async def a_receive(self, message, sender=None, request_reply=True, silent=False):
+        speaker = (getattr(sender, "name", None) or (message.get("name") if isinstance(message, dict) else None) or "Unknown")
+        raw_text = ((message.get("content") if isinstance(message, dict) else None)
+                    or (message.get("text") if isinstance(message, dict) else None)
+                    or (str(message) if not isinstance(message, dict) else ""))
+        text = (raw_text or "").strip()
+        if speaker and speaker.lower().strip() in {"chat_manager", "manager", "orchestrator"}:
+            return {"content": "", "name": speaker}
+        prev = self._last_text_by_sender.get(speaker)
+        if prev and prev.strip() == text.strip():
+            return {"content": "", "name": speaker}
+        self._last_text_by_sender[speaker] = text
+        if text:
+            payload = {"sender": speaker, "text": text}
+            try:
+                self._message_output_queue.put_nowait(payload)
+            except Exception:
+                await self._message_output_queue.put(payload)
+            try:
+                self._message_output_queue.put_nowait({"sender": speaker, "typing": False, "text": ""})
+            except Exception:
+                pass
+        return await super().a_receive(message, sender=sender, request_reply=request_reply, silent=silent)
+
+    async def a_generate_reply(self, messages: List[Dict[str, Any]] | None = None,
+                               sender: autogen.ConversableAgent | None = None, **kwargs) -> Union[str, Dict, None]:
+        user_input = await self._user_input_queue.get()
+        return {"content": user_input, "role": "user", "name": self.name}
+
+    async def a_inject_user_message(self, message: str):
+        await self._user_input_queue.put(message)
+
+        
+
+
+async def message_consumer_task(queue: asyncio.Queue,ws: WebSocket,conv_ref,agent_name_set: set,user_internal_name: str,user_display_name: str,):
+    last_text_by_sender: dict[str, str] = {}
+    while True:
+        msg = await queue.get()
+        sender = (msg or {}).get("sender") or "System"
+        text = (msg or {}).get("text") or (msg or {}).get("content") or ""
+        is_typing_event = (msg and msg.get("typing") is not None)
+        if text and sender in agent_name_set and user_internal_name:
+            escaped = re.escape(user_internal_name).replace(r"\_", r"\\?_")
+            text = re.sub(escaped, user_display_name, text)
+        if text and last_text_by_sender.get(sender) == text and not is_typing_event: continue
+        if text or is_typing_event:
+            payload = dict(msg)
+            payload["text"] = text
+            if ws.application_state != WebSocketState.CONNECTED: break
+            try: await ws.send_json(payload)
+            except Exception as e: print("[ws] send failed:", e); break
+        else: continue
+        if text: last_text_by_sender[sender] = text
+        if sender != user_internal_name and text:
+            role = "assistant" if sender in agent_name_set else "system"
+            await save_message(conv_ref, role=role, sender=sender, content=text)
+            await maybe_refresh_summary(conv_ref)
 
 
 
+# ---- agent classes (restored) ----
+class WebSocketAssistantAgent(autogen.AssistantAgent):
+    def __init__(self, name, llm_config, system_message, message_output_queue: asyncio.Queue, proxy_for_forward: "WebSocketUserProxyAgent"):
+        super().__init__(name=name, llm_config=llm_config, system_message=system_message)
+        self._message_output_queue = message_output_queue
+        self._proxy_for_forward = proxy_for_forward
+    async def a_generate_reply(self, messages=None, sender=None, **kwargs):
+        print(f"[manager->assistant] speaker={self.name}")
+        try: self._message_output_queue.put_nowait({"sender": self.name, "typing": True, "text": ""})
+        except Exception: pass
+        result = None
+        out_text = ""
+        try:
+            delay = 0.8
+            for attempt in range(3):
+                try:
+                    result = await super().a_generate_reply(messages=messages, sender=sender, **kwargs)
+                    try:
+                        if isinstance(result, dict) and result.get("tool_calls"):
+                            tool_text_blocks = []
+                            for tc in result.get("tool_calls", []):
+                                fn = (tc.get("function") or {}).get("name")
+                                if fn == "get_upload_text":
+                                    import json
+                                    args_raw = (tc.get("function") or {}).get("arguments") or "{}"
+                                    try: args = json.loads(args_raw)
+                                    except Exception: args = {}
+                                    u_id = args.get("upload_id")
+                                    mchars = int(args.get("max_chars") or 20000)
+                                    if u_id:
+                                        tool_res = await get_upload_text_tool(upload_id=u_id, max_chars=mchars)
+                                        mime = (tool_res or {}).get("mime", "unknown")
+                                        text = (tool_res or {}).get("text", "") or ""
+                                        tool_text_blocks.append(f"[File {u_id} | {mime}]\n{text}")
+                            if tool_text_blocks: result = {"content": "\n\n".join(tool_text_blocks)}
+                    except Exception: result = {"content": "I tried to read the file but hit an internal error. Please try again."}
+                    break
+                except Exception as e:
+                    if attempt == 2: raise
+                    await asyncio.sleep(delay)
+                    delay *= 2
+        except Exception:
+            try: self._message_output_queue.put_nowait({"sender": self.name, "text": "I hit a temporary issue and couldn’t reply. Please ask again."})
+            except Exception: pass
+            result = {"content": ""}
+        else:
+            if isinstance(result, dict): out_text = (result.get("content") or result.get("text") or "").strip()
+            elif isinstance(result, str): out_text = result.strip()
+            else: out_text = str(result).strip()
+            if not out_text: print(f"[{self.name}] empty model output (result={repr(result)[:300]})")
+            if not out_text: out_text = "…(no content returned; please ask again or address me by name)"
+            result = out_text
+            if out_text:
+                try: self._message_output_queue.put_nowait({"sender": self.name, "text": out_text})
+                except Exception: await self._message_output_queue.put({"sender": self.name, "text": out_text})
+        finally:
+            try: self._message_output_queue.put_nowait({"sender": self.name, "typing": False, "text": ""})
+            except Exception: pass
+        if not isinstance(result, str):
+            try: result = (result.get("content") or result.get("text") or "").strip()
+            except Exception: result = ""
+        if not result: result = "…(no content returned; please ask again or address me by name)"
+        return result
 
+
+
+# The corrected websocket_endpoint function, followed by its helper functions
 @app.websocket("/ws/colosseum-chat")
 async def websocket_endpoint(websocket: WebSocket, token: str):
     try:
@@ -1429,701 +1566,138 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
         # ---- auth & monthly limit ----
         user = await get_current_user(token=token)
-
         user_doc = await db.collection('users').document(user['id']).get()
-        user_data = user_doc.to_dict()
-
-        user_subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
-        user_subscription_data = user_subscription_doc.to_dict()
+        user_data = user_doc.to_dict() or {}
+        user_subscription_doc = await db.collection('subscriptions').document(user_data.get('subscription_id', 'Free')).get()
+        user_subscription_data = user_subscription_doc.to_dict() or {}
 
         monthly_limit = user_subscription_data.get('monthly_limit')
         if monthly_limit is not None:
             first_day_of_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
-            conversation_count_query = (
-                db.collection('conversations')
-                .where('user_id', '==', user['id'])
-                .where('subscription_id', '==', user_data['subscription_id'])
-                .where('created_at', '>=', first_day_of_month)
-            )
-            conversation_count = 0
-            async for _ in conversation_count_query.stream():
-                conversation_count += 1
+            conversation_count_query = (db.collection('conversations').where('user_id', '==', user['id']).where('subscription_id', '==', user_data['subscription_id']).where('created_at', '>=', first_day_of_month))
+            conversation_count = len([doc async for doc in conversation_count_query.stream()])
             if conversation_count >= monthly_limit:
-                # Correct indentation starts here 👇
-                await websocket.send_json({
-                    "sender": "System",
-                    "text": "Your monthly conversation limit has been reached. Please upgrade your plan to continue."
-                })
+                await websocket.send_json({"sender": "System", "text": "Your monthly conversation limit has been reached. Please upgrade your plan to continue."})
                 await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Limit reached")
                 return
 
         # ---- init from client ----
         initial_config = await websocket.receive_json()
-
-        # Create or reuse a conversation (persists across reconnects)
-        conv_ref, conv_doc = await get_or_create_conversation(user['id'], {
-            **(initial_config or {}),
-            "subscription_id": user_data.get("subscription_id"),
-        })
-        # --- Ensure conversation doc is materialized & listable ---
+        conv_ref, conv_doc = await get_or_create_conversation(user['id'], {**(initial_config or {}), "subscription_id": user_data.get("subscription_id")})
 
         try:
-            snap = await conv_ref.get()
-            doc = snap.to_dict() or {}
-
-            # server-side timestamps
-            # now = firestore.SERVER_TIMESTAMP
-
-            # stable owner keys (doc id; also email if you have it)
             owner_keys = [user["id"]]
             if user.get("email"):
                 owner_keys.append(user["email"].lower())
-
-            seed = {
-                "user_id": user["id"],
-                "subscription_id": user_data.get("subscription_id"),
-                "owner_keys": ArrayUnion(owner_keys),
-                "title": doc.get("title") or "New conversation",
-                "created_at": doc.get("created_at") or FS_TS,
-                "updated_at": FS_TS if not doc.get("updated_at") else doc.get("updated_at"),
-                "message_count": doc.get("message_count", 0),
-            }
-
-            await conv_ref.set(seed, merge=True)
-
-        except Exception as e:
-            print("[ws] ensure conversation materialized failed:", e)
-
-        # NEW: ensure owner_keys are present so listing can find legacy/alternate keys
-        try:
-            safe_keys = [user["id"]]
-            if user.get("email"):
-                safe_keys.append(user["email"].lower())
-            await conv_ref.set({
-                "user_id": user["id"],                      # keep single owner field
-                "owner_keys": ArrayUnion(safe_keys)
-            }, merge=True)
+            await conv_ref.set({"user_id": user["id"], "subscription_id": user_data.get("subscription_id"), "owner_keys": ArrayUnion(owner_keys)}, merge=True)
         except Exception as e:
             print("[ws] owner_keys upsert failed:", e)
 
-        # Tell the client which conversation id we’re using
-        await websocket.send_json({
-            "sender": "System",
-            "type": "conversation_id",
-            "id": conv_ref.id,
-        })
+        await websocket.send_json({"sender": "System", "type": "conversation_id", "id": conv_ref.id})
         
-        # NEW: also send conversation meta so the sidebar can show it immediately
         try:
             snap = await conv_ref.get()
             doc = snap.to_dict() or {}
-            await websocket.send_json({
-                "sender": "System",
-                "type": "conversation_meta",
-                "id": conv_ref.id,
-                "title": (doc.get("title") or "New conversation"),
-                "updated_at": _ts_iso(doc.get("updated_at") or doc.get("created_at")),
-            })
+            await websocket.send_json({"sender": "System", "type": "conversation_meta", "id": conv_ref.id, "title": (doc.get("title") or "New conversation"), "updated_at": _ts_iso(doc.get("updated_at") or doc.get("created_at"))})
         except Exception as e:
             print("[ws] conversation_meta send failed:", e)
 
         message_output_queue: asyncio.Queue = asyncio.Queue(maxsize=100)
-        incoming_queue = asyncio.Queue()
-        user_input_queue: asyncio.Queue = asyncio.Queue()
-
-        def queue_send_nowait(payload: dict):
-            try:
-                message_output_queue.put_nowait(payload)
-            except asyncio.QueueFull:
-                try:
-                    _ = message_output_queue.get_nowait()  # drop oldest
-                except Exception:
-                    pass
-                try:
-                    message_output_queue.put_nowait(payload)
-                except Exception:
-                    pass
-
         raw_user_name = (initial_config.get('user_name') or 'User').strip()
         safe_user_name = re.sub(r'[^A-Za-z0-9_-]', '_', raw_user_name) or 'User'
-        user_display_name = raw_user_name.replace('_', ' ').strip()               # <-- pretty name for your UI
-
-        # Keep this list in one place
+        user_display_name = raw_user_name.replace('_', ' ').strip()
         agent_names = ["ChatGPT", "Claude", "Gemini", "Mistral"]
 
-        # === TOOL: get_upload_text (for assistants) ===
-        async def get_upload_text_tool(upload_id: str, max_chars: int = 20000) -> dict:
-            """
-            Return up to `max_chars` of text from a user-uploaded file by its upload_id.
-            Authorization: uses the current websocket user (no cross-user reads).
-            """
-            # 1) Look up the upload document and permission
-            doc_ref = db.collection("uploads").document(upload_id)
-            snapshot = await doc_ref.get()
+        
 
-            # If the caller passed a filename instead of the doc id, fall back to name lookup
-            if not snapshot.exists:
-                query = (db.collection("uploads")
-                        .where("user_id", "==", user["id"])
-                        .where("name", "==", upload_id)
-                        .limit(1))
-                async for doc in query.stream():
-                    snapshot = doc
-                    upload_id = doc.id  # normalize to the real id
-                    break
-
-            # Permission / existence check after fallback
-            if (not snapshot.exists) or ((snapshot.to_dict() or {}).get("user_id") != user["id"]):
-                return {"error": "not_found_or_forbidden"}
-
-
-            data = snapshot.to_dict() or {}
-            bucket_name = data.get("bucket")
-            path        = data.get("path")
-            mime        = data.get("mime") or "application/octet-stream"
-            if not bucket_name or not path:
-                return {"error": "metadata_incomplete"}
-
-            # 2) Download a head slice from GCS (off the event loop)
-            bucket = storage_client.bucket(bucket_name)
-            blob   = bucket.blob(path)
-
-            def _download_head(n: int) -> bytes:
-                # Read roughly enough bytes to decode to ~max_chars safely
-                return blob.download_as_bytes(start=0, end=max(1, n) - 1)
-
-            raw = await asyncio.to_thread(_download_head, max(4096, max_chars * 2))
-            try:
-                text = raw.decode("utf-8", errors="replace")
-            except Exception:
-                text = ""
-
-            # 3) Light fallback for non-text types
-            if (not text.strip()) and (not mime.startswith("text/")):
-                if mime in ("application/json", "application/xml", "application/javascript"):
-                    try:
-                        text = raw.decode("utf-8", errors="replace")
-                    except Exception:
-                        text = ""
-                if not text:
-                    text = "[Binary file: no text extracted]"
-
-            if len(text) > max_chars:
-                text = text[:max_chars] + "\n.[TRUNCATED]"
-
-            # Return a compact, model-friendly object
-            return {"upload_id": upload_id, "mime": mime, "text": text}
-        # === END TOOL ===
-
-
-        # --- randomized opening greeting (guarded: once per WS; skip if recently greeted) ---
         try:
-            import random
+            async def a_inject_user_message(self, message: str):
+                await self._user_input_queue.put(message)
 
-            # Only greet if this conversation has no messages yet (prevents greeting on resumes/reconnects)
+            import random
             has_any = False
             async for _ in (conv_ref.collection("messages").limit(1).stream()):
                 has_any = True
                 break
-
-            # Also skip if we greeted this (user, conversation) very recently (e.g., quick reconnect)
             key = (user['id'], conv_ref.id)
             now_mono = time.monotonic()
             last = RECENT_GREETS.get(key)
-
             if (not has_any) and (last is None or (now_mono - last) > GREETING_TTL_SECONDS):
-                greeter = random.choice(agent_names)  # e.g. "ChatGPT", "Claude", "Gemini", "Mistral"
+                greeter = random.choice(agent_names)
                 greeting_text = f"Hi {user_display_name}, what can we help you with?"
-
-                # Send greeting message immediately (no queue, so no risk of double-send)
                 await websocket.send_json({"sender": greeter, "text": greeting_text})
-
-                # Persist so your history shows the opener
                 await save_message(conv_ref, role="assistant", sender=greeter, content=greeting_text)
-
-
                 RECENT_GREETS[key] = now_mono
-
         except Exception as e:
             print("[opening greeting] skipped:", e)
-        # --- end greeting ---
 
         def make_agent_system(name: str) -> str:
-            base = {
-                "ChatGPT": CHATGPT_SYSTEM,
-                "Claude": CLAUDE_SYSTEM,
-                "Gemini": GEMINI_SYSTEM,
-                "Mistral": MISTRAL_SYSTEM,
-            }.get(name, "You are an assistant.")
-
-            # Use a single, simplified prompt for all agents
-            base_prompt = (
-                "You are in a group chat with a user and other AI assistants. "
+            base = {"ChatGPT": CHATGPT_SYSTEM,"Claude": CLAUDE_SYSTEM,"Gemini": GEMINI_SYSTEM,"Mistral": MISTRAL_SYSTEM,}.get(name, "You are an assistant.")
+            base_prompt = ("You are in a group chat with a user and other AI assistants. "
                 "Your primary goal is to address the user's request. "
                 "Read and understand the full conversation history. "
                 "Speak only when you have a distinct contribution to make or when directly addressed by the user. "
                 "Be concise, direct, and avoid conversational fillers like 'As an AI...' or 'I apologize...' unless you are correcting a factual error. "
-                "Do not comment on other assistants' turns or try to hand off the conversation. "
-            )
-            
-            # Tooling available to you:
-            # - get_upload_text(upload_id: string, max_chars: integer) -> { "mime": string, "text": string }
-            #   Use this whenever the user's provided `content` preview is insufficient.
-            #   The `upload_id` is the `id` found in file attachments (file_metadata_list / attachments).
-            #   Ask for only what you need (e.g., 10k–20k chars) to keep responses focused.
-
-            return (
-                f"{base}\n\n"
+                "Do not comment on other assistants' turns or try to hand off the conversation. ")
+            return (f"{base}\n\n"
                 f"Your name is {name}. Participants: {safe_user_name} (user), ChatGPT, Claude, Gemini, Mistral (assistants).\n"
                 f"{base_prompt}"
                 f"Ground your reply only in this chat. If you reference past statements, quote or paraphrase them from the visible messages. "
                 f"If unsure, ask for a quick clarification instead of guessing.\n"
                 f"Attribution: When asked to list who said what, use EXACT speaker names from the transcript "
                 f"(ChatGPT, Claude, Gemini, Mistral, {safe_user_name}). "
-                f"Do not merge, alias, or infer names."
-            )
+                f"Do not merge, alias, or infer names.")
 
+        chatgpt_llm_config = {"config_list": [{"model": "gpt-4o", "api_key": os.getenv("OPENAI_API_KEY"), "api_type": "openai"}], "temperature": 0.5, "timeout": 90,}
+        claude_llm_config = {"config_list": [{"model": "claude-3-5-sonnet-20240620", "api_key": os.getenv("ANTHROPIC_API_KEY"), "api_type": "anthropic"}], "temperature": 0.7, "timeout": 90}
+        gemini_llm_config = {"config_list": [{"model": "gemini-1.5-pro", "api_key": os.getenv("GEMINI_API_KEY"), "api_type": "google"}], "temperature": 0.7, "timeout": 90}
+        mistral_llm_config = {"config_list": [{"model": "mistral-large-latest", "api_key": os.getenv("MISTRAL_API_KEY"), "api_type": "mistral"}], "temperature": 0.7, "timeout": 90}
 
-        # ---- model configs ----
-        chatgpt_llm_config = {
-            "config_list": [{
-                "model": "gpt-4o",
-                "api_key": os.getenv("OPENAI_API_KEY"),
-                "api_type": "openai"
-            }],
-            "temperature": 0.5,
-            "timeout": 90,
-        }
-        claude_llm_config = {
-            "config_list": [{
-                "model": "claude-3-5-sonnet-20240620",
-                "api_key": os.getenv("ANTHROPIC_API_KEY"),
-                "api_type": "anthropic"
-            }],
-            "temperature": 0.7,
-            "timeout": 90
-        }
-        gemini_llm_config = {
-            "config_list": [{
-                "model": "gemini-1.5-pro",
-                "api_key": os.getenv("GEMINI_API_KEY"),
-                "api_type": "google"
-            }],
-            "temperature": 0.7,
-            "timeout": 90
-        }
-        mistral_llm_config = {
-            "config_list": [{
-                "model": "mistral-large-latest",
-                "api_key": os.getenv("MISTRAL_API_KEY"),
-                "api_type": "mistral"
-            }],
-            "temperature": 0.7,
-            "timeout": 90
-        }
-
-        # ---- agent classes ----
-        class WebSocketAssistantAgent(autogen.AssistantAgent):
-            def __init__(self, name, llm_config, system_message,
-                        message_output_queue: asyncio.Queue,
-                        proxy_for_forward: "WebSocketUserProxyAgent"):
-                super().__init__(name=name, llm_config=llm_config, system_message=system_message)
-                self._message_output_queue = message_output_queue
-                self._proxy_for_forward = proxy_for_forward
-
-            async def a_generate_reply(self, messages=None, sender=None, **kwargs):
-                print(f"[manager->assistant] speaker={self.name}")
-
-                # turn typing on for the assistant
-                try:
-                    self._message_output_queue.put_nowait({"sender": self.name, "typing": True, "text": ""})
-                except Exception:
-                    pass
-
-                result = None
-                out_text = ""
-
-                try:
-                    # SIMPLE RETRY (3 attempts with backoff) to avoid silent failures
-                    delay = 0.8
-                    last_exc = None
-                    for attempt in range(3):
-                        try:
-                            result = await super().a_generate_reply(messages=messages, sender=sender, **kwargs)
-                            # ---- Resolve OpenAI tool_calls inline to avoid dangling calls ----
-                            try:
-                                if isinstance(result, dict) and result.get("tool_calls"):
-                                    tool_text_blocks = []
-                                    for tc in result.get("tool_calls", []):
-                                        fn = (tc.get("function") or {}).get("name")
-                                        if fn == "get_upload_text":
-                                            import json  # ok if already imported elsewhere
-                                            args_raw = (tc.get("function") or {}).get("arguments") or "{}"
-                                            try:
-                                                args = json.loads(args_raw)
-                                            except Exception:
-                                                args = {}
-                                            u_id = args.get("upload_id")
-                                            mchars = int(args.get("max_chars") or 20000)
-                                            if u_id:
-                                                # Execute the tool directly and turn it into plain text
-                                                tool_res = await get_upload_text_tool(upload_id=u_id, max_chars=mchars)
-                                                mime = (tool_res or {}).get("mime", "unknown")
-                                                text = (tool_res or {}).get("text", "") or ""
-                                                tool_text_blocks.append(f"[File {u_id} | {mime}]\n{text}")
-                                    if tool_text_blocks:
-                                        # Replace the assistant's tool call with normal content
-                                        result = {"content": "\n\n".join(tool_text_blocks)}
-                            except Exception:
-                                # Degrade gracefully; never return a raw tool_calls message
-                                result = {"content": "I tried to read the file but hit an internal error. Please try again."}
-                            # ---- END resolve tool_calls ----
-
-                            break
-                        except Exception as e:
-                            last_exc = e
-                            if attempt == 2:
-                                raise
-                            await asyncio.sleep(delay)
-                            delay *= 2
-                except Exception:
-                    # If all retries fail, show a small, friendly bubble instead of silence
-                    try:
-                        self._message_output_queue.put_nowait({
-                            "sender": self.name,
-                            "text": "I hit a temporary issue and couldn’t reply. Please ask again."
-                        })
-                    except Exception:
-                        pass
-                    result = {"content": ""}  # unify return shape for caller
-                else:
-                    # Normalize to a plain string
-                    if isinstance(result, dict):
-                        out_text = (result.get("content") or result.get("text") or "").strip()
-                    elif isinstance(result, str):
-                        out_text = result.strip()
-                    elif result is None:
-                        out_text = ""
-                    else:
-                        out_text = str(result).strip()
-
-                    # DEBUG: log when the model produced nothing (helps confirm the root cause)
-                    if not out_text:
-                        print(f"[{self.name}] empty model output (result={repr(result)[:300]})")
-
-                    # Guard: show a short message instead of pure silence
-                    if not out_text:
-                        out_text = "…(no content returned; please ask again or address me by name)"              
-
-                    # Make sure the value we return up the stack is text, not a raw dict
-                    result = out_text
-
-                    # NEW: proactively forward the assistant's reply to the browser
-                    if out_text:
-                        try:
-                            self._message_output_queue.put_nowait({
-                                "sender": self.name,
-                                "text": out_text
-                            })
-                        except Exception:
-                            # best-effort fallback
-                            await self._message_output_queue.put({
-                                "sender": self.name,
-                                "text": out_text
-                            })
-
-
-                    
-
-                finally:
-                    # ALWAYS clear typing even if we error/return early
-                    try:
-                        self._message_output_queue.put_nowait({"sender": self.name, "typing": False, "text": ""})
-                    except Exception:
-                        pass
-
-                # Final safety: never return a non-string or empty payload
-                if not isinstance(result, str):
-                    try:
-                        result = (result.get("content") or result.get("text") or "").strip()
-                    except Exception:
-                        result = ""
-
-                if not result:
-                    result = "…(no content returned; please ask again or address me by name)"
-
-                return result
-
-
-        class WebSocketUserProxyAgent(autogen.UserProxyAgent):
-            """
-            User proxy that:
-            - forwards every visible assistant message to the browser
-            - suppresses repeated greeting spam (allow exactly one greeting per assistant per conversation)
-            - lets us inject user text asynchronously
-            - robustly determines the real speaker (ChatGPT/Claude/Gemini/Mistral)
-            """
-            def __init__(self, *args, message_output_queue: asyncio.Queue, assistant_name_set: set[str], **kwargs):
-                super().__init__(*args, **kwargs)
-                self._message_output_queue = message_output_queue
-                self._user_input_queue: asyncio.Queue[str] = asyncio.Queue()
-                self._assistant_name_set = set(assistant_name_set)
-                self._assistant_name_lower = {n.lower(): n for n in self._assistant_name_set}
-                # Keep this for de-duping, but remove the rest
-                self._last_text_by_sender: dict[str, str] = {}
-                # NEW: authoritative ledger for each assistant's latest number
-                
-                self._assistant_names_list = sorted(list(self._assistant_name_set))
-            
-            async def a_receive(self, message, sender=None, request_reply=True, silent=False):
-                """
-                Intercepts assistant->user messages and forwards them to the browser,
-                while handling termination and basic de-duplication.
-                """
-                # ---- normalize the incoming payload ----
-                speaker = (
-                    getattr(sender, "name", None)
-                    or (message.get("name") if isinstance(message, dict) else None)
-                    or "Unknown"
-                )
-                raw_text = (
-                    (message.get("content") if isinstance(message, dict) else None)
-                    or (message.get("text") if isinstance(message, dict) else None)
-                    or (str(message) if not isinstance(message, dict) else "")
-                )
-                text = (raw_text or "").strip()
-
-                # Never show manager/system lines
-                if speaker and speaker.lower().strip() in {"chat_manager", "manager", "orchestrator"}:
-                    return {"content": "", "name": speaker}
-
-                # De-dup identical consecutive messages (This is a helpful heuristic to keep)
-                prev = self._last_text_by_sender.get(speaker)
-                if prev and prev.strip() == text.strip():
-                    return {"content": "", "name": speaker}
-                self._last_text_by_sender[speaker] = text
-
-                # Forward to browser
-                if text:
-                    payload = {"sender": speaker, "text": text}
-                    try:
-                        self._message_output_queue.put_nowait(payload)
-                    except Exception:
-                        await self._message_output_queue.put(payload)
-
-                    # Send the typing-off message
-                    try:
-                        self._message_output_queue.put_nowait({"sender": speaker, "typing": False, "text": ""})
-                    except Exception:
-                        pass
-
-                # Keep base behavior for Autogen bookkeeping
-                return await super().a_receive(message, sender=sender, request_reply=request_reply, silent=silent)
-
-  
-
-
-        # ---- build roster ----
-        user_proxy = WebSocketUserProxyAgent(
-            name=safe_user_name,  # <-- use the safe internal name
-            human_input_mode="NEVER",
-            message_output_queue=message_output_queue,
-            assistant_name_set=set(agent_names), 
-            code_execution_config={"use_docker": False},
-            is_termination_msg=lambda x: isinstance(x, dict) and x.get("content", "").endswith("TERMINATE")
-        )
-     
-        agents = [user_proxy]
-        agents.append(WebSocketAssistantAgent(
-            "ChatGPT",
-            llm_config=chatgpt_llm_config,
-            system_message=make_agent_system("ChatGPT"),
-            message_output_queue=message_output_queue,
-            proxy_for_forward=user_proxy,
-        ))
-        agents.append(WebSocketAssistantAgent(
-            "Claude",
-            llm_config=claude_llm_config,
-            system_message=make_agent_system("Claude"),
-            message_output_queue=message_output_queue,
-            proxy_for_forward=user_proxy,
-        ))
-        agents.append(WebSocketAssistantAgent(
-            "Gemini",
-            llm_config=gemini_llm_config,
-            system_message=make_agent_system("Gemini"),
-            message_output_queue=message_output_queue,
-            proxy_for_forward=user_proxy,
-        ))
-        agents.append(WebSocketAssistantAgent(
-            "Mistral",
-            llm_config=mistral_llm_config,
-            system_message=make_agent_system("Mistral"),
-            message_output_queue=message_output_queue,
-            proxy_for_forward=user_proxy,
-        ))
-
-        # === Register tool for function-calling ===
-        # Let each assistant *see* the tool definition (function schema)
-        for a in agents[1:]:  # assistants only
-            if a.name == "ChatGPT":
-                continue
-            a.register_for_llm(
-                name="get_upload_text",
-                description="Return up to max_chars of text from a user-uploaded file.",
-            )(get_upload_text_tool)
-
-
-        # Let the user proxy actually *execute* the tool call when the LLM requests it
-        user_proxy.register_for_execution(
-            name="get_upload_text"
-        )(get_upload_text_tool)
-        # === END Registration ===
-
-        print("AGENTS IN GROUPCHAT:")
-        for a in agents:
-            print(f" - {a.name}")
-        if len(agents) < 2:
-            await websocket.send_json({"sender": "System", "text": "No AIs available for your subscription."})
-            return
-
-        seed_messages = []
-        if conv_doc.get("summary"):
-            seed_messages.append({
-                "role": "system",
-                "content": f"Conversation summary so far:\n{conv_doc['summary']}"
-            })
-
-        seed_messages.append({
-            "role": "system",
-            "content": (
-                f"Participants: ChatGPT (assistant), Claude (assistant), Gemini (assistant), Mistral (assistant). "
-                f"User: {safe_user_name} (human).\n"
-                f"Speaker map (USE EXACT STRINGS): ChatGPT, Claude, Gemini, Mistral, {safe_user_name}.\n"
-                f"Attribution rules:\n"
-                f"• When listing who said what, copy the exact speaker names from the transcript; do not infer or rename.\n"
-                f"• Never attribute any assistant's message to {safe_user_name}.\n"
-                f"• If the user attached files, you may call get_upload_text(upload_id, max_chars) to read more from them when the preview is insufficient.\n"
-                f"• If an assistant did not provide a number, say 'not provided' for that assistant only.\n"
-                "Memory: This conversation is persistent. Rely on the 'Conversation summary' for prior context."
-            )
-        })
-
-        # Add this block right after the seed_messages block
-        groupchat = autogen.GroupChat(
-            agents=agents,
-            messages=seed_messages,
-            max_round=999999,
-            speaker_selection_method="auto",
-            allow_repeat_speaker=True,
-        )
-
-        manager = autogen.GroupChatManager(
-            groupchat=groupchat,
-            llm_config=chatgpt_llm_config,
-            system_message=(
-                f"You are the group chat manager. Decide the single next speaker by exact name.\n\n"
-                f"VALID SPEAKERS:\n"
-                f"- {safe_user_name}  (the human user)\n"
-                f"- ChatGPT\n- Claude\n- Gemini\n- Mistral\n\n"
-                f"Rules:\n"
-                f"1) If the user directly addresses an assistant by name, select that assistant.\n"
-                f"2) If the user addresses *everyone* (phrases like 'everyone', 'all of you', 'each of you', "
-                f"'all', 'y’all', 'you guys', 'all the models'), schedule answers from ChatGPT, Claude, Gemini, Mistral — "
-                f"one per round (any sensible order). After all four respond, select {safe_user_name}.\n"
-                f"   Do not skip due to redundancy — every assistant must reply once.\n"
-                f"   Keep each reply concise; overlap is acceptable when asked for everyone.\n"
-                f"3) If the user doesn’t specify anyone, prefer the last assistant who replied; otherwise choose the most relevant assistant.\n"
-                f"4) When you want more input from the human, select {safe_user_name} (never 'User').\n"
-                f"5) Use exact names only: {safe_user_name}, ChatGPT, Claude, Gemini, Mistral.\n\n"
-                f"Output only one of those names and nothing else."
-            )
-        )
         
-        # --- NEW CODE: Redesigned chat loop to prevent deadlock ---
-        
-# The corrected main_chat_loop function
+
+
+
 async def main_chat_loop(ws: WebSocket, proxy: WebSocketUserProxyAgent, manager, conv_ref):
-    is_first_message = True
-    
-    # This queue holds user messages to be processed sequentially
     user_message_queue = asyncio.Queue()
-
-    # The task that drives the Autogen conversation
     async def run_autogen_chat():
         while True:
-            # Wait for the next user message to arrive
             full_user_content = await user_message_queue.get()
-            
-            # Use a dummy first message to kick off the conversation
-            messages = [{
-                "role": "user",
-                "content": full_user_content,
-                "name": proxy.name,
-            }]
-            
-            await proxy.a_initiate_chat(
-                manager,
-                message=messages,
-                clear_history=False,
-            )
-            
-            # Signal that this message has been processed
+            messages = [{"role": "user", "content": full_user_content, "name": proxy.name}]
+            await proxy.a_initiate_chat(manager, message=messages, clear_history=False)
             user_message_queue.task_done()
-
-    # Start the Autogen chat task as a background process
     autogen_task = asyncio.create_task(run_autogen_chat())
-
     while True:
         try:
-            # Wait for user input from the WebSocket
             data = await ws.receive_json()
-
-            # --- Message processing logic (same as before) ---
             if isinstance(data, dict) and data.get("type") in ("ping", "pong"):
-                if data.get("type") == "ping":
-                    await ws.send_json({"type": "pong"})
+                if data.get("type") == "ping": await ws.send_json({"type": "pong"})
                 continue
-            
             files = data.get("file_metadata_list") or []
-            if not files and data.get("file_metadata"):
-                files = [data["file_metadata"]]
-
+            if not files and data.get("file_metadata"): files = [data["file_metadata"]]
             if not files:
                 att_ids = data.get("attachments") or []
                 resolved = []
                 for fid in att_ids:
-                    if not fid:
-                        continue
+                    if not fid: continue
                     try:
                         snap = await db.collection("uploads").document(str(fid)).get()
                         if snap.exists:
                             doc = snap.to_dict() or {}
                             resolved.append({
-                                "id": snap.id,
-                                "filename": doc.get("name") or doc.get("filename") or "uploaded-file",
+                                "id": snap.id,"filename": doc.get("name") or doc.get("filename") or "uploaded-file",
                                 "content_type": doc.get("mime") or doc.get("content_type") or "application/octet-stream",
                                 "size": doc.get("size"),
                                 "url": doc.get("signed_url") or doc.get("url"),
-                                "content": doc.get("content"),
-                            })
-                    except Exception as e:
-                        print(f"[ws] resolve attachment {fid} failed: {e}")
+                                "content": doc.get("content"),})
+                    except Exception as e: print(f"[ws] resolve attachment {fid} failed: {e}")
                 files = resolved
-                    
             user_message = data.get("message", "") or data.get("text", "") or ""
-            
             if not user_message:
                 file_count = len(files or [])
-                if file_count > 0:
-                    user_message = f"(sent {file_count} file{'s' if file_count != 1 else ''})"
-                else:
-                    continue
-
+                if file_count > 0: user_message = f"(sent {file_count} file{'s' if file_count != 1 else ''})"
+                else: continue
             full_user_content = user_message
             image_urls = []
-            openai_parts = [{"type": "text", "text": full_user_content}]
-            
             if files:
                 blocks = []
                 for f in files:
@@ -2142,178 +1716,73 @@ async def main_chat_loop(ws: WebSocket, proxy: WebSocketUserProxyAgent, manager,
                         url = f.get("url")
                         blocks.append(header + (f"\n(Downloadable URL: {url})" if url else ""))
                 full_user_content = (user_message + "\n\n" + "\n\n".join(blocks)).strip()
-                image_urls = [
-                    (f.get("url") or "")
-                    for f in (files or [])
-                    if str(f.get("content_type") or "").startswith("image/") and (f.get("url") or "")
-                ]
-                openai_parts = [{"type": "text", "text": full_user_content}]
-                for u in image_urls:
-                    openai_parts.append({"type": "image_url", "image_url": {"url": u}})
-            
-            # Save and echo the user turn
-            await save_message(
-                conv_ref,
-                role="user",
-                sender=proxy.name,
-                content=user_message,
-                file_metadata_list=files,
-            )
-            await ws.send_json({
-                "sender": proxy.name,
-                "text": user_message,
-                "file_metadata_list": files,
-            })
+                image_urls = [(f.get("url") or "") for f in (files or []) if str(f.get("content_type") or "").startswith("image/") and (f.get("url") or "")]
+            await save_message(conv_ref,role="user",sender=proxy.name,content=user_message,file_metadata_list=files,)
+            await ws.send_json({"sender": proxy.name, "text": user_message, "file_metadata_list": files,})
             await maybe_set_title(conv_ref, user_message)
-
-            # Update conversation meta
             try:
                 snap = await conv_ref.get()
                 doc = snap.to_dict() or {}
-                await ws.send_json({
-                    "sender": "System",
-                    "type": "conversation_meta",
-                    "id": conv_ref.id,
-                    "title": (doc.get("title") or "New conversation"),
-                    "updated_at": _ts_iso(doc.get("updated_at") or doc.get("created_at")),
-                })
-            except Exception as e:
-                print("[ws] conversation_meta (post-title) send failed:", e)
-
-            # Add the user message to the queue to be processed by the Autogen task
+                await ws.send_json({"sender": "System","type": "conversation_meta","id": conv_ref.id,"title": (doc.get("title") or "New conversation"),"updated_at": _ts_iso(doc.get("updated_at") or doc.get("created_at")),})
+            except Exception as e: print("[ws] conversation_meta (post-title) send failed:", e)
             await user_message_queue.put(full_user_content)
+        except WebSocketDisconnect: print("main_chat_loop: WebSocket disconnected."); break
+        except Exception as e: print(f"main_chat_loop error: {e}"); break
 
 
-        except WebSocketDisconnect:
-            print("main_chat_loop: WebSocket disconnected.")
+async def keepalive_task(ws: WebSocket):
+    try:
+        while True:
+            await asyncio.sleep(20)
+            if ws.application_state != WebSocketState.CONNECTED: break
+            try: await ws.send_json({"sender": "System", "type": "server_ping"})
+            except Exception: break
+    except Exception as e: print(f"keepalive_task error: {e}")
+
+async def get_upload_text_tool(upload_id: str, user_id: str, max_chars: int = 20000) -> dict:
+    doc_ref = db.collection("uploads").document(upload_id)
+    snapshot = await doc_ref.get()
+    if not snapshot.exists:
+        # allow filename fallback for convenience
+        query = (db.collection("uploads")
+                 .where("user_id", "==", user_id)
+                 .where("name", "==", upload_id)
+                 .limit(1))
+        async for doc in query.stream():
+            snapshot = doc
+            upload_id = doc.id
             break
-        except Exception as e:
-            print(f"main_chat_loop error: {e}")
-            break
-                    
-        # This task sends AI messages from the output queue to the WebSocket
-        # single, canonical version
-        async def message_consumer_task(
-            queue: asyncio.Queue,
-            ws: WebSocket,
-            conv_ref,
-            agent_name_set: set,
-            user_internal_name: str,
-            user_display_name: str,
-        ):
-            last_text_by_sender: dict[str, str] = {}
+    if (not snapshot.exists) or ((snapshot.to_dict() or {}).get("user_id") != user_id):
+        return {"error": "not_found_or_forbidden"}
+    data = snapshot.to_dict() or {}
+    bucket_name = data.get("bucket"); path = data.get("path"); mime = data.get("mime") or "application/octet-stream"
+    if not bucket_name or not path: return {"error": "metadata_incomplete"}
+    bucket = storage_client.bucket(bucket_name); blob = bucket.blob(path)
 
-            while True:
-                msg = await queue.get()
-
-                sender = (msg or {}).get("sender") or "System"
-                text = (msg or {}).get("text") or (msg or {}).get("content") or ""
-                is_typing_event = (msg and msg.get("typing") is not None)
-    
-                # Display-only cleanup: replace internal token with pretty name (handles markdown-escaped underscores)
-                if text and sender in agent_name_set and user_internal_name:
-                    # Build a pattern that treats '_' as possibly escaped '\_'
-                    escaped = re.escape(user_internal_name).replace(r"\_", r"\\?_")
-                    text = re.sub(escaped, user_display_name, text)
+    def _download_head(n: int) -> bytes: return blob.download_as_bytes(start=0, end=max(1, n) - 1)
+    raw = await asyncio.to_thread(_download_head, max(4096, max_chars * 2))
+    try:
+        text = raw.decode("utf-8", errors="replace")
+    except Exception:
+        text = ""
+    if (not text.strip()) and (not mime.startswith("text/")):
+        if mime in ("application/json", "application/xml", "application/javascript"):
+            try: text = raw.decode("utf-8", errors="replace")
+            except Exception: pass
+        if not text: text = "[Binary file: no text extracted]"
+    if len(text) > max_chars: text = text[:max_chars] + "\n.[TRUNCATED]"
+    return {"upload_id": upload_id, "mime": mime, "text": text}
 
 
-                # --- DEDUPE: skip duplicate non-empty texts from the same sender (typing still passes) ---
-                if text and last_text_by_sender.get(sender) == text and not is_typing_event:
-                    continue
+# ---- agent classes (restored) ----
 
-                # Forward sanitized payload (and typing events) to the browser
-                if text or is_typing_event:
-                    payload = dict(msg)
-                    payload["text"] = text  # ensure sanitized text goes out
-                    # Guard against races / closed socket
-                    if ws.application_state != WebSocketState.CONNECTED:
-                        break
-                    try:
-                        await ws.send_json(payload)
-                    except Exception as e:
-                        print("[ws] send failed:", e)
-                        break
-                else:
-                    # nothing to show
-                    continue
+# This task sends AI messages from the output queue to the WebSocket
 
-                # Remember last text per sender after successful send (for future dedupe)
-                if text:
-                    last_text_by_sender[sender] = text
 
-                # Persist only real assistant/system messages with content (skip user + typing-only)
-                if sender != user_internal_name and text:
-                    role = "assistant" if sender in agent_name_set else "system"
-                    await save_message(conv_ref, role=role, sender=sender, content=text)
-                    await maybe_refresh_summary(conv_ref)
 
-        
-        
 
-        async def keepalive_task(ws: WebSocket):
-            try:
-                while True:
-                    await asyncio.sleep(20)
-                    if ws.application_state != WebSocketState.CONNECTED:
-                        break
-                    try:
-                        await ws.send_json({"sender": "System", "type": "server_ping"})
-                    except Exception:
-                        break
-            except Exception as e:
-                print(f"keepalive_task error: {e}")
-            
-                
-        # We start the tasks that are truly independent and long-running
-#
-        consumer_task_coro = asyncio.create_task(
-            message_consumer_task(message_output_queue, websocket, conv_ref, agent_names, safe_user_name, user_display_name)
-        )
-        keepalive_task_coro = asyncio.create_task(keepalive_task(websocket))
-        
-        try:
-            # The single, main chat loop that handles all WebSocket traffic
-            await main_chat_loop(websocket, user_proxy, manager, conv_ref)
 
-        except WebSocketDisconnect:
-            print("WebSocket closed normally.")
-        except Exception as e:
-            tb = traceback.format_exc()
-            print(f"General exception in main loop: {e}\n{tb}")
-            try:
-                await websocket.send_json({"sender": "System", "text": f"Error: {e}"})
-            except Exception:
-                pass
-        finally:
-            # Clean up all background tasks gracefully
-            for t in (consumer_task_coro, keepalive_task_coro):
-                if not t.done():
-                    t.cancel()
-            await asyncio.gather(consumer_task_coro, keepalive_task_coro, return_exceptions=True)
-        except WebSocketDisconnect:
-            print("WebSocket closed normally.")
-        except Exception as e:
-            tb = traceback.format_exc()
-            print(f"General exception in main gather: {e}\n{tb}")
-            try:
-                await websocket.send_json({"sender": "System", "text": f"Error: {e}"})
-            except Exception:
-                pass
-        finally:
-            for t in (consumer_task_coro, main_chat_loop_coro, keepalive_task_coro):
-                if not t.done():
-                    t.cancel()
-            await asyncio.gather(consumer_task_coro, main_chat_loop_coro, keepalive_task_coro, return_exceptions=True)
 
-    except WebSocketDisconnect:
-        print("Outer WebSocketDisconnect caught.")
-    except Exception as e:
-        tb = traceback.format_exc()
-        print(f"General exception: {e}\n{tb}")
-        try:
-            await websocket.send_json({"sender": "System", "text": f"Error: {e}"})
-        except WebSocketDisconnect:
-            pass
 
 if __name__ == "__main__":
     import uvicorn, os
