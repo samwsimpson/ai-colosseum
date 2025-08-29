@@ -1268,13 +1268,10 @@ const loadConversations = useCallback(async () => {
 
 
     return (
-    <div className="flex h-screen w-full bg-gray-950 text-white font-sans antialiased pt-[72px]">
+    <div className="flex h-screen w-full bg-gray-900 text-white font-sans antialiased pt-[72px]">
 
         {/* LEFT SIDEBAR */}
-        <aside className="hidden md:flex md:flex-col fixed left-0 top-0 bottom-0 w-72 border-r border-gray-800 bg-gray-900 z-20">
-
-
-
+        <aside className="hidden md:flex md:flex-col fixed left-0 top-[72px] bottom-0 w-72 border-r border-gray-800 bg-gray-900 z-20">
 
         <div className="p-4 border-b border-gray-800 flex items-center justify-between">
         <div className="font-semibold">Conversations</div>
@@ -1631,8 +1628,7 @@ const loadConversations = useCallback(async () => {
 
         </div>
 {/* RIGHT SIDEBAR — Uploaded files (always visible) */}
-<aside className="hidden md:flex md:flex-col fixed right-0 top-0 bottom-0 w-72 border-l border-gray-800 bg-gray-900 z-20">
-
+<aside className="hidden md:flex md:flex-col fixed right-0 top-[72px] bottom-0 w-72 border-l border-gray-800 bg-gray-900 z-20">
 
   <div className="p-4 border-b border-gray-800">
     <div className="font-semibold">Uploads</div>
