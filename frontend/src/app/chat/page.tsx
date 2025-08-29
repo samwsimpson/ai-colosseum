@@ -1253,6 +1253,11 @@ const loadConversations = useCallback(async () => {
 
         setTimeout(() => setWsReconnectNonce(n => n + 1), 50);
     };
+    function isImageLike(mime?: string, name?: string) {
+    if (mime && mime.startsWith('image/')) return true;
+    if (!name) return false;
+    return /\.(png|jpe?g|gif|webp|svg)$/i.test(name);
+    }
 
     function formatBytes(n?: number | null) {
         if (!n || n <= 0) return '';
@@ -1548,6 +1553,18 @@ const loadConversations = useCallback(async () => {
                         key={f.id}
                         className="inline-flex items-center gap-2 px-2 py-1 text-xs rounded-full bg-gray-800 border border-gray-700"
                     >
+                        {isImageLike(f.mime, f.name) && (
+                        <img
+                            src={f.signed_url ?? f.signedUrl}
+                            alt={f.name}
+                            className="w-6 h-6 rounded object-cover border border-gray-700"
+                            loading="eager"
+                            decoding="async"
+                            referrerPolicy="no-referrer"
+                            onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                        />
+                        )}
+
                         <a
                             href={f.signed_url ?? f.signedUrl}
                             target="_blank"
@@ -1576,7 +1593,7 @@ const loadConversations = useCallback(async () => {
                 ref={fileInputRef}
                 onChange={handleFilePick}
                 className="hidden"
-                accept=".txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.java,.go,.rb,.php,.css,.html,.sql,.yaml,.yml,.sh,.c,.cpp,.cs,.rs,.kt"
+                accept=".txt,.md,.json,.js,.ts,.tsx,.jsx,.py,.java,.go,.rb,.php,.css,.html,.sql,.yaml,.yml,.sh,.c,.cpp,.cs,.rs,.kt,image/*,.png,.jpg,.jpeg,.gif,.webp,.svg"
                 multiple
             />
             <button
@@ -1639,6 +1656,18 @@ const loadConversations = useCallback(async () => {
         {uploadsList.map((u, i) => (
           <li key={`${u.id}-${i}`} className="px-3 py-2">
             <div className="flex items-center justify-between gap-3">
+                {isImageLike(u.mime, u.name) && u.signed_url && (
+                <img
+                    src={u.signed_url}
+                    alt={u.name}
+                    className="w-10 h-10 rounded object-cover border border-gray-700 flex-shrink-0"
+                    loading="lazy"
+                    decoding="async"
+                    referrerPolicy="no-referrer"
+                    onError={(e) => { (e.currentTarget as HTMLImageElement).style.display = 'none'; }}
+                />
+                )}
+
                 <a
                     href="#"
                     className="truncate hover:underline"
