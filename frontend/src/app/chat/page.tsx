@@ -184,6 +184,9 @@ export default function ChatPage() {
         if (!value) {
         setIsTyping(prev => ({ ...prev, [agent]: false }));
         delete typingTimersRef.current[agent];
+        if (!authChecked) return null;  // or a skeleton loader if you prefer
+        if (!authed) return null;       // redirect already in flight
+
         return;
         }
 
@@ -205,6 +208,9 @@ export default function ChatPage() {
 const { userName, userToken } = useUser();
 const router = useRouter();
 const pathname = usePathname();
+const [authChecked, setAuthChecked] = useState(false);
+const [authed, setAuthed] = useState(false);
+
 
 // === State for the UI and chat logic ===
 const [message, setMessage] = useState<string>('');
@@ -708,45 +714,62 @@ const loadConversations = useCallback(async () => {
         setUploadsList([]);
     }, [conversationId]);
 
-    // Handle redirection to sign-in page when userToken is not present
+    // Auth gate: never render chat unless authenticated (no UI flash)
     useEffect(() => {
-        const checkAuthAndLoad = async () => {
-            if (userToken) {
-                // A token is present in the context. We're authenticated.
-                loadConversations();
-                setWsReconnectNonce(n => n + 1);
-                return;
-            }
+    let cancelled = false;
 
-            // No token in context. Check localStorage.
-            const hasAccess = typeof window !== 'undefined' && !!localStorage.getItem('access_token');
-            if (hasAccess) {
-                // A token exists, but the context hasn't updated yet.
-                // We can safely assume we'll be authenticated.
-                loadConversations();
-                setWsReconnectNonce(n => n + 1);
-                return;
-            }
+    const checkAuthAndLoad = async () => {
+        try {
+        // 1) Context token → authed
+        if (userToken) {
+            if (!cancelled) { setAuthed(true); setAuthChecked(true); }
+            loadConversations();
+            setWsReconnectNonce(n => n + 1);
+            return;
+        }
 
-            // No token found anywhere, so redirect to sign-in.
-            try { localStorage.removeItem('conversationId'); } catch {}
-            setConversationId(null);
-            setChatHistory([]);
-            setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+        // 2) Ask backend for a fresh access token if the HttpOnly refresh cookie exists
+        //    (middleware ensures guests don't reach this page, but this covers race cases)
+        const res = await fetch('/api/refresh', { method: 'POST', credentials: 'include' });
+        if (res.ok) {
+            const body = await res.json();
+            try { localStorage.setItem('access_token', body.access_token); } catch {}
+            if (!cancelled) { setAuthed(true); setAuthChecked(true); }
+            loadConversations();
+            setWsReconnectNonce(n => n + 1);
+            return;
+        }
+        } catch {
+        // ignore
+        }
 
-            if (ws.current && ws.current.readyState < 2) {
-                ws.current.close(1000, 'logout');
-            }
-            ws.current = null;
+        // 3) Not authed → clear & redirect (no UI flash)
+        try { localStorage.removeItem('access_token'); } catch {}
+        setConversationId(null);
+        setChatHistory([]);
+        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
 
-            if (pathname !== '/sign-in') {
-                router.push('/sign-in');
-            }
-        };
-        
-        checkAuthAndLoad();
+        if (ws.current && ws.current.readyState < 2) {
+        ws.current.close(1000, 'logout');
+        }
+        ws.current = null;
 
-        }, [userToken, pathname, router, loadConversations]);
+        if (!cancelled) {
+        setAuthed(false);
+        setAuthChecked(true);
+        }
+
+        if (pathname !== '/sign-in') {
+        router.replace(
+            '/sign-in' + (pathname && pathname !== '/chat' ? `?next=${encodeURIComponent(pathname)}` : '')
+        );
+        }
+    };
+
+    checkAuthAndLoad();
+    return () => { cancelled = true; };
+    }, [userToken, pathname, router, loadConversations]);
+
 
 
     useEffect(() => {
