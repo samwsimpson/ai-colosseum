@@ -1,7 +1,7 @@
 import sys
 import traceback
 print("TOP OF api.py: Script starting...", file=sys.stderr)
-from fastapi import FastAPI, Depends, HTTPException, status, WebSocket, WebSocketDisconnect, UploadFile, File
+from fastapi import FastAPI, Depends, Query, HTTPException, status, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
@@ -1405,12 +1405,20 @@ async def get_upload_text(upload_id: str, max_chars: int = 20000):
 
 
 @app.websocket("/ws/colosseum-chat")
-async def websocket_endpoint(websocket: WebSocket, token: str):
+async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(default=None)):
     try:
         await websocket.accept()
 
         # ---- auth & monthly limit ----
-        user = await get_current_user(token=token)
+        if not token:
+            await websocket.close(code=4401, reason="Missing token")
+            return
+        try:
+            user = await get_current_user(token=token)
+        except HTTPException:
+            # Invalid/expired token -> close explicitly so the client can refresh
+            await websocket.close(code=4401, reason="Unauthorized")
+            return
 
         user_doc = await db.collection('users').document(user['id']).get()
         user_data = user_doc.to_dict()

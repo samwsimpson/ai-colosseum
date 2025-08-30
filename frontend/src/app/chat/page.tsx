@@ -1248,16 +1248,51 @@ const loadConversations = useCallback(async () => {
 
                 },
                 onclose: (ev: CloseEvent) => {
-                    resetWebSocket();
+                resetWebSocket();
 
-                    const base = 1000;
-                    const max = 15000;
-                    const tries = reconnectRef.current.tries;
-                    const nextDelay = Math.min(max, base * Math.pow(2, tries)) + Math.floor(Math.random() * 250);
-                    reconnectRef.current.tries = tries + 1;
+                // Handle auth failures from the server explicitly
+                if (ev.code === 4401 && !authFailedRef.current) {
+                    // Try exactly one refresh + instant reconnect to avoid loops
+                    authFailedRef.current = true;
+                    (async () => {
+                    try {
+                        const res = await apiFetch('/api/refresh', { method: 'POST' });
+                        if (res.ok) {
+                        const { token } = await res.json();
+                        try { localStorage.setItem('access_token', token); } catch {}
+                        // Reset backoff and reconnect immediately
+                        reconnectRef.current.tries = 0;
+                        if (reconnectRef.current.timer) {
+                            window.clearTimeout(reconnectRef.current.timer);
+                            reconnectRef.current.timer = null;
+                        }
+                        setWsReconnectNonce(n => n + 1);
+                        return;
+                        }
+                    } catch { /* ignore */ }
 
-                    if (reconnectRef.current.timer) window.clearTimeout(reconnectRef.current.timer);
-                    reconnectRef.current.timer = window.setTimeout(() => setWsReconnectNonce(n => n + 1), nextDelay);
+                    // Refresh failed → send user to sign-in
+                    try { localStorage.removeItem('conversationId'); } catch {}
+                    if (pathname !== '/sign-in') router.push('/sign-in');
+                    })();
+                    return;
+                }
+
+                // Policy violation (e.g. monthly limit) → don't auto-reconnect aggressively
+                if (ev.code === 1008) {
+                    // Server already delivered a user-facing message; stay disconnected
+                    return;
+                }
+
+                // Default: backoff reconnect (your existing logic)
+                const base = 1000;
+                const max = 15000;
+                const tries = reconnectRef.current.tries;
+                const nextDelay = Math.min(max, base * Math.pow(2, tries)) + Math.floor(Math.random() * 250);
+                reconnectRef.current.tries = tries + 1;
+
+                if (reconnectRef.current.timer) window.clearTimeout(reconnectRef.current.timer);
+                reconnectRef.current.timer = window.setTimeout(() => setWsReconnectNonce(n => n + 1), nextDelay);
                 },
                 onerror: (event: Event) => {
                     console.error('WebSocket error:', event);
