@@ -1473,16 +1473,16 @@ const loadConversations = useCallback(async () => {
                         <div key={index} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
                         <div className={`relative p-3 md:p-4 max-w-[80%] text-white rounded-2xl md:rounded-3xl shadow-lg transition-all duration-200 ease-in-out transform hover:scale-[1.01] ${
                             isUser
-                            ? 'bg-blue-600 text-white rounded-br-none'
-                            : msg.sender === 'Claude'
-                            ? 'bg-gray-700 text-white rounded-bl-none'
-                            : msg.sender === 'ChatGPT'
-                            ? 'bg-gray-800 text-white rounded-bl-none'
-                            : msg.sender === 'Gemini'
-                            ? 'bg-gray-600 text-white rounded-bl-none'
-                            : msg.sender === 'Mistral'
-                            ? 'bg-green-800 text-white rounded-bl-none'
-                            : 'bg-gray-700 text-gray-200 rounded-bl-none'
+                                ? 'bg-blue-600 text-white rounded-br-none md:rounded-br-none'
+                                : msg.sender === 'Claude'
+                                ? 'bg-gray-700 text-white rounded-bl-none md:rounded-bl-none'
+                                : msg.sender === 'ChatGPT'
+                                ? 'bg-gray-800 text-white rounded-bl-none md:rounded-bl-none'
+                                : msg.sender === 'Gemini'
+                                ? 'bg-gray-600 text-white rounded-bl-none md:rounded-bl-none'
+                                : msg.sender === 'Mistral'
+                                ? 'bg-green-800 text-white rounded-bl-none md:rounded-bl-none'
+                                : 'bg-gray-700 text-gray-200 rounded-bl-none md:rounded-bl-none'
                         }`}>
                             {!isUser && (
                             <div className="text-xs text-gray-300 mb-1 font-semibold">{msg.sender}</div>
