@@ -320,6 +320,7 @@ const extractUploadsFromRawMessage = useCallback((raw: unknown): UploadListItem[
 const chatContainerRef = useRef<HTMLDivElement | null>(null);
 const composerRef = useRef<HTMLDivElement | null>(null);
 const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+const isComposingRef = useRef(false);
 const isInitialRender = useRef(true);
 const chatEndRef = useRef<HTMLDivElement>(null);
 const ws = useRef<WebSocket | null>(null);
@@ -1658,17 +1659,29 @@ const loadConversations = useCallback(async () => {
                 onChange={(e) => setMessage(e.target.value)}
                 onInput={(e) => {
                     const ta = e.currentTarget;
-                    ta.style.height = 'auto'; // shrink back down if needed
-                    ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'; // cap ~5 lines
+                    ta.style.height = 'auto';
+                    ta.style.height = ta.scrollHeight + 'px';
+                    ta.style.overflowY = 'hidden';
                 }}
+
+                onCompositionStart={() => { isComposingRef.current = true; }}
+                onCompositionEnd={() => { isComposingRef.current = false; }}
                 onKeyDown={(e) => {
-                    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') {
-                    e.preventDefault();
-                    (e.currentTarget.form as HTMLFormElement)?.requestSubmit();
+                    // Submit on Enter (but allow Shift+Enter for newline, and ignore while composing)
+                    if (
+                        e.key === 'Enter' &&
+                        !e.shiftKey &&
+                        !e.altKey &&
+                        !e.metaKey &&
+                        !e.ctrlKey &&
+                        !isComposingRef.current
+                    ) {
+                        e.preventDefault();
+                        (e.currentTarget.form as HTMLFormElement)?.requestSubmit();
                     }
                 }}
                 placeholder="Type your message..."
-                className="flex-grow p-3 rounded-xl border border-gray-700 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200 text-sm md:text-base resize-none overflow-y-auto min-h-[44px] max-h-40"
+                className="flex-grow p-3 rounded-xl border border-gray-700 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200 text-sm md:text-base resize-none overflow-hidden min-h-[44px]"
                 disabled={!userName}
             />      
             <button
