@@ -1473,7 +1473,7 @@ const loadConversations = useCallback(async () => {
                         <div key={index} className={`flex ${isUser ? 'justify-end' : 'justify-start'}`}>
                         <div className={`relative p-3 md:p-4 max-w-[80%] text-white rounded-2xl md:rounded-3xl shadow-lg transition-all duration-200 ease-in-out transform hover:scale-[1.01] ${
                             isUser
-                            ? 'bg-blue-600 text-white rounded-tr-none'
+                            ? 'bg-blue-600 text-white rounded-br-none'
                             : msg.sender === 'Claude'
                             ? 'bg-gray-700 text-white rounded-bl-none'
                             : msg.sender === 'ChatGPT'
