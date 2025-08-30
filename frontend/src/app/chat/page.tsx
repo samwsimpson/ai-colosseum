@@ -234,6 +234,20 @@ const [isTyping, setIsTyping] = useState<TypingState>({
     Gemini: false,
     Mistral: false,
 });
+
+// NEW: global fallback typing indicator
+const [teamThinking, setTeamThinking] = useState(false);
+const teamThinkingHideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+// helper to safely stop the fallback
+const stopTeamThinking = useCallback(() => {
+  if (teamThinkingHideTimer.current) {
+    clearTimeout(teamThinkingHideTimer.current);
+    teamThinkingHideTimer.current = null;
+  }
+  setTeamThinking(false);
+}, []);
+
 // Extract any upload/file metadata from a raw message payload (server formats vary)
 const extractUploadsFromRawMessage = useCallback((raw: unknown): UploadListItem[] => {
   const out: UploadListItem[] = [];
@@ -853,12 +867,11 @@ const loadConversations = useCallback(async () => {
             file_metadata: file_metadata_list[0],      // back-compat (ok if unused)
         };
 
-
-
-
-
-
         lastUserTextRef.current = text;
+        // Show a global fallback immediately; hide automatically after 20s if nothing arrives.
+        setTeamThinking(true);
+        if (teamThinkingHideTimer.current) clearTimeout(teamThinkingHideTimer.current);
+        teamThinkingHideTimer.current = setTimeout(() => setTeamThinking(false), 20000);
 
         try {
             const sock = ws.current;
@@ -1192,6 +1205,8 @@ const loadConversations = useCallback(async () => {
                     }
                     if (msg.type === 'ping' || msg.type === 'pong') return;
                     if (sender && typeof msg.typing === 'boolean' && ALLOWED_AGENTS.includes(sender as AgentName)) {
+                        // Any typing signal proves the pipeline is alive → hide the global fallback
+                        stopTeamThinking();
                         setTypingWithDelayAndTTL(sender as AgentName, msg.typing === true);
                         return;
                     }
@@ -1203,6 +1218,8 @@ const loadConversations = useCallback(async () => {
 
 
                     if (sender && ALLOWED_AGENTS.includes(sender as AgentName) && unifiedText.trim().length > 0) {
+                        // First real text → hide fallback and clear per-agent typing
+                        stopTeamThinking();
                         setTypingWithDelayAndTTL(sender as AgentName, false);
                         addMessageToChat({ sender, text: unifiedText });
 
@@ -1530,6 +1547,13 @@ const loadConversations = useCallback(async () => {
                     </span>
                 </div>
                 )}
+                {/* Global fallback: only when no individual agent is showing "typing" */}
+                {teamThinking && !Object.values(isTyping).some(Boolean) && (
+                    <div className="mt-2 text-sm text-gray-400 italic" aria-live="polite">
+                        The AI team is thinking…
+                    </div>
+                )}
+
             </div>
 
             <div ref={chatEndRef} />
