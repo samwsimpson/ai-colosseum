@@ -1353,62 +1353,52 @@ async def get_upload_signed_url(upload_id: str, current_user: dict = Depends(get
         return JSONResponse({"error": "Could not generate download URL"}, status_code=500)
 
 @app.get("/api/uploads/{upload_id}/text")
-async def get_upload_text(upload_id: str, max_chars: int = 20000, current_user: dict = Depends(get_current_user)):
+async def get_upload_text(upload_id: str, max_chars: int = 20000):
     """
-    Return up to `max_chars` of plain text from a previously uploaded file.
-    - For text-like mimetypes, read and return the first portion.
-    - For binary types (PDF, images), try a quick text extraction (best-effort).
+    Return a small TEXT PREVIEW for text-like files only.
+    For binary/non-text (e.g. images), return a short placeholder and do NOT decode bytes.
     """
+    # 1) Look up upload doc
+    upload_doc = await db.collection("uploads").document(upload_id).get()
+    if not upload_doc.exists:
+        raise HTTPException(status_code=404, detail="Upload not found")
+    u = upload_doc.to_dict() or {}
+
+    bucket_name = u.get("bucket")
+    path = u.get("path")
+    mime = (u.get("mime") or "").lower()
+    if not bucket_name or not path:
+        raise HTTPException(status_code=400, detail="Upload metadata incomplete")
+
+    # 2) Only attempt decode for "text-like" types
+    TEXTY_PREFIXES = ("text/",)
+    TEXTY_MIMES = ("application/json", "application/xml", "application/javascript")
+    is_texty = mime.startswith(TEXTY_PREFIXES) or (mime in TEXTY_MIMES)
+    if not is_texty:
+        # IMPORTANT: no bytes decoding for images/binary; just a short placeholder.
+        return JSONResponse({"upload_id": upload_id, "mime": mime, "text": "[Binary file: no text extracted]"})
+
+    # 3) Fetch object head (off the event loop) and decode
+    bucket = storage_client.bucket(bucket_name)
+    blob = bucket.blob(path)
+
+    def _download_head(n: int) -> bytes:
+        # GCS end index is inclusive; slice a bit more than we plan to show
+        end = max(1, n) - 1
+        return blob.download_as_bytes(start=0, end=end)
+
+    raw = await asyncio.to_thread(_download_head, max(4096, max_chars * 2))
+
     try:
-        # 1) Look up the upload doc
-        doc_ref = db.collection("uploads").document(upload_id)
-        snapshot = await doc_ref.get()
-        if not snapshot.exists:
-            raise HTTPException(status_code=404, detail="Upload not found")
-
-        data = snapshot.to_dict() or {}
-        if data.get("user_id") != current_user["id"]:
-            raise HTTPException(status_code=403, detail="Forbidden")
-
-        bucket_name = data.get("bucket")
-        path        = data.get("path")
-        mime        = data.get("mime") or "application/octet-stream"
-        if not bucket_name or not path:
-            raise HTTPException(status_code=500, detail="Upload metadata incomplete")
-
-        # 2) Fetch object from GCS (off the event loop)
-        bucket = storage_client.bucket(bucket_name)
-        blob   = bucket.blob(path)
-
-        # Stream the first ~max_chars bytes; for text this is sufficient
-        # (we read bytes then decode; you can refine for encodings if needed)
-        def _download_head(n: int) -> bytes:
-            return blob.download_as_bytes(start=0, end=n - 1)
-
-        raw = await asyncio.to_thread(_download_head, max(4096, max_chars * 2))  # read a bit extra to be safe
+        text = raw.decode("utf-8", errors="replace")
+    except Exception:
         text = ""
-        try:
-            text = raw.decode("utf-8", errors="replace")
-        except Exception:
-            text = ""
 
-        # 3) If non-text and empty decode, do best-effort extraction (optional)
-        if (not text.strip()) and (not mime.startswith("text/")):
-            # Very light-weight heuristics; expand with pdf/docx parsers when you’re ready
-            if mime in ("application/json", "application/xml", "application/javascript"):
-                text = raw.decode("utf-8", errors="replace")
-            else:
-                text = "[Binary file: no text extracted]"
+    if len(text) > max_chars:
+        text = text[:max_chars] + "\n.[TRUNCATED]"
 
-        if len(text) > max_chars:
-            text = text[:max_chars] + "\n.[TRUNCATED]"
+    return JSONResponse({"upload_id": upload_id, "mime": mime, "text": text})
 
-        return JSONResponse({"upload_id": upload_id, "mime": mime, "text": text})
-    except HTTPException:
-        raise
-    except Exception as e:
-        print("get_upload_text error:", repr(e))
-        return JSONResponse({"error": str(e)}, status_code=500)
 
 
 
@@ -1542,6 +1532,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
         agent_names = ["ChatGPT", "Claude", "Gemini", "Mistral"]
 
         # === TOOL: get_upload_text (for assistants) ===
+        # REPLACE the entire get_upload_text_tool function with THIS
+        # (place it inside websocket_endpoint, near where you build agents)
         async def get_upload_text_tool(upload_id: str, max_chars: int = 20000) -> dict:
             """
             Return up to `max_chars` of text from a user-uploaded file by its upload_id.
@@ -1553,10 +1545,12 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
 
             # If the caller passed a filename instead of the doc id, fall back to name lookup
             if not snapshot.exists:
-                query = (db.collection("uploads")
-                        .where("user_id", "==", user["id"])
-                        .where("name", "==", upload_id)
-                        .limit(1))
+                query = (
+                    db.collection("uploads")
+                    .where("user_id", "==", user["id"])
+                    .where("name", "==", upload_id)
+                    .limit(1)
+                )
                 async for doc in query.stream():
                     snapshot = doc
                     upload_id = doc.id  # normalize to the real id
@@ -1566,44 +1560,44 @@ async def websocket_endpoint(websocket: WebSocket, token: str):
             if (not snapshot.exists) or ((snapshot.to_dict() or {}).get("user_id") != user["id"]):
                 return {"error": "not_found_or_forbidden"}
 
-
             data = snapshot.to_dict() or {}
+
+            # Pull storage + mime from the upload doc
             bucket_name = data.get("bucket")
             path        = data.get("path")
-            mime        = data.get("mime") or "application/octet-stream"
+            mime        = (data.get("mime") or "application/octet-stream").lower()
             if not bucket_name or not path:
-                return {"error": "metadata_incomplete"}
+                return {"error": "missing_storage"}
 
-            # 2) Download a head slice from GCS (off the event loop)
+            # 2) If it's not a text-like file, do NOT attempt to decode bytes
+            TEXTY_PREFIXES = ("text/",)
+            TEXTY_MIMES    = ("application/json", "application/xml", "application/javascript")
+            is_texty = mime.startswith(TEXTY_PREFIXES) or (mime in TEXTY_MIMES)
+            if not is_texty:
+                return {"upload_id": upload_id, "mime": mime, "text": "[Binary file: no text extracted]"}
+
+            # 3) Download a head slice from GCS (off the event loop)
             bucket = storage_client.bucket(bucket_name)
             blob   = bucket.blob(path)
 
             def _download_head(n: int) -> bytes:
                 # Read roughly enough bytes to decode to ~max_chars safely
-                return blob.download_as_bytes(start=0, end=max(1, n) - 1)
+                end = max(1, n) - 1  # GCS range is inclusive
+                return blob.download_as_bytes(start=0, end=end)
 
             raw = await asyncio.to_thread(_download_head, max(4096, max_chars * 2))
+
+            # 4) Decode to UTF-8 with replacement
             try:
                 text = raw.decode("utf-8", errors="replace")
             except Exception:
                 text = ""
 
-            # 3) Light fallback for non-text types
-            if (not text.strip()) and (not mime.startswith("text/")):
-                if mime in ("application/json", "application/xml", "application/javascript"):
-                    try:
-                        text = raw.decode("utf-8", errors="replace")
-                    except Exception:
-                        text = ""
-                if not text:
-                    text = "[Binary file: no text extracted]"
-
+            # 5) Truncate and return compact payload
             if len(text) > max_chars:
                 text = text[:max_chars] + "\n.[TRUNCATED]"
 
-            # Return a compact, model-friendly object
             return {"upload_id": upload_id, "mime": mime, "text": text}
-        # === END TOOL ===
 
 
         # --- randomized opening greeting (guarded: once per WS; skip if recently greeted) ---
