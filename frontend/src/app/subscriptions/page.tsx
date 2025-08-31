@@ -152,8 +152,7 @@ export default function SubscriptionPage() {
     const fetchCurrentPlan = async () => {
       try {
         const rawApi = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
-        currentPlanNameonst backendUrl = rawApi.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://');
-
+        const backendUrl = rawApi.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://');
         
         const userResponse = await fetch(`${backendUrl}/api/users/me`, {
           headers: {
