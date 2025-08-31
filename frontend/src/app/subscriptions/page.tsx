@@ -16,6 +16,24 @@ const STRIPE_PRICE_IDS = {
   starter: process.env.NEXT_PUBLIC_STRIPE_PRICE_STARTER || 'starter_price_id_placeholder',
   pro:     process.env.NEXT_PUBLIC_STRIPE_PRICE_PRO     || 'pro_price_id_placeholder',
 };
+type PlanTier = 'Free' | 'Starter' | 'Pro' | 'Enterprise';
+
+interface UserMeResponse {
+  user_name?: string;
+  user_id: string;
+  user_plan_name?: string;
+  plan_name?: string;
+  user_plan?: string;
+  plan?: string;
+  subscription_name?: string;
+  billing_period_end?: string | null;
+}
+
+interface UsageResponse {
+  monthly_usage: number;
+  monthly_limit: number | null; // null = unlimited
+  degraded?: boolean;
+}
 
 interface PlanCardProps {
   title: string;
@@ -135,7 +153,7 @@ const PlanCard: React.FC<PlanCardProps> = ({
   );
 };
 
-function labelFromPlan(input?: string): 'Free' | 'Starter' | 'Pro' | 'Enterprise' {
+function labelFromPlan(input?: string): PlanTier {
   const s = (input || '').toLowerCase().trim();
   // map common shapes your backend might send
   if (s.includes('enterprise')) return 'Enterprise';
@@ -174,25 +192,28 @@ export default function SubscriptionPage() {
           headers: { 'Authorization': `Bearer ${userToken}` },
         });
 
-        let userData: any = null;
-        let usageData: any = null;
+        let userData: UserMeResponse | null = null;
+        let usageData: UsageResponse | null = null;
 
         if (userResponse.ok) {
-          userData = await userResponse.json();
+          const parsedUser: UserMeResponse = await userResponse.json();
+          userData = parsedUser;
         } else {
           console.error("Failed to fetch user profile.");
-          return; // Without /users/me there’s nothing to show
+          return;
         }
 
         try {
           if (usageResponse.ok) {
-            usageData = await usageResponse.json();
+            const parsedUsage: UsageResponse = await usageResponse.json();
+            usageData = parsedUsage;
           } else {
             console.warn("Usage endpoint returned non-OK; showing plan without usage.");
           }
         } catch (e) {
           console.warn("Usage endpoint parse error; showing plan without usage.", e);
         }
+
 
         // 1) Resolve the plan name from the user doc FIRST (never block on usage)
         const rawName =
