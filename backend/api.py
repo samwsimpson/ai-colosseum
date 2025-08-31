@@ -829,16 +829,18 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
             "monthly_limit": None
         }
 
-    # in /api/users/me/usage and in the WS handler where you count conversations
-    first_day_of_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    # Anchor count to paid period when available; otherwise fall back to calendar month
+    period_start = user_data.get('billing_period_start')
+    if not period_start:
+        period_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-    monthly_usage_query = db.collection('conversations').where(
-        'user_id', '==', current_user['id']
-    ).where(
-        'subscription_id', '==', user_data['subscription_id']
-    ).where(
-        'created_at', '>=', first_day_of_month
+    monthly_usage_query = (
+        db.collection('conversations')
+        .where('user_id', '==', current_user['id'])
+        .where('subscription_id', '==', user_data['subscription_id'])
+        .where('created_at', '>=', period_start)
     )
+
 
     monthly_usage = 0
     async for _ in monthly_usage_query.stream():
@@ -1178,8 +1180,60 @@ async def stripe_webhook(request: Request):
 
         if user_docs and new_subscription_list:
             user_ref = users_ref.document(user_docs[0].id)
-            await user_ref.update({'subscription_id': new_subscription_list[0].id})
+            # Persist subscription doc id (your counting still stays per-subscription_id)
+            update_fields = {
+                'subscription_id': new_subscription_list[0].id,
+            }
+
+            # Also persist Stripe identifiers for future renewals
+            try:
+                update_fields['stripe_customer_id'] = sess_obj.get('customer') or session.customer
+                update_fields['stripe_subscription_id'] = session.subscription
+            except Exception:
+                pass
+
+            # Seed the initial billing period window so usage anchors to the paid term
+            try:
+                sub = stripe.Subscription.retrieve(update_fields['stripe_subscription_id'])
+                from datetime import datetime, timezone as _tz
+                update_fields['billing_period_start'] = datetime.fromtimestamp(sub.current_period_start, tz=_tz.utc)
+                update_fields['billing_period_end']   = datetime.fromtimestamp(sub.current_period_end,   tz=_tz.utc)
+                update_fields['subscription_status']  = sub.status  # e.g., 'active'
+            except Exception as _e:
+                # If this fails, we'll still fill it at the first invoice.payment_succeeded
+                pass
+
+            await user_ref.update(update_fields)
             print(f"User {customer_email} successfully subscribed to the {new_subscription_list[0].id} plan.")
+    elif event["type"] == "invoice.payment_succeeded":
+        inv = event["data"]["object"]
+        customer_id = inv.get("customer")
+        subscription_id = inv.get("subscription")
+
+        # Look up the current period on the subscription
+        try:
+            sub = stripe.Subscription.retrieve(subscription_id)
+            from datetime import datetime, timezone as _tz
+            period_start = datetime.fromtimestamp(sub.current_period_start, tz=_tz.utc)
+            period_end   = datetime.fromtimestamp(sub.current_period_end,   tz=_tz.utc)
+            status       = sub.status
+        except Exception:
+            period_start = period_end = status = None
+
+        # Find the user by stored stripe_customer_id (set at checkout)
+        users_ref = db.collection('users')
+        user_docs = [doc async for doc in users_ref.where('stripe_customer_id', '==', customer_id).limit(1).stream()]
+
+        if user_docs:
+            fields = {}
+            if period_start: fields['billing_period_start'] = period_start
+            if period_end:   fields['billing_period_end']   = period_end
+            if status:       fields['subscription_status']  = status
+            # If the subscription_id changed (upgrades/downgrades inside same customer), track it
+            if subscription_id: fields['stripe_subscription_id'] = subscription_id
+
+            if fields:
+                await users_ref.document(user_docs[0].id).update(fields)
 
     return {"status": "success"}
 
@@ -1427,13 +1481,17 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
         user_subscription_data = user_subscription_doc.to_dict()
 
         if user_subscription_data['monthly_limit'] is not None:
-            first_day_of_month = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)          
+            period_start = user_data.get('billing_period_start')
+            if not period_start:
+                period_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
             conversation_count_query = (
                 db.collection('conversations')
                 .where('user_id', '==', user['id'])
                 .where('subscription_id', '==', user_data['subscription_id'])
-                .where('created_at', '>=', first_day_of_month)
+                .where('created_at', '>=', period_start)
             )
+
             conversation_count = 0
             async for _ in conversation_count_query.stream():
                 conversation_count += 1
