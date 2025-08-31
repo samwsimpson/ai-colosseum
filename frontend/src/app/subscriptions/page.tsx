@@ -135,6 +135,19 @@ const PlanCard: React.FC<PlanCardProps> = ({
   );
 };
 
+function labelFromPlan(input?: string): 'Free' | 'Starter' | 'Pro' | 'Enterprise' {
+  const s = (input || '').toLowerCase().trim();
+  // map common shapes your backend might send
+  if (s.includes('enterprise')) return 'Enterprise';
+  if (s.includes('pro')) return 'Pro';
+  if (
+    s.includes('starter') ||
+    s.includes('basic') ||
+    s.includes('standard')
+  ) return 'Starter';
+  return 'Free';
+}
+
 export default function SubscriptionPage() {
   const { userToken } = useUser();
   const router = useRouter();
@@ -196,7 +209,16 @@ export default function SubscriptionPage() {
             else if (limitNum === 5) resolvedPlan = 'Free';
           }
 
-          setCurrentPlanName(resolvedPlan || 'Free');
+          setCurrentPlanName(
+            labelFromPlan(
+              userData.user_plan_name ??
+              userData.plan_name ??
+              userData.user_plan ??
+              userData.plan ??
+              userData.subscription_name
+            )
+          );
+
           setConversationsUsed(usageData?.monthly_usage ?? 0);
           setMonthlyLimit(usageData?.monthly_limit ?? null);
 
@@ -228,7 +250,10 @@ export default function SubscriptionPage() {
     return null;
   }
 
+  const current = (currentPlanName || '').toLowerCase();
+
   return (
+
     <div className="min-h-screen bg-gray-950 text-white font-sans antialiased py-12 md:py-24">
       <div className="container mx-auto px-4">
         <div className="text-center mb-12">
@@ -248,8 +273,8 @@ export default function SubscriptionPage() {
                     "Limited to 5 conversations/month",
                     "Community support"
                 ]}
-                buttonText={currentPlanName === 'Free' ? "Current Plan" : "Get Started"}
-                isCurrentPlan={currentPlanName?.toLowerCase() === 'free'}
+                buttonText={current === 'free' ? "Current Plan" : "Get Started"}
+                isCurrentPlan={current === 'free'}
                 conversationsUsed={conversationsUsed}
                 monthlyLimit={monthlyLimit}
                 resetsOn={resetsOn}
@@ -263,8 +288,8 @@ export default function SubscriptionPage() {
                     "Up to 25 conversations/month",
                     "Community support"
                 ]}
-                buttonText={currentPlanName === 'Starter' ? "Current Plan" : "Get Started"}
-                isCurrentPlan={currentPlanName?.toLowerCase() === 'starter'}
+                buttonText={current === 'starter' ? "Current Plan" : "Get Started"}
+                isCurrentPlan={current === 'starter'}
                 priceId={STRIPE_PRICE_IDS.starter}
                 conversationsUsed={conversationsUsed}
                 monthlyLimit={monthlyLimit}
@@ -280,8 +305,8 @@ export default function SubscriptionPage() {
                     "Advanced API integrations",
                     "Team collaboration tools"
                 ]}
-                buttonText={currentPlanName === 'Pro' ? "Current Plan" : "Upgrade"}
-                isCurrentPlan={currentPlanName?.toLowerCase() === 'pro'}
+                buttonText={current === 'pro' ? "Current Plan" : "Upgrade"}
+                isCurrentPlan={current === 'pro'}
                 priceId={STRIPE_PRICE_IDS.pro}
                 conversationsUsed={conversationsUsed}
                 monthlyLimit={monthlyLimit}
@@ -300,7 +325,7 @@ export default function SubscriptionPage() {
                 ]}
                 buttonText="Contact Us"
                 isEnterprise
-                isCurrentPlan={currentPlanName?.toLowerCase() === 'enterprise'}
+                isCurrentPlan={current === 'enterprise'}
                 conversationsUsed={conversationsUsed}
                 monthlyLimit={monthlyLimit}
                 resetsOn={resetsOn}
