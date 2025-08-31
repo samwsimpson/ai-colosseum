@@ -833,15 +833,12 @@ async def _auto_backfill_for_user(user_id: str, user_email: str | None, limit: i
 async def get_user_usage(current_user: dict = Depends(get_current_user)):
     user_doc = await db.collection('users').document(current_user['id']).get()
     user_data = user_doc.to_dict()
-    
+
     subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
     subscription_data = subscription_doc.to_dict()
-    
+
     if subscription_data['monthly_limit'] is None:
-        return {
-            "monthly_usage": 0,
-            "monthly_limit": None
-        }
+        return {"monthly_usage": 0, "monthly_limit": None}
 
     # Anchor count to paid period when available; otherwise fall back to calendar month
     period_start = user_data.get('billing_period_start')
@@ -850,7 +847,7 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
 
     usage_query = (
         db.collection('usage_ledger')
-        .where('user_id', '==', user['id'])
+        .where('user_id', '==', current_user['id'])
         .where('subscription_id', '==', user_data['subscription_id'])
         .where('created_at', '>=', period_start)
     )
@@ -859,10 +856,8 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
     async for _ in usage_query.stream():
         used += 1
 
-    return {
-        "monthly_usage": monthly_usage,
-        "monthly_limit": subscription_data['monthly_limit']
-    }
+    return {"monthly_usage": used, "monthly_limit": subscription_data['monthly_limit']}
+
 
 
 @app.post("/api/google-auth", response_model=Token)
