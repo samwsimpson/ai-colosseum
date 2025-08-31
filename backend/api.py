@@ -289,6 +289,20 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
             "summary": "",
         }
     )
+    # NEW: append-only usage record so deletes don't reduce counts
+    try:
+        await db.collection("usage_ledger").add(
+            {
+                "user_id": user_id,
+                "subscription_id": cfg.get("subscription_id"),
+                "conv_id": conv_ref.id,
+                "created_at": FS_TS,  # server timestamp anchor; safe for range queries
+            }
+        )
+    except Exception as e:
+        # Do not block chat creation if ledger write fails; just log it.
+        print("[usage_ledger] write failed:", e)
+
     doc = await conv_ref.get()
     return conv_ref, (doc.to_dict() or {})
 
@@ -834,17 +848,16 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
     if not period_start:
         period_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-    monthly_usage_query = (
-        db.collection('conversations')
-        .where('user_id', '==', current_user['id'])
+    usage_query = (
+        db.collection('usage_ledger')
+        .where('user_id', '==', user['id'])
         .where('subscription_id', '==', user_data['subscription_id'])
         .where('created_at', '>=', period_start)
     )
 
-
-    monthly_usage = 0
-    async for _ in monthly_usage_query.stream():
-        monthly_usage += 1
+    used = 0
+    async for _ in usage_query.stream():
+        used += 1
 
     return {
         "monthly_usage": monthly_usage,
@@ -1485,18 +1498,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
             if not period_start:
                 period_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-            conversation_count_query = (
-                db.collection('conversations')
+            usage_query = (
+                db.collection('usage_ledger')
                 .where('user_id', '==', user['id'])
                 .where('subscription_id', '==', user_data['subscription_id'])
                 .where('created_at', '>=', period_start)
             )
 
-            conversation_count = 0
-            async for _ in conversation_count_query.stream():
-                conversation_count += 1
+            used = 0
+            async for _ in usage_query.stream():
+                used += 1
 
-            if conversation_count >= user_subscription_data['monthly_limit']:
+            if used >= user_subscription_data['monthly_limit']:
                 await websocket.send_json({
                     "sender": "System",
                     "text": "Your monthly conversation limit has been reached. Please upgrade your plan to continue."

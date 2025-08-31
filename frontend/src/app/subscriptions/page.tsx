@@ -13,8 +13,8 @@ const stripePromise = loadStripe(process.env.NEXT_PUBLIC_STRIPE_PUBLISHABLE_KEY 
 // Placeholder for your Stripe Price IDs
 // You must replace these with the actual Price IDs from your Stripe Dashboard
 const STRIPE_PRICE_IDS = {
-  starter: 'starter_price_id_placeholder',
-  pro: 'pro_price_id_placeholder',
+  starter: process.env.NEXT_PUBLIC_STRIPE_PRICE_STARTER || 'starter_price_id_placeholder',
+  pro:     process.env.NEXT_PUBLIC_STRIPE_PRICE_PRO     || 'pro_price_id_placeholder',
 };
 
 interface PlanCardProps {
@@ -27,6 +27,7 @@ interface PlanCardProps {
   isCurrentPlan: boolean;
   conversationsUsed?: number | null;
   monthlyLimit?: number | null;
+  resetsOn?: string | null;   // NEW
 }
 
 const PlanCard: React.FC<PlanCardProps> = ({
@@ -39,6 +40,7 @@ const PlanCard: React.FC<PlanCardProps> = ({
   isCurrentPlan,
   conversationsUsed,
   monthlyLimit,
+  resetsOn,       // NEW
 }) => {
   const { userToken } = useUser();
   const router = useRouter();
@@ -57,7 +59,9 @@ const PlanCard: React.FC<PlanCardProps> = ({
 
     setIsSubmitting(true);
     try {
-      const backendUrl = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
+      const rawApi = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
+      const backendUrl = rawApi.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://');
+
       const response = await fetch(`${backendUrl}/api/create-checkout-session`, {
         method: 'POST',
         headers: {
@@ -92,10 +96,16 @@ const PlanCard: React.FC<PlanCardProps> = ({
       <h3 className={`text-2xl font-bold ${isEnterprise ? 'text-white' : 'text-blue-500'}`}>{title}</h3>
       <p className={`mt-4 text-4xl font-extrabold ${isEnterprise ? 'text-white' : 'text-gray-100'}`}>{price}</p>
       
-      {isCurrentPlan && monthlyLimit !== null && (
-        <p className="mt-2 text-sm text-gray-400">
-          You&apos;ve used {conversationsUsed} of {monthlyLimit} conversations this month.
-        </p>
+      {isCurrentPlan && (
+        monthlyLimit === null ? (
+          <p className="mt-2 text-sm text-gray-400">
+            Unlimited conversations{resetsOn ? ` • Renews on ${resetsOn}` : ''}
+          </p>
+        ) : (
+          <p className="mt-2 text-sm text-gray-400">
+            You&apos;ve used {conversationsUsed ?? 0} of {monthlyLimit} conversations{resetsOn ? ` • Resets on ${resetsOn}` : ''}.
+          </p>
+        )
       )}
 
       <ul className="mt-6 flex-1 space-y-3 text-gray-300">
@@ -131,6 +141,7 @@ export default function SubscriptionPage() {
   const [currentPlanName, setCurrentPlanName] = useState<string | null>(null);
   const [conversationsUsed, setConversationsUsed] = useState<number | null>(null);
   const [monthlyLimit, setMonthlyLimit] = useState<number | null>(null);
+  const [resetsOn, setResetsOn] = useState<string | null>(null);
 
   useEffect(() => {
     if (!userToken) {
@@ -140,7 +151,9 @@ export default function SubscriptionPage() {
 
     const fetchCurrentPlan = async () => {
       try {
-        const backendUrl = process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
+        const rawApi = process.env.NEXT_PUBLIC_API_URL || process.env.NEXT_PUBLIC_WS_URL || 'http://localhost:8000';
+        onst backendUrl = rawApi.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://');
+
         
         const userResponse = await fetch(`${backendUrl}/api/users/me`, {
           headers: {
@@ -160,6 +173,18 @@ export default function SubscriptionPage() {
           setCurrentPlanName(userData.user_plan_name || 'Free');
           setConversationsUsed(usageData.monthly_usage);
           setMonthlyLimit(usageData.monthly_limit);
+          try {
+            if (userData?.billing_period_end) {
+              const d = new Date(userData.billing_period_end);
+              // Format for your users; tweak locale/options as you like
+              setResetsOn(d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }));
+            } else {
+              setResetsOn(null);
+            }
+          } catch {
+            setResetsOn(null);
+          }
+
 
         } else {
           console.error("Failed to fetch user data or usage data.");
@@ -199,6 +224,7 @@ export default function SubscriptionPage() {
                 isCurrentPlan={currentPlanName === 'Free'}
                 conversationsUsed={conversationsUsed}
                 monthlyLimit={monthlyLimit}
+                resetsOn={resetsOn}
             />
             <PlanCard
                 title="Starter"
@@ -214,6 +240,7 @@ export default function SubscriptionPage() {
                 priceId={STRIPE_PRICE_IDS.starter}
                 conversationsUsed={conversationsUsed}
                 monthlyLimit={monthlyLimit}
+                resetsOn={resetsOn}
             />
             <PlanCard
                 title="Pro"
@@ -230,6 +257,7 @@ export default function SubscriptionPage() {
                 priceId={STRIPE_PRICE_IDS.pro}
                 conversationsUsed={conversationsUsed}
                 monthlyLimit={monthlyLimit}
+                resetsOn={resetsOn}
             />
              <PlanCard
                 title="Enterprise"
@@ -247,6 +275,7 @@ export default function SubscriptionPage() {
                 isCurrentPlan={currentPlanName === 'Enterprise'}
                 conversationsUsed={conversationsUsed}
                 monthlyLimit={monthlyLimit}
+                resetsOn={resetsOn}
             />
         </div>
 
