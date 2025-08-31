@@ -169,13 +169,41 @@ export default function SubscriptionPage() {
           const userData = await userResponse.json();
           const usageData = await usageResponse.json();
           
-          setCurrentPlanName(userData.user_plan_name || 'Free');
-          setConversationsUsed(usageData.monthly_usage);
-          setMonthlyLimit(usageData.monthly_limit);
+          // Resolve the current plan name from multiple possibilities, with safe fallbacks
+          const rawName =
+            userData.user_plan_name ??
+            userData.plan_name ??
+            userData.user_plan ??
+            userData.plan ??
+            userData.subscription_name ??
+            '';
+
+          let normalized = '';
+          try { normalized = String(rawName).trim().toLowerCase(); } catch { normalized = ''; }
+
+          let resolvedPlan: 'Free' | 'Starter' | 'Pro' | 'Enterprise' | null = null;
+          if (normalized.includes('free')) resolvedPlan = 'Free';
+          else if (normalized.includes('starter')) resolvedPlan = 'Starter';
+          else if (normalized.includes('pro')) resolvedPlan = 'Pro';
+          else if (normalized.includes('enterprise')) resolvedPlan = 'Enterprise';
+
+          // If the backend didn’t give us a readable name, infer from the limit
+          if (!resolvedPlan) {
+            const limitNum = usageData?.monthly_limit === null ? null : Number(usageData?.monthly_limit);
+            if (limitNum === null) resolvedPlan = 'Enterprise';
+            else if (limitNum === 200) resolvedPlan = 'Pro';
+            else if (limitNum === 25) resolvedPlan = 'Starter';
+            else if (limitNum === 5) resolvedPlan = 'Free';
+          }
+
+          setCurrentPlanName(resolvedPlan || 'Free');
+          setConversationsUsed(usageData?.monthly_usage ?? 0);
+          setMonthlyLimit(usageData?.monthly_limit ?? null);
+
+          // Show the next reset/renewal date if the backend provides it
           try {
             if (userData?.billing_period_end) {
               const d = new Date(userData.billing_period_end);
-              // Format for your users; tweak locale/options as you like
               setResetsOn(d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }));
             } else {
               setResetsOn(null);
@@ -183,6 +211,7 @@ export default function SubscriptionPage() {
           } catch {
             setResetsOn(null);
           }
+
 
 
         } else {
@@ -220,7 +249,7 @@ export default function SubscriptionPage() {
                     "Community support"
                 ]}
                 buttonText={currentPlanName === 'Free' ? "Current Plan" : "Get Started"}
-                isCurrentPlan={currentPlanName === 'Free'}
+                isCurrentPlan={currentPlanName?.toLowerCase() === 'free'}
                 conversationsUsed={conversationsUsed}
                 monthlyLimit={monthlyLimit}
                 resetsOn={resetsOn}
@@ -235,7 +264,7 @@ export default function SubscriptionPage() {
                     "Community support"
                 ]}
                 buttonText={currentPlanName === 'Starter' ? "Current Plan" : "Get Started"}
-                isCurrentPlan={currentPlanName === 'Starter'}
+                isCurrentPlan={currentPlanName?.toLowerCase() === 'starter'}
                 priceId={STRIPE_PRICE_IDS.starter}
                 conversationsUsed={conversationsUsed}
                 monthlyLimit={monthlyLimit}
@@ -252,7 +281,7 @@ export default function SubscriptionPage() {
                     "Team collaboration tools"
                 ]}
                 buttonText={currentPlanName === 'Pro' ? "Current Plan" : "Upgrade"}
-                isCurrentPlan={currentPlanName === 'Pro'}
+                isCurrentPlan={currentPlanName?.toLowerCase() === 'pro'}
                 priceId={STRIPE_PRICE_IDS.pro}
                 conversationsUsed={conversationsUsed}
                 monthlyLimit={monthlyLimit}
@@ -271,7 +300,7 @@ export default function SubscriptionPage() {
                 ]}
                 buttonText="Contact Us"
                 isEnterprise
-                isCurrentPlan={currentPlanName === 'Enterprise'}
+                isCurrentPlan={currentPlanName?.toLowerCase() === 'enterprise'}
                 conversationsUsed={conversationsUsed}
                 monthlyLimit={monthlyLimit}
                 resetsOn={resetsOn}
