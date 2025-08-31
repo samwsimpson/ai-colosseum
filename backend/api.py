@@ -376,20 +376,22 @@ async def startup_event():
 
 @app.get("/api/users/me")
 async def read_users_me(current_user: dict = Depends(get_current_user)):
-    user_doc = await db.collection('users').document(current_user['id']).get()
+    user_doc = await db.collection("users").document(current_user["id"]).get()
     if not user_doc.exists:
         raise HTTPException(status_code=404, detail="User not found")
 
     user_data = user_doc.to_dict() or {}
+    sub_id = user_data.get("subscription_id") or "Free"
 
-    subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
-    subscription_data = subscription_doc.to_dict()
-
+    # (Optional: ensure the doc exists; otherwise just return sub_id as the plan name)
     return {
-        "user_name": user_data['name'],
-        "user_id": user_doc.id,              # use doc id, not a field
-        "user_plan_name": subscription_doc.id
+        "user_name": user_data.get("name") or "User",
+        "user_id": user_doc.id,
+        "user_plan_name": sub_id,
+        # You already include billing_period_end elsewhere; add here if helpful in UI:
+        "billing_period_end": user_data.get("billing_period_end"),
     }
+
 
 # === Conversations REST ===
 from typing import Optional, List
@@ -831,41 +833,51 @@ async def _auto_backfill_for_user(user_id: str, user_email: str | None, limit: i
 
 @app.get("/api/users/me/usage")
 async def get_user_usage(current_user: dict = Depends(get_current_user)):
-    user_doc = await db.collection('users').document(current_user['id']).get()
-    user_data = user_doc.to_dict()
+    # Load user record
+    user_ref = db.collection("users").document(current_user["id"])
+    user_doc = await user_ref.get()
+    if not user_doc.exists:
+        raise HTTPException(status_code=404, detail="User not found")
+    user_data = user_doc.to_dict() or {}
 
-    subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
-    subscription_data = subscription_doc.to_dict()
+    # Resolve subscription & limit
+    sub_id = user_data.get("subscription_id") or "Free"
+    sub_doc = await db.collection("subscriptions").document(sub_id).get()
+    sub_data = sub_doc.to_dict() or {}
+    monthly_limit = sub_data.get("monthly_limit", None)
 
-    if subscription_data['monthly_limit'] is None:
-        return {"monthly_usage": 0, "monthly_limit": None}
+    # Unlimited plan → no counting needed
+    if monthly_limit is None:
+        return JSONResponse({"monthly_usage": 0, "monthly_limit": None})
 
-    # Anchor count to paid period when available; otherwise fall back to calendar month
-    period_start = user_data.get('billing_period_start')
+    # Anchor usage window to billing period if present; else start of current month (UTC)
+    period_start = user_data.get("billing_period_start")
+    if isinstance(period_start, str):
+        try:
+            period_start = datetime.fromisoformat(period_start)
+        except Exception:
+            period_start = None
     if not period_start:
         period_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
+    # Count usage from ledger
+    used = 0
     q = (
         db.collection("usage_ledger")
         .where("user_id", "==", current_user["id"])
         .where("subscription_id", "==", sub_id)
         .where("created_at", ">=", period_start)
     )
-
-    used = 0
     try:
         async for _ in q.stream():
             used += 1
     except Exception as e:
-        # Most likely: missing Firestore composite index
-        print("[/api/users/me/usage] ledger query failed; falling back:", e)
-        # Still return the monthly_limit so the UI can show the correct plan
-        return JSONResponse(
-            {"monthly_usage": 0, "monthly_limit": monthly_limit, "degraded": True},
-            status_code=200,
-        )
+        # Likely missing composite index — return limit so UI still shows the plan
+        print("[/api/users/me/usage] ledger query failed; returning limit only:", e)
+        return JSONResponse({"monthly_usage": 0, "monthly_limit": monthly_limit, "degraded": True}, status_code=200)
 
     return JSONResponse({"monthly_usage": used, "monthly_limit": monthly_limit})
+
 
 
 
@@ -1497,52 +1509,36 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
         user_subscription_doc = await db.collection('subscriptions').document(user_data['subscription_id']).get()
         user_subscription_data = user_subscription_doc.to_dict()
 
-        if user_subscription_data['monthly_limit'] is not None:
-            period_start = user_data.get('billing_period_start')
+        # Enforce monthly limit if the plan is capped
+        limit = user_subscription_data.get("monthly_limit")
+        if limit is not None:
+            period_start = user_data.get("billing_period_start")
+            if isinstance(period_start, str):
+                try:
+                    period_start = datetime.fromisoformat(period_start)
+                except Exception:
+                    period_start = None
             if not period_start:
                 period_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-            usage_query = (
-                db.collection('usage_ledger')
-                .where('user_id', '==', user['id'])
-                .where('subscription_id', '==', user_data['subscription_id'])
-                .where('created_at', '>=', period_start)
-            )
-
             used = 0
-            if monthly_limit is not None:
-                try:
-                    q = (
-                        db.collection("usage_ledger")
-                        .where("user_id", "==", user_id)
-                        .where("subscription_id", "==", sub_id)
-                        .where("created_at", ">=", period_start)
-                    )
-                    async for _ in q.stream():
-                        used += 1
-                except Exception as e:
-                    print("[ws] ledger query failed; falling back to conversations:", e)
-                    # TEMP fallback so we still enforce *something* if the index isn't built yet
-                    try:
-                        cq = (
-                            db.collection("conversations")
-                            .where("user_id", "==", user_id)
-                            .where("subscription_id", "==", sub_id)
-                            .where("created_at", ">=", period_start)
-                        )
-                        async for _ in cq.stream():
-                            used += 1
-                    except Exception as e2:
-                        print("[ws] conversations fallback also failed:", e2)
-                        used = 0  # last-resort: don't block
+            try:
+                q = (
+                    db.collection("usage_ledger")
+                    .where("user_id", "==", user["id"])
+                    .where("subscription_id", "==", user_data.get("subscription_id") or "Free")
+                    .where("created_at", ">=", period_start)
+                )
+                async for _ in q.stream():
+                    used += 1
+            except Exception as e:
+                print("[ws] ledger query failed; allowing session but not counting:", e)
 
-                if used >= monthly_limit:
-                    await websocket.send_json({
-                        "sender": "System",
-                        "text": "Your monthly conversation limit has been reached. Please upgrade your plan to continue."
-                    })
-                    await websocket.close(code=status.WS_1008_POLICY_VIOLATION, reason="Limit reached")
-                    return
+            if used >= int(limit):
+                await websocket.send_json({"sender": "System", "type": "limit", "text": "Monthly conversation limit reached."})
+                await websocket.close(code=4000, reason="Monthly limit reached")
+                return
+
 
 
         # ---- init from client ----

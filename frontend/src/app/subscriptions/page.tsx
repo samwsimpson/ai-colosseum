@@ -168,74 +168,87 @@ export default function SubscriptionPage() {
         const backendUrl = rawApi.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://');
         
         const userResponse = await fetch(`${backendUrl}/api/users/me`, {
-          headers: {
-            'Authorization': `Bearer ${userToken}`,
-          },
+          headers: { 'Authorization': `Bearer ${userToken}` },
         });
         const usageResponse = await fetch(`${backendUrl}/api/users/me/usage`, {
-          headers: {
-            'Authorization': `Bearer ${userToken}`,
-          },
+          headers: { 'Authorization': `Bearer ${userToken}` },
         });
 
-        if (userResponse.ok && usageResponse.ok) {
-          const userData = await userResponse.json();
-          const usageData = await usageResponse.json();
-          
-          // Resolve the current plan name from multiple possibilities, with safe fallbacks
-          const rawName =
-            userData.user_plan_name ??
-            userData.plan_name ??
-            userData.user_plan ??
-            userData.plan ??
-            userData.subscription_name ??
-            '';
+        let userData: any = null;
+        let usageData: any = null;
 
-          let normalized = '';
-          try { normalized = String(rawName).trim().toLowerCase(); } catch { normalized = ''; }
+        if (userResponse.ok) {
+          userData = await userResponse.json();
+        } else {
+          console.error("Failed to fetch user profile.");
+          return; // Without /users/me there’s nothing to show
+        }
 
-          let resolvedPlan: 'Free' | 'Starter' | 'Pro' | 'Enterprise' | null = null;
-          if (normalized.includes('free')) resolvedPlan = 'Free';
-          else if (normalized.includes('starter')) resolvedPlan = 'Starter';
-          else if (normalized.includes('pro')) resolvedPlan = 'Pro';
-          else if (normalized.includes('enterprise')) resolvedPlan = 'Enterprise';
-
-          // If the backend didn’t give us a readable name, infer from the limit
-          if (!resolvedPlan) {
-            const limitNum = usageData?.monthly_limit === null ? null : Number(usageData?.monthly_limit);
-            if (limitNum === null) resolvedPlan = 'Enterprise';
-            else if (limitNum === 200) resolvedPlan = 'Pro';
-            else if (limitNum === 25) resolvedPlan = 'Starter';
-            else if (limitNum === 5) resolvedPlan = 'Free';
+        try {
+          if (usageResponse.ok) {
+            usageData = await usageResponse.json();
+          } else {
+            console.warn("Usage endpoint returned non-OK; showing plan without usage.");
           }
+        } catch (e) {
+          console.warn("Usage endpoint parse error; showing plan without usage.", e);
+        }
 
-          setCurrentPlanName(
-            resolvedPlan ||
-            labelFromPlan(rawName)
-          );
-          
-          console.debug('[subscriptions]', { rawName, normalized, resolvedPlan, monthly_limit: usageData?.monthly_limit });
+        // 1) Resolve the plan name from the user doc FIRST (never block on usage)
+        const rawName =
+          userData.user_plan_name ??
+          userData.plan_name ??
+          userData.user_plan ??
+          userData.plan ??
+          userData.subscription_name ??
+          '';
 
+        let normalized = '';
+        try { normalized = String(rawName).trim().toLowerCase(); } catch { normalized = ''; }
+
+        let resolvedPlan: 'Free' | 'Starter' | 'Pro' | 'Enterprise' | null = null;
+        if (normalized.includes('free')) resolvedPlan = 'Free';
+        else if (normalized.includes('starter')) resolvedPlan = 'Starter';
+        else if (normalized.includes('pro')) resolvedPlan = 'Pro';
+        else if (normalized.includes('enterprise')) resolvedPlan = 'Enterprise';
+
+        // 2) If the backend didn’t provide a readable name, infer from usage limit (if we have it)
+        if (!resolvedPlan && usageData) {
+          const limitNum = usageData?.monthly_limit === null ? null : Number(usageData?.monthly_limit);
+          if (limitNum === null) resolvedPlan = 'Enterprise';
+          else if (limitNum === 200) resolvedPlan = 'Pro';
+          else if (limitNum === 25) resolvedPlan = 'Starter';
+          else if (limitNum === 5) resolvedPlan = 'Free';
+        }
+
+        // 3) Set plan label either from resolvedPlan or via fallback mapper
+        setCurrentPlanName(resolvedPlan || labelFromPlan(rawName));
+
+        // 4) Usage stats (if available). If missing, leave as null so UI shows “Unlimited” or nothing.
+        if (usageData) {
           setConversationsUsed(usageData?.monthly_usage ?? 0);
           setMonthlyLimit(usageData?.monthly_limit ?? null);
+        }
 
-          // Show the next reset/renewal date if the backend provides it
-          try {
-            if (userData?.billing_period_end) {
-              const d = new Date(userData.billing_period_end);
-              setResetsOn(d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }));
-            } else {
-              setResetsOn(null);
-            }
-          } catch {
+        // 5) Next reset/renewal date from user profile (if present)
+        try {
+          if (userData?.billing_period_end) {
+            const d = new Date(userData.billing_period_end);
+            setResetsOn(d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }));
+          } else {
             setResetsOn(null);
           }
-
-
-
-        } else {
-          console.error("Failed to fetch user data or usage data.");
+        } catch {
+          setResetsOn(null);
         }
+
+        console.debug('[subscriptions]', {
+          rawName,
+          normalized,
+          resolvedPlan,
+          monthly_limit: usageData?.monthly_limit,
+        });
+
       } catch (error) {
         console.error("Error fetching user data:", error);
       }
