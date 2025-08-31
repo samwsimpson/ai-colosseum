@@ -210,14 +210,11 @@ export default function SubscriptionPage() {
           }
 
           setCurrentPlanName(
-            labelFromPlan(
-              userData.user_plan_name ??
-              userData.plan_name ??
-              userData.user_plan ??
-              userData.plan ??
-              userData.subscription_name
-            )
+            resolvedPlan ||
+            labelFromPlan(rawName)
           );
+          
+          console.debug('[subscriptions]', { rawName, normalized, resolvedPlan, monthly_limit: usageData?.monthly_limit });
 
           setConversationsUsed(usageData?.monthly_usage ?? 0);
           setMonthlyLimit(usageData?.monthly_limit ?? null);
