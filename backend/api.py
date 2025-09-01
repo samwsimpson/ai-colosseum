@@ -289,22 +289,38 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
             "summary": "",
         }
     )
-    # NEW: append-only usage record so deletes don't reduce counts
-    try:
-        await db.collection("usage_ledger").add(
-            {
-                "user_id": user_id,
-                "subscription_id": cfg.get("subscription_id"),
-                "conv_id": conv_ref.id,
-                "created_at": FS_TS,  # server timestamp anchor; safe for range queries
-            }
-        )
-    except Exception as e:
-        # Do not block chat creation if ledger write fails; just log it.
-        print("[usage_ledger] write failed:", e)
 
     doc = await conv_ref.get()
     return conv_ref, (doc.to_dict() or {})
+async def mark_conversation_debited_once(conv_ref, *, user_id: str, subscription_id: str | None):
+    """
+    Idempotently charge ONE conversation credit the first time the user participates.
+    Safe to call on every user message.
+    """
+    try:
+        snap = await conv_ref.get()
+        doc = snap.to_dict() or {}
+        if doc.get("debited"):
+            return False  # already charged
+
+        # Append to usage_ledger (the thing your monthly limit counts)
+        await db.collection("usage_ledger").add({
+            "user_id": user_id,
+            "subscription_id": subscription_id or "Free",
+            "conv_id": conv_ref.id,
+            "created_at": FS_TS,
+        })
+
+        # Mark the conversation so we won't double-charge later
+        await conv_ref.set({
+            "debited": True,
+            "first_user_message_at": FS_TS
+        }, merge=True)
+
+        return True
+    except Exception as e:
+        print("[usage_ledger] debit failed:", e)
+        return False
 
 async def save_message(
     conv_ref,
@@ -2440,6 +2456,13 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                                 "Hello! Ready when you are.",
                             ])
                         })
+                    # Charge one conversation credit the first time the user participates
+                    await mark_conversation_debited_once(
+                        conv_ref,
+                        user_id=user["id"],
+                        subscription_id=user_data.get("subscription_id"),
+                    )
+
                     # Kick off or feed the manager loop
                     if chat_task is None or chat_task.done():
                         # (Re)start the manager loop in the background
