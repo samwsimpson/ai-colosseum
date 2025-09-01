@@ -1097,14 +1097,26 @@ const loadConversations = useCallback(async () => {
                     try {
                         const res = await apiFetch('/api/refresh', { method: 'POST' });
                         if (res.ok) {
-                            const { token: newToken } = await res.json();
-                            return newToken;
+                        const { token: newToken } = await res.json();
+                        try { localStorage.setItem('access_token', newToken); } catch {}
+                        return newToken;
                         }
                     } catch (e) {
                         console.error("Failed to refresh token for WebSocket", e);
                     }
+                    // Hard stop: prevent any reconnect loop if we cannot refresh.
+                    authFailedRef.current = true;
+                    // Proactively clear any socket and mark closed.
+                    if (ws.current && ws.current.readyState < 2) {
+                        try { ws.current.close(1000, 'auth-refresh-failed'); } catch {}
+                    }
+                    ws.current = null;
+                    setIsWsOpen(false);
+                    // Navigate to sign-in once.
+                    if (pathname !== '/sign-in') router.push('/sign-in');
                     return null;
                 }
+
             } catch {
                 // If we can't decode, still try the token — the server will enforce validity.
                 return token;
@@ -1281,6 +1293,18 @@ const loadConversations = useCallback(async () => {
                 // Policy violation (e.g. monthly limit) → don't auto-reconnect aggressively
                 if (ev.code === 1008) {
                     // Server already delivered a user-facing message; stay disconnected
+                    return;
+                }
+                // Hard stop on custom application closes (e.g., monthly limit)
+                if (ev.code === 4000) {
+                    // Show a soft indicator; do NOT reconnect (prevents flicker loops)
+                    console.warn('WebSocket closed: monthly limit reached (4000). Stopping reconnects.');
+                    return;
+                }
+
+                // Guard against repeated auth-fail loops (e.g., cookie blocked)
+                if (ev.code === 4401 && authFailedRef.current) {
+                    console.warn('Auth already retried once and still unauthorized. Stopping reconnects.');
                     return;
                 }
 
