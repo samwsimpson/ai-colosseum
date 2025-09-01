@@ -220,6 +220,7 @@ const [isWsOpen, setIsWsOpen] = useState<boolean>(false);
 const [loadedSummary, setLoadedSummary] = useState<string | null>(null);
 const [showSummary, setShowSummary] = useState(false);
 const [wsReconnectNonce, setWsReconnectNonce] = useState(0);
+const [creditNotice, setCreditNotice] = useState<string | null>(null);
 const [conversationId, setConversationId] = useState<string | null>(null);
 const [pendingFiles, setPendingFiles] = useState<UploadedAttachment[]>([]);
 const [, setIsUploading] = useState<boolean>(false);
@@ -1290,11 +1291,18 @@ const loadConversations = useCallback(async () => {
                     return;
                 }
 
-                // Policy violation (e.g. monthly limit) → don't auto-reconnect aggressively
-                if (ev.code === 1008) {
-                    // Server already delivered a user-facing message; stay disconnected
+                // Out of credits / policy violation → stop reconnects and show banner
+                if (ev.code === 1008 || ev.code === 4000) {
+                    const reason = String(ev.reason || '').trim();
+                    setCreditNotice(
+                    reason
+                        ? reason
+                        : "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset."
+                    );
+                    // Do NOT schedule a reconnect
                     return;
                 }
+
                 // Hard stop on custom application closes (e.g., monthly limit)
                 if (ev.code === 4000) {
                     // Show a soft indicator; do NOT reconnect (prevents flicker loops)
@@ -1370,6 +1378,33 @@ const loadConversations = useCallback(async () => {
 
     return (
     <div className="flex h-screen w-full bg-gray-900 text-white font-sans antialiased pt-[72px]">
+        {creditNotice && (
+        <div
+            role="alert"
+            className="fixed top-[72px] left-0 right-0 z-50 border border-amber-500 bg-amber-500/10 text-amber-200 px-4 py-3"
+        >
+            <div className="mx-auto max-w-5xl flex items-center justify-between gap-3">
+            <div className="text-sm md:text-base">
+                {creditNotice}
+            </div>
+            <div className="flex items-center gap-2">
+                <a
+                href="/pricing"
+                className="text-xs md:text-sm underline px-3 py-1 rounded bg-amber-500/20 hover:bg-amber-500/30"
+                >
+                Upgrade
+                </a>
+                <button
+                onClick={() => setCreditNotice(null)}
+                className="text-xs md:text-sm opacity-80 hover:opacity-100"
+                >
+                Dismiss
+                </button>
+            </div>
+            </div>
+        </div>
+        )}
+
 
         {/* LEFT SIDEBAR */}
         <aside className="hidden md:flex md:flex-col fixed left-0 top-[72px] bottom-0 w-72 border-r border-gray-800 bg-gray-900 z-20">
