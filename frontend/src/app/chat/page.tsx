@@ -220,6 +220,7 @@ const [isWsOpen, setIsWsOpen] = useState<boolean>(false);
 const [loadedSummary, setLoadedSummary] = useState<string | null>(null);
 const [showSummary, setShowSummary] = useState(false);
 const [wsReconnectNonce, setWsReconnectNonce] = useState(0);
+const [isOutOfCredits, setIsOutOfCredits] = useState(false);
 const [creditNotice, setCreditNotice] = useState<string | null>(null);
 const [conversationId, setConversationId] = useState<string | null>(null);
 const [pendingFiles, setPendingFiles] = useState<UploadedAttachment[]>([]);
@@ -821,6 +822,13 @@ const loadConversations = useCallback(async () => {
         setTimeout(() => { isSubmittingRef.current = false; }, 300);
 
         e.preventDefault();
+        if (isOutOfCredits) {
+            setCreditNotice(prev =>
+                prev ?? "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset."
+            );
+            return;
+        }
+
 
         const text = message.trim();
         const hasText = text.trim().length > 0;
@@ -1146,6 +1154,8 @@ const loadConversations = useCallback(async () => {
                     reconnectRef.current.timer = null;
             
                     setIsWsOpen(true);
+                    setIsOutOfCredits(false);
+                    setCreditNotice(null);
                     loadConversations();
                     authFailedRef.current = false;
                     reconnectBackoffRef.current = 1000;
@@ -1743,6 +1753,7 @@ const loadConversations = useCallback(async () => {
                 onClick={() => fileInputRef.current?.click()}
                 className="h-11 md:h-12 w-11 md:w-12 self-end bg-gray-700 text-white font-semibold rounded-xl hover:bg-gray-600 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 transition-colors duration-200 text-lg"
                 title="Attach a file"
+                disabled={isOutOfCredits}
             >
                 <i className="fas fa-paperclip"></i>
             </button>
@@ -1776,12 +1787,12 @@ const loadConversations = useCallback(async () => {
                 }}
                 placeholder="Type your message..."
                 className="flex-grow p-3 rounded-xl border border-gray-700 bg-gray-800 text-white placeholder-gray-500 focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors duration-200 text-sm md:text-base resize-none overflow-hidden min-h-[44px]"
-                disabled={!userName}
+                disabled={!userName || isOutOfCredits}
             />      
             <button
                 type="submit"
                 className="h-11 md:h-12 px-4 md:px-6 self-end bg-blue-600 text-white font-semibold rounded-xl hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2 focus:ring-offset-gray-900 transition-colors duration-200 text-sm"
-                disabled={!userName}
+                disabled={!userName || isOutOfCredits}
             >
                 Send
             </button>
