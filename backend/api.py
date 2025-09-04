@@ -2389,6 +2389,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                             # truly empty turn; ignore silently (or send a notice if you prefer)
                             continue
                     # --- /INSERT ---
+                    # Save the user turn to Firestore
+                    await save_message(
+                        conv_ref,
+                        role="user",
+                        sender=user_display_name,
+                        content=user_message,
+                        file_metadata_list=files,
+                    )                    
                     # Build what the AIs should see: original text + per-file headers + previews
                     full_user_content = user_message
                     if files:
@@ -2413,16 +2421,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
 
 
                         full_user_content = (user_message + "\n\n" + "\n\n".join(blocks)).strip()
-
-                        # Save the user turn to Firestore
-                        await save_message(
-                            conv_ref,
-                            role="user",
-                            sender=user_display_name,
-                            content=user_message,
-                            file_metadata_list=files,
-                        )
-
               
                         #await ws.send_json({
                         #    "sender": proxy.name,
