@@ -2423,14 +2423,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                             file_metadata_list=files,
                         )
 
-                        # Save + echo the user turn exactly once (works for text-only and files)
-                        #await save_message(
-                        #    conv_ref,
-                        #    role="user",
-                        #    sender=user_display_name,
-                        #    content=user_message,
-                        #    file_metadata_list=files,
-                        #)
+              
                         #await ws.send_json({
                         #    "sender": proxy.name,
                         #    "text": user_message,
