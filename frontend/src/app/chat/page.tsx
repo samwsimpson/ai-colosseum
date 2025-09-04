@@ -966,6 +966,42 @@ const loadConversations = useCallback(async () => {
         await loadConversations();
         };
 
+        // Add the new export function
+        const handleExportConversation = async (id: string) => {
+            if (!userToken) return;
+
+            try {
+                const res = await apiFetch(`/api/conversations/${id}/export`, {
+                    method: "GET",
+                    headers: buildAuthHeaders(userToken),
+                });
+
+                if (!res.ok) {
+                    alert('Export failed. Please try again.');
+                    return;
+                }
+
+                const data = await res.json();
+                const jsonString = JSON.stringify(data, null, 2);
+                const blob = new Blob([jsonString], { type: "application/json" });
+
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement("a");
+                a.href = url;
+                // Use the title for the filename, falling back to the conversation ID
+                const title = (data.title || id).replace(/[^\w\d\s-]/g, '').trim().replace(/\s+/g, '-');
+                a.download = `conversation-${title}.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url); // Clean up the URL object
+                
+            } catch (error) {
+                console.error("Export failed:", error);
+                alert('An error occurred during export.');
+            }
+        };
+
         // Delete a conversation
         const handleDeleteConversation = async (id: string) => {
         if (!userToken) return;
@@ -1520,7 +1556,14 @@ const loadConversations = useCallback(async () => {
                                     title="Rename"
                                 >
                                     Rename
-                                </button>
+                                </button>                                
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); handleExportConversation(c.id); }}
+                                    className="w-full text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+                                    title="Export"
+                                >
+                                    Export
+                                </button>                                
                                 <button
                                     onClick={(e) => { e.stopPropagation(); handleDeleteConversation(c.id); }}
                                     className="w-full text-xs px-2 py-1 rounded bg-red-700 hover:bg-red-600"

@@ -452,6 +452,39 @@ async def list_conversations(user=Depends(get_current_user)):
 
 from typing import Dict
 
+# new import for the export feature
+from fastapi.responses import JSONResponse
+
+# ... your existing code ...
+
+@app.get("/api/conversations/{conv_id}/export")
+async def export_conversation(conv_id: str, user=Depends(get_current_user)):
+    conv_ref = db.collection("conversations").document(conv_id)
+    snap = await conv_ref.get()
+    if (not snap.exists) or ((snap.to_dict() or {}).get("user_id") != user["id"]):
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    conv = snap.to_dict() or {}
+
+    msgs = []
+    q = conv_ref.collection("messages").order_by("created_at")
+    async for m in q.stream():
+        d = m.to_dict() or {}
+        msgs.append({
+            "role": d.get("role"),
+            "sender": d.get("sender"),
+            "content": d.get("content"),
+            "timestamp": _ts_iso(d.get("created_at")),
+        })
+    return {
+        "id": conv_id,
+        "title": conv.get("title") or "Conversation",
+        "summary": conv.get("summary") or "",
+        "message_count": conv.get("message_count", len(msgs)),
+        "created_at": _ts_iso(conv.get("created_at")),
+        "updated_at": _ts_iso(conv.get("updated_at")),
+        "messages": msgs,
+    }
+
 @app.get("/api/conversations/by_token")
 async def list_conversations_by_token(
     token: Optional[str] = None,
