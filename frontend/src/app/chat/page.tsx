@@ -1698,7 +1698,8 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             </button>
         </div>
 
-        <ul className="space-y-1 max-h-56 overflow-y-auto pr-1 custom-scrollbar">
+        <ul className="space-y-1 max-h-56 overflow-y-auto pr-1 custom-scrollbar-subtle">
+
             <li>
             <button
                 className={`w-full text-left text-sm px-2 py-1 rounded ${selectedFolderId === null ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
@@ -1817,14 +1818,6 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             <span className="ml-auto text-[11px] text-gray-400">{selectedIds.size} selected</span>
             {/* Bulk move */}
             <div className="flex items-center gap-2">
-                {/* Filter dropdown (unchanged) */}
-                <select
-                className="text-xs px-2 py-1 rounded bg-gray-800 border border-gray-700 w-[160px] shrink-0"
-                onChange={(e) => setSelectedFolderId(e.target.value || null)}
-                value={selectedFolderId ?? ""}
-                />
-                {/* …same options as before… */}
-
                 {/* Bulk move TARGET dropdown (new) */}
                 <select
                 className="text-xs px-2 py-1 rounded bg-gray-800 border border-gray-700 w-[160px] shrink-0"
@@ -1871,11 +1864,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
                         <div className="flex items-center justify-between gap-2">
                             <div
-                                className={`flex items-center gap-2 min-w-0 ${
-                                    manageMode
-                                    ? 'pr-2'
-                                    : 'pr-20 md:pr-24 transition-[padding-right] duration-200'
-                                }`}
+                                className={`flex items-center gap-2 min-w-0 ${manageMode ? 'pr-2' : 'pr-2'}`}
                             >
 
                             {manageMode && (
@@ -1898,7 +1887,8 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                                     manageMode
                                         ? 'hidden'
                                         : 'opacity-100 pointer-events-auto md:opacity-0 md:group-hover:opacity-100 md:pointer-events-none md:group-hover:pointer-events-auto'
-                                    } absolute right-3 top-2 w-16 sm:w-20 transition-opacity flex flex-col gap-1 items-stretch`}
+                                } w-16 sm:w-20 transition-opacity flex flex-col gap-1 items-stretch shrink-0`}
+
                             >
                                 <select
                                 onClick={(e) => e.stopPropagation()}
@@ -1967,6 +1957,32 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
 
         </div>
+<style jsx global>{`
+  /* General (conversation list, main chat) */
+  .custom-scrollbar {
+    scrollbar-width: thin;                     /* Firefox */
+    scrollbar-color: #3b3b40 #16181d;          /* thumb track */
+  }
+  .custom-scrollbar::-webkit-scrollbar { width: 12px; height: 12px; }
+  .custom-scrollbar::-webkit-scrollbar-thumb { background: #3b3b40; border-radius: 8px; }
+  .custom-scrollbar::-webkit-scrollbar-track { background: #16181d; }
+
+  /* Subtle (folders) - slightly thinner/darker so it reads as a separate scrollbar */
+  .custom-scrollbar-subtle {
+    scrollbar-width: thin;                     /* Firefox */
+    scrollbar-color: #2b2b30 #0f1115;          /* thumb track */
+  }
+  .custom-scrollbar-subtle::-webkit-scrollbar { width: 8px; height: 8px; }
+  .custom-scrollbar-subtle::-webkit-scrollbar-thumb { background: #2b2b30; border-radius: 8px; }
+  .custom-scrollbar-subtle::-webkit-scrollbar-track { background: #0f1115; }
+
+  /* Optional: keep layout from jiggling when the scrollbar appears */
+  .custom-scrollbar,
+  .custom-scrollbar-subtle {
+    scrollbar-gutter: stable both-edges;
+  }
+`}</style>
+
         </aside>
 
         {/* MAIN COLUMN (YOUR EXISTING CHAT UI, UNCHANGED) */}
