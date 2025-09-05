@@ -148,7 +148,7 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
     }
 
     // first attempt
-    let res = await fetch(url, { ...init, headers: finalHeaders, credentials: "include" });
+    const res = await fetch(url, { ...init, headers: finalHeaders, credentials: "include" });
     if (res.status !== 401) return res;
 
     // try to refresh
