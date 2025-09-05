@@ -724,16 +724,11 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
         setConversations(unique);
     } catch {
         // If we were filtering by a folder and it failed, show an empty list instead of stale "All"
-        if (selectedFolderId && selectedFolderId !== "") setConversations([]);
+        if (activeFolder) setConversations([]);
     } finally {
         setIsLoadingConvs(false);
     }
 }, [userToken, selectedFolderId]);
-
-
-
-
-
 
     useEffect(() => {
         if (userToken) {
@@ -743,17 +738,24 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
     useEffect(() => {
         (async () => {
-            if (!userToken) return;
             try {
-            const f = await fetchFolders(userToken);
-            setFolders(f);
+                const f = await fetchFolders(userToken ?? undefined);
+                setFolders(Array.isArray(f) ? f : []);
             } catch {
-            // ignore
+                setFolders([]);
             }
         })();
     }, [userToken]);
 
     // Also try once on mount using whatever token is already in localStorage.
+    useEffect(() => {
+        (async () => {
+            try {
+                const f = await fetchFolders(undefined);
+                if (Array.isArray(f)) setFolders(f);
+            } catch {}
+        })();
+    }, []);    
     // Covers refreshes where context isn't ready yet.
     useEffect(() => {
         loadConversations();        
