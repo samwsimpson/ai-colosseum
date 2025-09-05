@@ -1957,31 +1957,6 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
 
         </div>
-<style jsx global>{`
-  /* General (conversation list, main chat) */
-  .custom-scrollbar {
-    scrollbar-width: thin;                     /* Firefox */
-    scrollbar-color: #3b3b40 #16181d;          /* thumb track */
-  }
-  .custom-scrollbar::-webkit-scrollbar { width: 12px; height: 12px; }
-  .custom-scrollbar::-webkit-scrollbar-thumb { background: #3b3b40; border-radius: 8px; }
-  .custom-scrollbar::-webkit-scrollbar-track { background: #16181d; }
-
-  /* Subtle (folders) - slightly thinner/darker so it reads as a separate scrollbar */
-  .custom-scrollbar-subtle {
-    scrollbar-width: thin;                     /* Firefox */
-    scrollbar-color: #2b2b30 #0f1115;          /* thumb track */
-  }
-  .custom-scrollbar-subtle::-webkit-scrollbar { width: 8px; height: 8px; }
-  .custom-scrollbar-subtle::-webkit-scrollbar-thumb { background: #2b2b30; border-radius: 8px; }
-  .custom-scrollbar-subtle::-webkit-scrollbar-track { background: #0f1115; }
-
-  /* Optional: keep layout from jiggling when the scrollbar appears */
-  .custom-scrollbar,
-  .custom-scrollbar-subtle {
-    scrollbar-gutter: stable both-edges;
-  }
-`}</style>
 
         </aside>
 
@@ -2311,30 +2286,6 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
     )}
   </div>
 </aside>        
-        <style jsx global>{`
-        /* Works on Firefox */
-        .custom-scrollbar {
-            scrollbar-width: thin;
-            scrollbar-color: #475569 #0f172a; /* thumb, track */
-        }
-
-        /* Works on Chrome, Edge, Safari */
-        .custom-scrollbar::-webkit-scrollbar {
-            width: 8px;
-            height: 8px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-track {
-            background: #0f172a; /* dark track to match your theme */
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-            background: #475569;        /* slate-600 */
-            border-radius: 9999px;       /* fully rounded */
-            border: 2px solid #0f172a;   /* creates a gap around the thumb */
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-            background: #64748b; /* slate-500 on hover */
-        }
-        `}</style>
 
     </div>
     );
