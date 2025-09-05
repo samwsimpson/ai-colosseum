@@ -646,15 +646,21 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
         setIsLoadingConvs(true);
 
         // Build conversations URL with optional folder filter (Authorization header is added by apiFetch)
-        const url = new URL('/api/conversations', API_BASE);
-        if (activeFolder && activeFolder !== '') {
-        url.searchParams.set('folder_id', activeFolder);
+        // Build conversations URL with optional folder filter (Authorization header is added by apiFetch)
+        const endpoint = (activeFolder && activeFolder !== '')
+            ? '/api/conversations'
+            : '/api/conversations/by_token';
+
+        const url = new URL(endpoint, API_BASE);
+            if (activeFolder && activeFolder !== '') {
+            url.searchParams.set('folder_id', activeFolder);
         }
 
         const res = await apiFetch(url.pathname + url.search, {
-        cache: 'no-store',
-        headers: buildAuthHeaders(userToken),
+            cache: 'no-store',
+            headers: buildAuthHeaders(userToken),
         });
+
 
         if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
         const data: ConversationListResponse = await res.json();
