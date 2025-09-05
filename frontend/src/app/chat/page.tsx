@@ -1609,7 +1609,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
         </div>
         </div>
         {/* FOLDERS */}
-        <div className="py-2 border-b border-gray-800">
+        <div className="py-2 border-y border-gray-800 bg-gray-950/80 shadow-[inset_0_-1px_0_0_rgba(255,255,255,0.04)]">
         <div className="px-3 flex items-center justify-between mb-2">
 
             <h3 className="text-sm font-semibold text-gray-300">Folders</h3>
@@ -1815,7 +1815,8 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
         )}
 
 
-        <div className="flex-1 min-w-0 overflow-y-auto custom-scrollbar">
+        <div className="flex-1 min-w-0 overflow-y-auto custom-scrollbar bg-gray-900">
+
             {isLoadingConvs && (
             <div className="p-4 text-sm text-gray-400">Loading…</div>
             )}
