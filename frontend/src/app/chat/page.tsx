@@ -203,6 +203,29 @@ async function createFolder(name: string, token?: string | null): Promise<Folder
   return { id: json.id, name: json.name, color: json.color ?? null, emoji: json.emoji ?? null, parent_id: json.parent_id ?? null };
 }
 
+async function renameFolder(id: string, newName: string, token?: string | null): Promise<boolean> {
+  const name = (newName ?? "").trim();
+  if (!name || name.length > 64) return false;
+
+  const h = buildAuthHeaders(token);
+  h.set("Content-Type", "application/json");
+  const res = await apiFetch(`/api/folders/${id}`, {
+    method: "PATCH",
+    headers: h,
+    body: JSON.stringify({ name }),
+  });
+  return res.ok;
+}
+
+async function removeFolder(id: string, token?: string | null): Promise<boolean> {
+  const h = buildAuthHeaders(token);
+  const res = await apiFetch(`/api/folders/${id}`, {
+    method: "DELETE",
+    headers: h,
+  });
+  return res.ok;
+}
+
 type AgentName = 'ChatGPT' | 'Claude' | 'Gemini' | 'Mistral';
 const ALLOWED_AGENTS: AgentName[] = ['ChatGPT', 'Claude', 'Gemini', 'Mistral'];
 interface UploadListItem {
@@ -1629,6 +1652,12 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                     alert("Folder name must be 1–64 characters.");
                     return;
                 }
+                // Prevent accidental duplicates (case-insensitive). Ask before creating another with same name.
+                const dup = folders.some(ff => (ff.name || "").toLowerCase() === name.toLowerCase());
+                if (dup) {
+                    const proceed = window.confirm(`A folder named "${name}" already exists. Create another with the same name?`);
+                    if (!proceed) return;
+                }
 
                 // Do the POST directly so we can surface status/details
                 const h = buildAuthHeaders(userToken);
@@ -1690,18 +1719,80 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             </button>
             </li>
 
-            {folders.map((f) => (
-            <li key={f.id}>
+        {folders.map((f) => (
+            <li key={f.id} className="group flex items-center justify-between">
                 <button
-                className={`w-full text-left text-sm px-2 py-1 rounded ${selectedFolderId === f.id ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
-                onClick={async () => { setSelectedFolderId(f.id); await loadConversations(f.id); }}
-
+                className={`flex-1 text-left text-sm px-2 py-1 rounded ${selectedFolderId === f.id ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
+                onClick={() => { setSelectedFolderId(f.id); loadConversations(f.id); }}
                 title={f.name}
                 >
-                {f.emoji ? `${f.emoji} ` : ''}{f.name}
+                {f.name}
                 </button>
+
+                {/* Hover actions */}
+                <div className="ml-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button
+                    className="text-xs px-1.5 py-0.5 rounded bg-gray-700 hover:bg-gray-600"
+                    title="Rename"
+                    onClick={async (e) => {
+                    e.stopPropagation();
+                    const raw = window.prompt("Rename folder:", f.name);
+                    const newName = (raw ?? "").trim();
+                    if (!newName || newName === f.name) return;
+                    // Duplicate-name guard for rename
+                    const dup = folders
+                        .filter(x => x.id !== f.id) // ignore the folder we’re renaming
+                        .some(x => (x.name || "").toLowerCase() === newName.toLowerCase());
+
+                    if (dup) {
+                        const proceed = window.confirm(`A folder named "${newName}" already exists. Rename anyway?`);
+                        if (!proceed) return;
+                    }
+                                        const ok = await renameFolder(f.id, newName, userToken);
+                    if (!ok) { alert("Rename failed."); return; }
+
+                    // Update local state immediately (keep sort by name)
+                    setFolders(prev =>
+                        prev
+                        .map(x => x.id === f.id ? { ...x, name: newName } : x)
+                        .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
+                    );
+                    const fresh = await fetchFolders(userToken);
+                    if (Array.isArray(fresh) && fresh.length) setFolders(fresh);
+
+                    }}
+                >
+                    ✎
+                </button>
+
+                <button
+                    className="text-xs px-1.5 py-0.5 rounded bg-gray-700 hover:bg-red-600"
+                    title="Delete"
+                    onClick={async (e) => {
+                    e.stopPropagation();
+                    if (!confirm(`Delete folder "${f.name}"? Conversations will be moved to Unfiled.`)) return;
+
+                    const ok = await removeFolder(f.id, userToken);
+                    if (!ok) { alert("Delete failed."); return; }
+
+                    setFolders(prev => prev.filter(x => x.id !== f.id));
+                    
+                    const fresh = await fetchFolders(userToken);
+                    if (Array.isArray(fresh) && fresh.length) setFolders(fresh);
+
+                    // If we were viewing the deleted folder, fall back to All
+                    if (selectedFolderId === f.id) {
+                        setSelectedFolderId(null);
+                        await loadConversations(null);
+                    }
+                    }}
+                >
+                    🗑
+                </button>
+                </div>
             </li>
-            ))}
+        ))}
+
         </ul>
         </div>
         {manageMode && (
