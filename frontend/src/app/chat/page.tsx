@@ -1620,16 +1620,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                 Unfiled
             </button>
             </li>
-            {/* Archive button is optional; wire later with is_archived filter
-            <li>
-            <button
-                className={`w-full text-left text-sm px-2 py-1 rounded ${selectedFolderId === "__ARCHIVE__" ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
-                onClick={() => {/* setSelectedFolderId("__ARCHIVE__"); loadConversations("__ARCHIVE__"); */}}
-            >
-                Archive
-            </button>
-            </li>
-            */}
+
             {folders.map((f) => (
             <li key={f.id}>
                 <button
