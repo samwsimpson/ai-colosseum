@@ -636,19 +636,20 @@ const removePending = (id: string) => setPendingFiles(prev => prev.filter(p => p
     }, [conversationId, chatHistory.length, hydrateConversation]);
     // Fetch the list of conversations
 const loadConversations = useCallback(async (folderId?: string | null) => {
+    const activeFolder = (typeof folderId !== 'undefined') ? folderId : selectedFolderId;
+
     try {
         setIsLoadingConvs(true);
 
         // Build conversations URL with optional folder filter (Authorization header is added by apiFetch)
-        const activeFolder = (typeof folderId !== 'undefined') ? folderId : selectedFolderId;
         const url = new URL('/api/conversations', API_BASE);
         if (activeFolder && activeFolder !== '') {
         url.searchParams.set('folder_id', activeFolder);
         }
 
         const res = await apiFetch(url.pathname + url.search, {
-            cache: 'no-store',
-            headers: buildAuthHeaders(userToken),
+        cache: 'no-store',
+        headers: buildAuthHeaders(userToken),
         });
 
         if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
