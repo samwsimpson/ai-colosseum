@@ -1667,7 +1667,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             <li>
             <button
                 className={`w-full text-left text-sm px-2 py-1 rounded ${selectedFolderId === null ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
-                onClick={async () => { ssetSelectedFolderId(null); await loadConversations(null); }}
+                onClick={async () => { setSelectedFolderId(null); await loadConversations(null); }}
             >
                 All
             </button>
