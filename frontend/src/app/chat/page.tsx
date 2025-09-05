@@ -170,16 +170,16 @@ async function fetchFolders(token?: string | null): Promise<Folder[]> {
     Array.isArray(json) ? json :
     Array.isArray(json.items) ? json.items :
     Array.isArray(json.folders) ? json.folders : [];
-    return arr
-        .map((f: any) => ({ id: f.id, name: f.name, color: f.color ?? null, emoji: f.emoji ?? null, parent_id: f.parent_id ?? null }))
-        .map((f: Partial<Folder>) => ({
-        id: String(f.id ?? ''),
-        name: String(f.name ?? ''),
-        color: (f.color ?? null) as Folder['color'],
-        emoji: (f.emoji ?? null) as Folder['emoji'],
-        parent_id: (f.parent_id ?? null) as Folder['parent_id'],
-    }))
-    .sort((a: Folder, b: Folder) => (a.name || "").localeCompare(b.name || ""));
+     return (arr as Array<Partial<Folder>>)
+       .map(f => ({
+         id: String(f.id ?? ''),
+         name: String(f.name ?? ''),
+         color: (f.color ?? null) as Folder['color'],
+         emoji: (f.emoji ?? null) as Folder['emoji'],
+         parent_id: (f.parent_id ?? null) as Folder['parent_id'],
+       }))
+       .sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+
 
 }
 
@@ -1148,15 +1148,6 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
     const clearSelection = useCallback(() => {
     setSelectedIds(new Set());
     }, []);
-
-    const handleBulkDelete = useCallback(async () => {
-    if (!userToken) return;
-    const ids = Array.from(selectedIds);
-    if (ids.length === 0) return;
-
-    if (!window.confirm(`Delete ${ids.length} conversation${ids.length > 1 ? 's' : ''}? This cannot be undone.`)) {
-        return;
-    }
     const moveSelectedToFolder = useCallback(async () => {
         if (!userToken) return;
         const target = selectedFolderId === "__UNFILED__" ? null : selectedFolderId;
@@ -1177,6 +1168,16 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
         await loadConversations(selectedFolderId);
         clearSelection();
     }, [userToken, selectedIds, selectedFolderId, loadConversations, clearSelection]);
+
+    const handleBulkDelete = useCallback(async () => {
+    if (!userToken) return;
+    const ids = Array.from(selectedIds);
+    if (ids.length === 0) return;
+
+    if (!window.confirm(`Delete ${ids.length} conversation${ids.length > 1 ? 's' : ''}? This cannot be undone.`)) {
+        return;
+    }
+    
 
     // optimistic removal in UI
     setConversations(prev => prev.filter(c => !selectedIds.has(c.id)));
