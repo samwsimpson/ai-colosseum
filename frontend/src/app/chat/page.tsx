@@ -1137,7 +1137,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             "• Leave blank for Unfiled",
             "",
             "Available folders:",
-            ...names.map(n => `- ${n}`)
+            names.map(n => `- ${n}`)
             ].join("\n"),
             ""
         );
@@ -1776,7 +1776,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                     if (!ok) { alert("Delete failed."); return; }
 
                     setFolders(prev => prev.filter(x => x.id !== f.id));
-                    
+
                     const fresh = await fetchFolders(userToken);
                     if (Array.isArray(fresh) && fresh.length) setFolders(fresh);
 
@@ -1903,13 +1903,37 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                                         : 'opacity-100 pointer-events-auto md:opacity-0 md:group-hover:opacity-100 md:pointer-events-none md:group-hover:pointer-events-auto'
                                     } absolute right-3 top-2 w-16 sm:w-20 transition-opacity flex flex-col gap-1 items-stretch`}
                             >
-                                <button
-                                    onClick={(e) => { e.stopPropagation(); handleMoveConversation(c.id); }}
-                                    className="w-full text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
-                                    title="Move"
-                                    >
-                                    Move
-                                </button>
+                                <select
+                                onClick={(e) => e.stopPropagation()}
+                                onChange={async (e) => {
+                                    const val = e.target.value;
+                                    if (val === "") return; // no-op on placeholder
+                                    const target = val === "__UNFILED__" ? null : val;
+
+                                    const h = buildAuthHeaders(userToken);
+                                    h.set("Content-Type", "application/json");
+                                    const res = await apiFetch(`/api/conversations/${c.id}`, {
+                                    method: "PATCH",
+                                    headers: h,
+                                    body: JSON.stringify({ folder_id: target }),
+                                    });
+                                    if (!res.ok) { alert("Move failed."); return; }
+
+                                    // reset the dropdown back to its placeholder and refresh list
+                                    e.currentTarget.value = "";
+                                    await loadConversations(selectedFolderId);
+                                }}
+                                defaultValue=""
+                                className="w-full text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+                                title="Move to folder"
+                                >
+                                <option value="">Move…</option>
+                                <option value="__UNFILED__">Unfiled</option>
+                                {folders.map(f => (
+                                    <option key={f.id} value={f.id}>{f.name}</option>
+                                ))}
+                                </select>
+
                                 <button
                                     onClick={(e) => { e.stopPropagation(); handleRenameConversation(c.id); }}
                                     className="w-full text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
