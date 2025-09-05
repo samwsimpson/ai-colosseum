@@ -1699,106 +1699,43 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             </button>
         </div>
 
-        <div className="max-h-56 overflow-y-auto custom-scrollbar-subtle">
-            <ul className="space-y-1 px-3">
-                {/* keep all your existing <li> items here, unchanged */}
-            </ul>
-        </div>
-
-
-
+        <ul className="space-y-1 max-h-56 overflow-y-auto pr-1 custom-scrollbar-subtle">
             <li>
-            <button
+                <button
                 className={`w-full text-left text-sm px-2 py-1 rounded ${selectedFolderId === null ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
                 onClick={async () => { setSelectedFolderId(null); await loadConversations(null); }}
-            >
+                >
                 All
-            </button>
-            </li>
-            <li>
-            <button
-                className={`w-full text-left text-sm px-2 py-1 rounded ${selectedFolderId === UNFILED_FOLDER_ID ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
-                onClick={async () => { setSelectedFolderId(UNFILED_FOLDER_ID); await loadConversations(UNFILED_FOLDER_ID); }}
-            >
-                Unfiled
-            </button>
+                </button>
             </li>
 
-        {folders.map((f) => (
-            <li key={f.id} className="group flex items-center justify-between">
+            <li>
                 <button
-                className={`flex-1 text-left text-sm px-2 py-1 rounded ${selectedFolderId === f.id ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
-                onClick={() => { setSelectedFolderId(f.id); loadConversations(f.id); }}
-                title={f.name}
+                className={`w-full text-left text-sm px-2 py-1 rounded ${selectedFolderId === UNFILED_FOLDER_ID ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
+                onClick={async () => { setSelectedFolderId(UNFILED_FOLDER_ID); await loadConversations(UNFILED_FOLDER_ID); }}
                 >
-                {f.name}
+                Unfiled
+                </button>
+            </li>
+
+            {folders.map((f) => (
+                <li key={f.id} className="group flex items-center justify-between">
+                <button
+                    className={`flex-1 text-left text-sm px-2 py-1 rounded ${selectedFolderId === f.id ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
+                    onClick={() => { setSelectedFolderId(f.id); loadConversations(f.id); }}
+                    title={f.name}
+                >
+                    {f.name}
                 </button>
 
                 {/* Hover actions */}
                 <div className="ml-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                <button
-                    className="text-xs px-1.5 py-0.5 rounded bg-gray-700 hover:bg-gray-600"
-                    title="Rename"
-                    onClick={async (e) => {
-                    e.stopPropagation();
-                    const raw = window.prompt("Rename folder:", f.name);
-                    const newName = (raw ?? "").trim();
-                    if (!newName || newName === f.name) return;
-                    // Duplicate-name guard for rename
-                    const dup = folders
-                        .filter(x => x.id !== f.id) // ignore the folder we’re renaming
-                        .some(x => (x.name || "").toLowerCase() === newName.toLowerCase());
-
-                    if (dup) {
-                        const proceed = window.confirm(`A folder named "${newName}" already exists. Rename anyway?`);
-                        if (!proceed) return;
-                    }
-                                        const ok = await renameFolder(f.id, newName, userToken);
-                    if (!ok) { alert("Rename failed."); return; }
-
-                    // Update local state immediately (keep sort by name)
-                    setFolders(prev =>
-                        prev
-                        .map(x => x.id === f.id ? { ...x, name: newName } : x)
-                        .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
-                    );
-                    const fresh = await fetchFolders(userToken);
-                    if (Array.isArray(fresh) && fresh.length) setFolders(fresh);
-
-                    }}
-                >
-                    ✎
-                </button>
-
-                <button
-                    className="text-xs px-1.5 py-0.5 rounded bg-gray-700 hover:bg-red-600"
-                    title="Delete"
-                    onClick={async (e) => {
-                    e.stopPropagation();
-                    if (!confirm(`Delete folder "${f.name}"? Conversations will be moved to Unfiled.`)) return;
-
-                    const ok = await removeFolder(f.id, userToken);
-                    if (!ok) { alert("Delete failed."); return; }
-
-                    setFolders(prev => prev.filter(x => x.id !== f.id));
-
-                    const fresh = await fetchFolders(userToken);
-                    if (Array.isArray(fresh) && fresh.length) setFolders(fresh);
-
-                    // If we were viewing the deleted folder, fall back to All
-                    if (selectedFolderId === f.id) {
-                        setSelectedFolderId(null);
-                        await loadConversations(null);
-                    }
-                    }}
-                >
-                    🗑
-                </button>
+                    {/* …rename / delete buttons you already have… */}
                 </div>
-            </li>
-        ))}
-
+                </li>
+            ))}
         </ul>
+
         </div>
         {manageMode && (
         <div className="px-3 py-2 border-b border-gray-800 flex items-center gap-1 flex-wrap">
