@@ -638,15 +638,6 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
     try {
         setIsLoadingConvs(true);
 
-        // Obtain a token from localStorage or userToken
-        const token =
-            typeof window !== 'undefined'
-                ? localStorage.getItem('access_token') || userToken || null
-                : null;
-
-        // If no token, abort; prevents clearing the sidebar
-        if (!token) return;
-
         // Build conversations URL with optional folder filter (Authorization header is added by apiFetch)
         const activeFolder = (typeof folderId !== 'undefined') ? folderId : selectedFolderId;
         const url = new URL('/api/conversations', API_BASE);
@@ -1645,6 +1636,9 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                     parent_id: created.parent_id ?? null,
                 };
                 setFolders(prev => [...prev, made].sort((a, b) => (a.name || "").localeCompare(b.name || "")));
+                setSelectedFolderId(made.id);
+                await loadConversations(made.id);
+
 
                 // Also refetch for a definitive, server-sorted list
                 const fresh = await fetchFolders(userToken);
