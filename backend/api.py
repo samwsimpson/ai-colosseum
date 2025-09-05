@@ -521,6 +521,8 @@ async def list_conversations_by_token(
     token: Optional[str] = None,
     limit: int = 100,
     authorization: Optional[str] = Header(default=None),
+    folder_id: Optional[str] = None,
+    is_archived: Optional[bool] = None,
 ):
     # Prefer Authorization header (fresh after /api/refresh); fall back to ?token=
     if authorization and authorization.lower().startswith("bearer "):
@@ -548,17 +550,37 @@ async def list_conversations_by_token(
     # --- /AUTO-BACKFILL-ONCE ---
     base = db.collection("conversations")
     items_by_id: Dict[str, dict] = {}
+    # Optional filters
+    unfiled = (folder_id == "__UNFILED__")
+
 
     # query by user_id
     q1 = base.where("user_id", "==", user["id"]).limit(limit)
     async for d in q1.stream():
         c = d.to_dict() or {}
+        # --- apply optional filters ---
+        if is_archived is not None:
+            if bool(c.get("is_archived", False)) != bool(is_archived):
+                continue
+
+        if folder_id is not None:
+            if unfiled:
+                # only include those with no folder_id / empty
+                if c.get("folder_id") not in (None, ""):
+                    continue
+            else:
+                if c.get("folder_id") != folder_id:
+                    continue
+        # --- end filters ---
+
         items_by_id[d.id] = {
             "id": d.id,
             "title": c.get("title") or "New conversation",
             "updated_at": _ts_iso(c.get("updated_at") or c.get("created_at")),
             "message_count": c.get("message_count", 0),
             "summary": c.get("summary", ""),
+            "folder_id": c.get("folder_id") if "folder_id" in c else None,
+
         }
 
     # legacy/email key fallback
@@ -566,12 +588,29 @@ async def list_conversations_by_token(
         q2 = base.where("owner_keys", "array_contains", user["email"].lower()).limit(limit)
         async for d in q2.stream():
             c = d.to_dict() or {}
+            # --- apply optional filters ---
+            if is_archived is not None:
+                if bool(c.get("is_archived", False)) != bool(is_archived):
+                    continue
+
+            if folder_id is not None:
+                if unfiled:
+                    # only include those with no folder_id / empty
+                    if c.get("folder_id") not in (None, ""):
+                        continue
+                else:
+                    if c.get("folder_id") != folder_id:
+                        continue
+            # --- end filters ---
+
             items_by_id[d.id] = {
                 "id": d.id,
                 "title": c.get("title") or "New conversation",
                 "updated_at": _ts_iso(c.get("updated_at") or c.get("created_at")),
                 "message_count": c.get("message_count", 0),
                 "summary": c.get("summary", ""),
+                "folder_id": c.get("folder_id") if "folder_id" in c else None,
+
             }
 
     items = list(items_by_id.values())

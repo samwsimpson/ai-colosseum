@@ -670,12 +670,10 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
         // Build conversations URL with optional folder filter (Authorization header is added by apiFetch)
         // Build conversations URL with optional folder filter (Authorization header is added by apiFetch)
-        const endpoint = (activeFolder && activeFolder !== '')
-            ? '/api/conversations'
-            : '/api/conversations/by_token';
+        const endpoint = '/api/conversations/by_token';
 
         const url = new URL(endpoint, API_BASE);
-            if (activeFolder && activeFolder !== '') {
+        if (activeFolder && activeFolder !== '') {
             url.searchParams.set('folder_id', activeFolder);
         }
 
