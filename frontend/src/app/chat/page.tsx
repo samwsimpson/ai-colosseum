@@ -37,6 +37,18 @@ interface ConversationListItem {
   created_at?: string | null;   // ← NEW (for fallback display)
 }
 
+// Folder records
+interface Folder {
+  id: string;
+  name: string;
+  color?: string | null;
+  emoji?: string | null;
+  parent_id?: string | null;
+}
+
+// Virtual ids for UI filters
+const UNFILED_FOLDER_ID = "__UNFILED__";
+
 // Typed shape used when sorting/choosing newest in preselects
 type SidebarConvo = ConversationListItem;
 
@@ -110,7 +122,6 @@ function buildAuthHeaders(userToken?: string | null): Headers {
   return h;
 }
 
-
 // Helper: fetch with Authorization header and 1x retry on 401 using /api/refresh
 async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
     const url =
@@ -149,6 +160,41 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
     return res;
 }
 
+async function fetchFolders(token?: string | null): Promise<Folder[]> {
+  const res = await apiFetch(`/api/folders`, {
+    headers: buildAuthHeaders(token),
+  });
+  if (!res.ok) return [];
+  const json = await res.json();
+  const arr =
+    Array.isArray(json) ? json :
+    Array.isArray(json.items) ? json.items :
+    Array.isArray(json.folders) ? json.folders : [];
+    return arr
+        .map((f: any) => ({ id: f.id, name: f.name, color: f.color ?? null, emoji: f.emoji ?? null, parent_id: f.parent_id ?? null }))
+        .map((f: Partial<Folder>) => ({
+        id: String(f.id ?? ''),
+        name: String(f.name ?? ''),
+        color: (f.color ?? null) as Folder['color'],
+        emoji: (f.emoji ?? null) as Folder['emoji'],
+        parent_id: (f.parent_id ?? null) as Folder['parent_id'],
+    }))
+    .sort((a: Folder, b: Folder) => (a.name || "").localeCompare(b.name || ""));
+
+}
+
+async function createFolder(name: string, token?: string | null): Promise<Folder | null> {
+  const h = buildAuthHeaders(token);
+  h.set("Content-Type", "application/json");
+  const res = await apiFetch(`/api/folders`, {
+    method: "POST",
+    headers: h,
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) return null;
+  const json = await res.json();
+  return { id: json.id, name: json.name, color: json.color ?? null, emoji: json.emoji ?? null, parent_id: json.parent_id ?? null };
+}
 
 type AgentName = 'ChatGPT' | 'Claude' | 'Gemini' | 'Mistral';
 const ALLOWED_AGENTS: AgentName[] = ['ChatGPT', 'Claude', 'Gemini', 'Mistral'];
@@ -184,8 +230,6 @@ export default function ChatPage() {
         if (!value) {
         setIsTyping(prev => ({ ...prev, [agent]: false }));
         delete typingTimersRef.current[agent];
-        if (!authChecked) return null;  // or a skeleton loader if you prefer
-        if (!authed) return null;       // redirect already in flight
 
         return;
         }
@@ -228,6 +272,8 @@ const [, setIsUploading] = useState<boolean>(false);
 const [conversations, setConversations] = useState<ConversationListItem[]>([]);
 const [isLoadingConvs, setIsLoadingConvs] = useState(false);
 const [manageMode, setManageMode] = useState(false);
+const [folders, setFolders] = useState<Folder[]>([]);
+const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null); // null = All
 const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 const [composerHeight, setComposerHeight] = useState<number>(120);
 const [isTyping, setIsTyping] = useState<TypingState>({
@@ -585,7 +631,7 @@ const removePending = (id: string) => setPendingFiles(prev => prev.filter(p => p
         }
     }, [conversationId, chatHistory.length, hydrateConversation]);
     // Fetch the list of conversations
-const loadConversations = useCallback(async () => {
+const loadConversations = useCallback(async (folderId?: string | null) => {
     try {
         setIsLoadingConvs(true);
 
@@ -598,14 +644,18 @@ const loadConversations = useCallback(async () => {
         // If no token, abort; prevents clearing the sidebar
         if (!token) return;
 
-        // Build query string with limit and token
-        const query = new URLSearchParams();
-        query.set('limit', '100');
-        query.set('token', token);
+        // Build conversations URL with optional folder filter (Authorization header is added by apiFetch)
+        const activeFolder = (typeof folderId !== 'undefined') ? folderId : selectedFolderId;
+        const url = new URL('/api/conversations', API_BASE);
+        if (activeFolder && activeFolder !== '') {
+        url.searchParams.set('folder_id', activeFolder);
+        }
 
-        const res = await apiFetch(`/api/conversations/by_token?${query.toString()}`, {
-            cache: 'no-store',
+        const res = await apiFetch(url.pathname + url.search, {
+        cache: 'no-store',
         });
+
+
         if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
         const data: ConversationListResponse = await res.json();
 
@@ -682,7 +732,8 @@ const loadConversations = useCallback(async () => {
     } finally {
         setIsLoadingConvs(false);
     }
-}, [userToken]);
+}, [userToken, selectedFolderId]);
+
 
 
 
@@ -690,9 +741,21 @@ const loadConversations = useCallback(async () => {
 
     useEffect(() => {
         if (userToken) {
-            loadConversations();
+            loadConversations(selectedFolderId);
         }
-    }, [userToken, loadConversations]);
+    }, [userToken, loadConversations, selectedFolderId]);
+
+    useEffect(() => {
+        (async () => {
+            if (!userToken) return;
+            try {
+            const f = await fetchFolders(userToken);
+            setFolders(f);
+            } catch {
+            // ignore
+            }
+        })();
+    }, [userToken]);
 
     // Also try once on mount using whatever token is already in localStorage.
     // Covers refreshes where context isn't ready yet.
@@ -1022,6 +1085,51 @@ const loadConversations = useCallback(async () => {
         } else {
             await loadConversations();
         }
+    };
+    const handleMoveConversation = async (id: string) => {
+        if (!userToken) return;
+
+        if (folders.length === 0) {
+            try {
+            const f = await fetchFolders(userToken);
+            setFolders(f);
+            } catch {}
+        }
+
+        const names = folders.map(f => f.name);
+        const picked = window.prompt(
+            [
+            "Move to folder:",
+            "• Type exact folder name to move",
+            "• Leave blank for Unfiled",
+            "",
+            "Available folders:",
+            ...names.map(n => `- ${n}`)
+            ].join("\n"),
+            ""
+        );
+        if (picked === null) return; // cancelled
+
+        let targetId: string | null = null;
+        const trimmed = picked.trim();
+        if (trimmed.length > 0) {
+            const match = folders.find(f => f.name.toLowerCase() === trimmed.toLowerCase());
+            if (!match) { alert("No folder by that name."); return; }
+            targetId = match.id;
+        } else {
+            targetId = null; // Unfiled
+        }
+
+        const h = buildAuthHeaders(userToken);
+        h.set("Content-Type", "application/json");
+        const res = await apiFetch(`/api/conversations/${id}`, {
+            method: "PATCH",
+            headers: h,
+            body: JSON.stringify({ folder_id: targetId }),
+        });
+        if (!res.ok) { alert("Move failed."); return; }
+
+        await loadConversations(selectedFolderId);
     };
 
     const toggleSelect = useCallback((id: string) => {
@@ -1473,7 +1581,68 @@ const loadConversations = useCallback(async () => {
             </button>
         </div>
         </div>
+        {/* FOLDERS */}
+        <div className="px-4 py-2 border-b border-gray-800">
+        <div className="flex items-center justify-between mb-2">
+            <h3 className="text-sm font-semibold text-gray-300">Folders</h3>
+            <button
+            className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+            onClick={async () => {
+                const name = window.prompt("New folder name:");
+                if (!name || !name.trim()) return;
+                const made = await createFolder(name.trim(), userToken);
+                if (made) {
+                const f = await fetchFolders(userToken);
+                setFolders(f);
+                } else {
+                alert("Could not create folder.");
+                }
+            }}
+            >
+            + New
+            </button>
+        </div>
 
+        <ul className="space-y-1">
+            <li>
+            <button
+                className={`w-full text-left text-sm px-2 py-1 rounded ${selectedFolderId === null ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
+                onClick={() => { setSelectedFolderId(null); loadConversations(null); }}
+            >
+                All
+            </button>
+            </li>
+            <li>
+            <button
+                className={`w-full text-left text-sm px-2 py-1 rounded ${selectedFolderId === UNFILED_FOLDER_ID ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
+                onClick={() => { setSelectedFolderId(UNFILED_FOLDER_ID); loadConversations(UNFILED_FOLDER_ID); }}
+            >
+                Unfiled
+            </button>
+            </li>
+            {/* Archive button is optional; wire later with is_archived filter
+            <li>
+            <button
+                className={`w-full text-left text-sm px-2 py-1 rounded ${selectedFolderId === "__ARCHIVE__" ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
+                onClick={() => {/* setSelectedFolderId("__ARCHIVE__"); loadConversations("__ARCHIVE__"); */}}
+            >
+                Archive
+            </button>
+            </li>
+            */}
+            {folders.map((f) => (
+            <li key={f.id}>
+                <button
+                className={`w-full text-left text-sm px-2 py-1 rounded ${selectedFolderId === f.id ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
+                onClick={() => { setSelectedFolderId(f.id); loadConversations(f.id); }}
+                title={f.name}
+                >
+                {f.emoji ? `${f.emoji} ` : ''}{f.name}
+                </button>
+            </li>
+            ))}
+        </ul>
+        </div>
         {manageMode && (
         <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-2">
             <button
@@ -1549,7 +1718,13 @@ const loadConversations = useCallback(async () => {
                                     : 'opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto'
                                 } absolute right-3 top-2 w-16 sm:w-20 transition-opacity flex flex-col gap-1 items-stretch`}
                             >
-
+                                <button
+                                    onClick={(e) => { e.stopPropagation(); handleMoveConversation(c.id); }}
+                                    className="w-full text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+                                    title="Move"
+                                    >
+                                    Move
+                                </button>
                                 <button
                                     onClick={(e) => { e.stopPropagation(); handleRenameConversation(c.id); }}
                                     className="w-full text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"

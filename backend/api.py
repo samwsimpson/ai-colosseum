@@ -410,7 +410,7 @@ async def read_users_me(current_user: dict = Depends(get_current_user)):
 
 
 # === Conversations REST ===
-from typing import Optional, List
+from typing import Optional, List, Union
 from pydantic import BaseModel, constr
 
 def _ts_iso(v):
@@ -421,69 +421,100 @@ def _ts_iso(v):
     try:
         return v.isoformat()
     except Exception:
-        # last resort: stringify (works for Firestore Timestamp too)
         try:
             return str(v)
         except Exception:
             return None
 
+# Folders
+class FolderIn(BaseModel):
+    name: constr(min_length=1, max_length=64)
+    color: Optional[str] = None
+    emoji: Optional[str] = None
+    parent_id: Optional[str] = None
+
+class FolderOut(BaseModel):
+    id: str
+    name: str
+    color: Optional[str] = None
+    emoji: Optional[str] = None
+    parent_id: Optional[str] = None
+    sort_order: Optional[int] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+# Generalized convo update
+class ConversationUpdate(BaseModel):
+    title: Optional[constr(min_length=1, max_length=120)] = None
+    folder_id: Optional[Union[str, None]] = None
+    is_pinned: Optional[bool] = None
+    is_archived: Optional[bool] = None
+
 class RenameBody(BaseModel):
     title: constr(min_length=1, max_length=120)
 
+from fastapi import Query
+
 @app.get("/api/conversations")
-async def list_conversations(user=Depends(get_current_user)):
+async def list_conversations(
+    user = Depends(get_current_user),
+    folder_id: Optional[str] = Query(default=None),
+    is_archived: Optional[bool] = Query(default=None)
+):
+    """
+    If folder_id is:
+      • a real folder doc id -> filter by that
+      • "__UNFILED__" -> include docs where folder_id is missing or null (best-effort)
+      • None/"" -> no folder filter (All)
+    """
     items: List[dict] = []
-    q = (
-        db.collection("conversations")
-        .where("user_id", "==", user["id"])
-        .order_by("updated_at", direction=firestore.Query.DESCENDING)
-        .limit(100)
-    )
+    q = db.collection("conversations").where("user_id", "==", user["id"])
+
+    # optional archive filter
+    if is_archived is not None:
+        q = q.where("is_archived", "==", bool(is_archived))
+
+    # folder filter
+    unfiled = (folder_id == "__UNFILED__")
+    if folder_id and not unfiled:
+        q = q.where("folder_id", "==", folder_id)
+
+    q = q.order_by("updated_at", direction=firestore.Query.DESCENDING).limit(100)
+
+    # fetch
+    results = []
     async for d in q.stream():
         c = d.to_dict() or {}
+        results.append((d.id, c))
+
+    # handle "__UNFILED__" (missing folder_id). Firestore can't query "missing".
+    if unfiled:
+        filtered = []
+        for (cid, c) in results:
+            if ("folder_id" not in c) or (c.get("folder_id") in (None, "")):
+                filtered.append((cid, c))
+        results = filtered
+
+    for (cid, c) in results:
         items.append({
-            "id": d.id,
+            "id": cid,
             "title": c.get("title") or "New conversation",
             "updated_at": _ts_iso(c.get("updated_at")),
             "message_count": c.get("message_count", 0),
             "summary": c.get("summary", ""),
+            "folder_id": c.get("folder_id") if "folder_id" in c else None,
+            "is_archived": bool(c.get("is_archived", False)),
         })
+
     return {"items": items}
+
 
 from typing import Dict
 
 # new import for the export feature
-from fastapi.responses import JSONResponse
+
 
 # ... your existing code ...
-
-@app.get("/api/conversations/{conv_id}/export")
-async def export_conversation(conv_id: str, user=Depends(get_current_user)):
-    conv_ref = db.collection("conversations").document(conv_id)
-    snap = await conv_ref.get()
-    if (not snap.exists) or ((snap.to_dict() or {}).get("user_id") != user["id"]):
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    conv = snap.to_dict() or {}
-
-    msgs = []
-    q = conv_ref.collection("messages").order_by("created_at")
-    async for m in q.stream():
-        d = m.to_dict() or {}
-        msgs.append({
-            "role": d.get("role"),
-            "sender": d.get("sender"),
-            "content": d.get("content"),
-            "timestamp": _ts_iso(d.get("created_at")),
-        })
-    return {
-        "id": conv_id,
-        "title": conv.get("title") or "Conversation",
-        "summary": conv.get("summary") or "",
-        "message_count": conv.get("message_count", len(msgs)),
-        "created_at": _ts_iso(conv.get("created_at")),
-        "updated_at": _ts_iso(conv.get("updated_at")),
-        "messages": msgs,
-    }
 
 @app.get("/api/conversations/by_token")
 async def list_conversations_by_token(
@@ -498,7 +529,7 @@ async def list_conversations_by_token(
         raise HTTPException(status_code=401, detail="Missing token")
     user = await get_current_user(token=token)
     # --- AUTO-BACKFILL-ONCE: run per-user on first visit if enabled ---
-    import os
+
     if os.environ.get("AUTO_BACKFILL_ONCE", "").lower() in ("1", "true", "yes"):
         user_doc = db.collection("users").document(user["id"])
         snap = await user_doc.get()
@@ -578,13 +609,108 @@ async def list_messages(conv_id: str, limit: int = 50, user=Depends(get_current_
     return {"items": msgs}
 
 @app.patch("/api/conversations/{conv_id}")
-async def rename_conversation(conv_id: str, body: RenameBody, user=Depends(get_current_user)):
+async def update_conversation(conv_id: str, body: ConversationUpdate, user=Depends(get_current_user)):
     conv_ref = db.collection("conversations").document(conv_id)
     snap = await conv_ref.get()
-    if (not snap.exists) or ((snap.to_dict() or {}).get("user_id") != user["id"]):
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    await conv_ref.update({"title": body.title, "updated_at": FS_TS})
-    return {"ok": True}
+    if not snap.exists or (snap.to_dict() or {}).get("user_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    updates = {"updated_at": FS_TS}
+    changed = False
+
+    if body.title is not None:
+        updates["title"] = body.title.strip()
+        changed = True
+    if "folder_id" in body.__fields_set__:
+        # allow null/unfile by sending folder_id: null
+        updates["folder_id"] = body.folder_id
+        changed = True
+    if body.is_pinned is not None:
+        updates["is_pinned"] = bool(body.is_pinned)
+        changed = True
+    if body.is_archived is not None:
+        updates["is_archived"] = bool(body.is_archived)
+        changed = True
+
+    if not changed:
+        return {"ok": True, "id": conv_id, "changed": False}
+
+    await conv_ref.set(updates, merge=True)
+    return {"ok": True, "id": conv_id, "changed": True}
+
+# === Folders REST ===
+
+@app.get("/api/folders")
+async def list_folders(user=Depends(get_current_user)):
+    items: List[FolderOut] = []
+    q = (
+        db.collection("folders")
+        .where("owner_id", "==", user["id"])
+        .order_by("sort_order", direction=firestore.Query.ASCENDING)
+        .order_by("name", direction=firestore.Query.ASCENDING)
+        .limit(500)
+    )
+    async for d in q.stream():
+        f = d.to_dict() or {}
+        items.append({
+            "id": d.id,
+            "name": f.get("name") or "Untitled",
+            "color": f.get("color"),
+            "emoji": f.get("emoji"),
+            "parent_id": f.get("parent_id"),
+            "sort_order": f.get("sort_order"),
+            "created_at": _ts_iso(f.get("created_at")),
+            "updated_at": _ts_iso(f.get("updated_at")),
+        })
+    return {"items": items}
+
+@app.post("/api/folders")
+async def create_folder(body: FolderIn, user=Depends(get_current_user)):
+    ref = db.collection("folders").document()
+    data = {
+        "owner_id": user["id"],
+        "name": body.name.strip(),
+        "color": body.color,
+        "emoji": body.emoji,
+        "parent_id": body.parent_id,
+        "sort_order": 0,
+        "created_at": FS_TS,
+        "updated_at": FS_TS,
+    }
+    await ref.set(data)
+    return {"id": ref.id, **{k: v for k, v in data.items() if k != "owner_id"}}
+
+@app.patch("/api/folders/{folder_id}")
+async def update_folder(folder_id: str, body: FolderIn, user=Depends(get_current_user)):
+    ref = db.collection("folders").document(folder_id)
+    snap = await ref.get()
+    if not snap.exists or (snap.to_dict() or {}).get("owner_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Not found")
+    updates = {
+        "name": body.name.strip(),
+        "color": body.color,
+        "emoji": body.emoji,
+        "parent_id": body.parent_id,
+        "updated_at": FS_TS,
+    }
+    await ref.set(updates, merge=True)
+    return {"ok": True, "id": folder_id}
+
+@app.delete("/api/folders/{folder_id}")
+async def delete_folder(folder_id: str, user=Depends(get_current_user)):
+    # Soft-delete equivalent: re-home conversations, then delete folder doc.
+    ref = db.collection("folders").document(folder_id)
+    snap = await ref.get()
+    if not snap.exists or (snap.to_dict() or {}).get("owner_id") != user["id"]:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    # Re-home conversations in this folder to unfiled (null)
+    q = db.collection("conversations").where("user_id", "==", user["id"]).where("folder_id", "==", folder_id).limit(500)
+    async for d in q.stream():
+        await d.reference.set({"folder_id": None, "updated_at": FS_TS}, merge=True)
+
+    await ref.delete()
+    return {"ok": True, "id": folder_id}
 
 
 @app.delete("/api/conversations/{conv_id}")
@@ -639,7 +765,7 @@ async def export_conversation(conv_id: str, user=Depends(get_current_user)):
 
 # ---------- ADMIN BACKFILL (one-off) ----------
 from typing import Dict, List, Optional, Tuple
-from pydantic import BaseModel
+
 
 class BackfillRequest(BaseModel):
     user_id: str
@@ -692,7 +818,7 @@ async def admin_backfill_conversations(
     admin_secret: Optional[str] = Header(default=None, alias="x-admin-secret"),
 ):
     # Simple admin guard
-    import os
+
     required = os.environ.get("ADMIN_SECRET")
     if not required or admin_secret != required:
         raise HTTPException(status_code=403, detail="Forbidden")
@@ -1291,7 +1417,6 @@ async def stripe_webhook(request: Request):
         # Look up the current period on the subscription
         try:
             sub = stripe.Subscription.retrieve(subscription_id)
-            from datetime import datetime, timezone as _tz
             period_start = datetime.fromtimestamp(sub.current_period_start, tz=_tz.utc)
             period_end   = datetime.fromtimestamp(sub.current_period_end,   tz=_tz.utc)
             status       = sub.status
@@ -1754,7 +1879,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
 
         # --- randomized opening greeting (guarded: once per WS; skip if recently greeted) ---
         try:
-            import random
 
             # Only greet if this conversation has no messages yet (prevents greeting on resumes/reconnects)
             has_any = False
@@ -1981,7 +2105,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                                                     "data": base64.b64encode(data).decode("ascii"),
                                                 }
                                             })
-                                import asyncio
+                        
                                 loop = asyncio.get_event_loop()
                                 def _call_gemini():
                                     m = genai.GenerativeModel(cfg.get("model") or "gemini-1.5-pro")
