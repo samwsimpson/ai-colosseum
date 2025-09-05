@@ -1117,51 +1117,24 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             await loadConversations();
         }
     };
-    const handleMoveConversation = async (id: string) => {
+    const handleMoveConversation = async (id: string, targetId: string | null) => {
         if (!userToken) return;
-
-        if (folders.length === 0) {
-            try {
-            const f = await fetchFolders(userToken);
-            setFolders(f);
-            } catch {}
-        }
-
-        const names = folders.map(f => f.name);
-        const picked = window.prompt(
-            [
-            "Move to folder:",
-            "• Type exact folder name to move",
-            "• Leave blank for Unfiled",
-            "",
-            "Available folders:",
-            names.map(n => `- ${n}`)
-            ].join("\n"),
-            ""
-        );
-        if (picked === null) return; // cancelled
-
-        let targetId: string | null = null;
-        const trimmed = picked.trim();
-        if (trimmed.length > 0) {
-            const match = folders.find(f => f.name.toLowerCase() === trimmed.toLowerCase());
-            if (!match) { alert("No folder by that name."); return; }
-            targetId = match.id;
-        } else {
-            targetId = null; // Unfiled
-        }
 
         const h = buildAuthHeaders(userToken);
         h.set("Content-Type", "application/json");
+
         const res = await apiFetch(`/api/conversations/${id}`, {
             method: "PATCH",
             headers: h,
             body: JSON.stringify({ folder_id: targetId }),
         });
+
         if (!res.ok) { alert("Move failed."); return; }
 
+        // Refresh whatever folder is currently selected as the filter
         await loadConversations(selectedFolderId);
     };
+
 
     const toggleSelect = useCallback((id: string) => {
     setSelectedIds(prev => {
@@ -1831,13 +1804,29 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                             <div className={`${manageMode ? 'hidden' : 'hidden group-hover:flex'} w-full mt-1 gap-1 flex-wrap`}>
                                 <div className="flex flex-wrap gap-1">
                                     {/* keep your existing controls; only classes change to be inline-friendly */}
-                                    <button
-                                    onClick={(e) => { e.stopPropagation(); handleMoveConversation(c.id); }}
-                                    className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
-                                    title="Move"
-                                    >
-                                    Move
-                                    </button>
+                                    <select
+                                        onClick={(e) => e.stopPropagation()}
+                                        onChange={async (e) => {
+                                            const val = e.target.value;
+                                            if (val === "") return; // placeholder
+                                            const target = val === "__UNFILED__" ? null : val;
+
+                                            await handleMoveConversation(c.id, target);  // ← use the new signature
+
+                                            e.currentTarget.value = "";                  // reset the select
+                                        }}
+
+                                        defaultValue=""
+                                        className="w-full text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+                                        title="Move to folder"
+                                        >
+                                        <option value="">Move…</option>
+                                        <option value="__UNFILED__">Unfiled</option>
+                                        {folders.map(f => (
+                                            <option key={f.id} value={f.id}>{f.name}</option>
+                                        ))}
+                                    </select>
+
                                     <button
                                     onClick={(e) => { e.stopPropagation(); handleRenameConversation(c.id); }}
                                     className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
