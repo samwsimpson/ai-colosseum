@@ -117,7 +117,7 @@ function buildAuthHeaders(userToken?: string | null): Headers {
   const h = new Headers({ 'Content-Type': 'application/json' });
   const local = (typeof window !== 'undefined') ? localStorage.getItem('access_token') : null;
   // normalize null/undefined to an empty string for the header check
-  const tok = (local ?? userToken) ?? '';
+  const tok = (userToken ?? local) ?? '';
   if (tok) h.set('Authorization', `Bearer ${tok}`);
   return h;
 }
@@ -134,7 +134,10 @@ async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
     
     // Add the Authorization header
     const access = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
-    if (access) finalHeaders.set('Authorization', `Bearer ${access}`);
+    if (!finalHeaders.has('Authorization') && access) {
+        finalHeaders.set('Authorization', `Bearer ${access}`);
+    }
+
 
     // Critically, do not set Content-Type if a FormData body is provided
     if (init.body instanceof FormData) {
@@ -1609,16 +1612,34 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             <button
             className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
             onClick={async () => {
-                const name = window.prompt("New folder name:");
-                if (!name || !name.trim()) return;
-                const made = await createFolder(name.trim(), userToken);
-                if (made) {
+                const raw = window.prompt("New folder name:");
+                const name = (raw ?? "").trim();
+                if (!name) return;
+                if (name.length > 64) {
+                    alert("Folder name must be 1–64 characters.");
+                    return;
+                }
+
+                // Do the POST directly so we can surface status/details
+                const h = buildAuthHeaders(userToken);
+                h.set("Content-Type", "application/json");
+                const res = await apiFetch(`/api/folders`, {
+                    method: "POST",
+                    headers: h,
+                    body: JSON.stringify({ name }),
+                });
+
+                if (!res.ok) {
+                    const detail = await res.text().catch(() => "");
+                    alert(`Could not create folder (HTTP ${res.status})${detail ? `: ${detail}` : ""}`);
+                    return;
+                }
+
+                // Refresh list on success
                 const f = await fetchFolders(userToken);
                 setFolders(f);
-                } else {
-                alert("Could not create folder.");
-                }
             }}
+
             >
             + New
             </button>
