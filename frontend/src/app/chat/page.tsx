@@ -277,6 +277,7 @@ const [isLoadingConvs, setIsLoadingConvs] = useState(false);
 const [manageMode, setManageMode] = useState(false);
 const [folders, setFolders] = useState<Folder[]>([]);
 const [selectedFolderId, setSelectedFolderId] = useState<string | null>(null); // null = All
+const [bulkMoveTarget, setBulkMoveTarget] = useState<string>(""); // "" = none, "__UNFILED__" = Unfiled, or folder id
 const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
 const [composerHeight, setComposerHeight] = useState<number>(120);
 const [isTyping, setIsTyping] = useState<TypingState>({
@@ -646,9 +647,9 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
         }
 
         const res = await apiFetch(url.pathname + url.search, {
-        cache: 'no-store',
+            cache: 'no-store',
+            headers: buildAuthHeaders(userToken),
         });
-
 
         if (!res.ok) throw new Error(`List convos failed: ${res.status}`);
         const data: ConversationListResponse = await res.json();
@@ -722,7 +723,8 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
         );
         setConversations(unique);
     } catch {
-        // ignore errors
+        // If we were filtering by a folder and it failed, show an empty list instead of stale "All"
+        if (selectedFolderId && selectedFolderId !== "") setConversations([]);
     } finally {
         setIsLoadingConvs(false);
     }
@@ -1144,12 +1146,13 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
     }, []);
     const moveSelectedToFolder = useCallback(async () => {
         if (!userToken) return;
-        const target = selectedFolderId === "__UNFILED__" ? null : selectedFolderId;
+        if (bulkMoveTarget === "") { alert("Pick a folder to move into."); return; }
+
+        const target = bulkMoveTarget === "__UNFILED__" ? null : bulkMoveTarget;
 
         const h = buildAuthHeaders(userToken);
         h.set("Content-Type", "application/json");
 
-        // Move each selected conversation (sequential keeps it simple)
         for (const id of Array.from(selectedIds)) {
             const res = await apiFetch(`/api/conversations/${id}`, {
             method: "PATCH",
@@ -1159,9 +1162,11 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             if (!res.ok) { alert(`Move failed for ${id}`); return; }
         }
 
+        // Refresh whatever folder is currently selected as the filter
         await loadConversations(selectedFolderId);
         clearSelection();
-    }, [userToken, selectedIds, selectedFolderId, loadConversations, clearSelection]);
+    }, [userToken, selectedIds, bulkMoveTarget, selectedFolderId, loadConversations, clearSelection]);
+
 
     const handleBulkDelete = useCallback(async () => {
     if (!userToken) return;
@@ -1705,25 +1710,38 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             </button>
             <span className="ml-auto text-[11px] text-gray-400">{selectedIds.size} selected</span>
             {/* Bulk move */}
-<div className="flex items-center gap-2">
-  <select
-    className="text-xs px-2 py-1 rounded bg-gray-800 border border-gray-700"
-    onChange={(e) => setSelectedFolderId(e.target.value || null)}
-    value={selectedFolderId ?? ""}
-  >
-    <option value="">All (no filter)</option>
-    <option value="__UNFILED__">Unfiled</option>
-    {folders.map(f => <option key={f.id} value={f.id}>{f.emoji ? `${f.emoji} ` : ""}{f.name}</option>)}
-  </select>
-  <button
-    onClick={moveSelectedToFolder}
-    disabled={selectedIds.size === 0}
-    className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-50"
-    title={selectedIds.size === 0 ? "No conversations selected" : "Move selected"}
-  >
-    Move selected
-  </button>
-</div>
+            <div className="flex items-center gap-2">
+                {/* Filter dropdown (unchanged) */}
+                <select
+                className="text-xs px-2 py-1 rounded bg-gray-800 border border-gray-700"
+                onChange={(e) => setSelectedFolderId(e.target.value || null)}
+                value={selectedFolderId ?? ""}
+                />
+                {/* …same options as before… */}
+
+                {/* Bulk move TARGET dropdown (new) */}
+                <select
+                className="text-xs px-2 py-1 rounded bg-gray-800 border border-gray-700"
+                onChange={(e) => setBulkMoveTarget(e.target.value)}
+                value={bulkMoveTarget}
+                >
+                <option value="">Pick a folder…</option>
+                <option value="__UNFILED__">Unfiled</option>
+                {folders.map(f => (
+                    <option key={f.id} value={f.id}>
+                    {f.emoji ? `${f.emoji} ` : ""}{f.name}
+                    </option>
+                ))}
+                </select>
+
+                <button
+                onClick={moveSelectedToFolder}
+                disabled={selectedIds.size === 0 || bulkMoveTarget === ""}
+                className="text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50"
+                >
+                Move selected
+                </button>
+            </div>
         </div>
         )}
 
