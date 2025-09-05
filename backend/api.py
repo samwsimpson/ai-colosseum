@@ -678,7 +678,20 @@ async def create_folder(body: FolderIn, user=Depends(get_current_user)):
         "updated_at": FS_TS,
     }
     await ref.set(data)
-    return {"id": ref.id, **{k: v for k, v in data.items() if k != "owner_id"}}
+    # Re-read so server timestamps are resolved, then JSON-ify safely
+    snap = await ref.get()
+    f = snap.to_dict() or {}
+    return {
+        "id": ref.id,
+        "name": f.get("name") or body.name.strip(),
+        "color": f.get("color"),
+        "emoji": f.get("emoji"),
+        "parent_id": f.get("parent_id"),
+        "sort_order": f.get("sort_order"),
+        "created_at": _ts_iso(f.get("created_at")),
+        "updated_at": _ts_iso(f.get("updated_at")),
+    }
+
 
 @app.patch("/api/folders/{folder_id}")
 async def update_folder(folder_id: str, body: FolderIn, user=Depends(get_current_user)):
