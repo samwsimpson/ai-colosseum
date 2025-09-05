@@ -1693,18 +1693,71 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
             {folders.map((f) => (
                 <li key={f.id} className="group flex items-center justify-between">
-                <button
-                    className={`flex-1 text-left text-sm px-2 py-1 rounded ${selectedFolderId === f.id ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
-                    onClick={() => { setSelectedFolderId(f.id); loadConversations(f.id); }}
-                    title={f.name}
-                >
-                    {f.name}
-                </button>
+                    <button
+                        className={`flex-1 text-left text-sm px-2 py-1 rounded ${selectedFolderId === f.id ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
+                        onClick={() => { setSelectedFolderId(f.id); loadConversations(f.id); }}
+                        title={f.name}
+                    >
+                        {f.name}
+                    </button>
 
-                {/* Hover actions */}
-                <div className="ml-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                    {/* …rename / delete buttons you already have… */}
-                </div>
+                    {/* Hover actions */}
+                    <div className="ml-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <button
+                            className="text-xs px-1.5 py-0.5 rounded bg-gray-700 hover:bg-gray-600"
+                            title="Rename"
+                            onClick={async (e) => {
+                            e.stopPropagation();
+                            const raw = window.prompt("Rename folder:", f.name);
+                            const newName = (raw ?? "").trim();
+                            if (!newName || newName === f.name) return;
+
+                            // Prevent accidental duplicate names (ignores the folder we're renaming)
+                            const dup = folders
+                                .filter(x => x.id !== f.id)
+                                .some(x => (x.name || "").toLowerCase() === newName.toLowerCase());
+                            if (dup) {
+                                const proceed = window.confirm(`A folder named "${newName}" already exists. Rename anyway?`);
+                                if (!proceed) return;
+                            }
+
+                            const ok = await renameFolder(f.id, newName, userToken);
+                            if (!ok) { alert("Rename failed."); return; }
+
+                            // Update local state and keep list sorted by name
+                            setFolders(prev =>
+                                prev
+                                .map(x => x.id === f.id ? { ...x, name: newName } : x)
+                                .sort((a, b) => (a.name || "").localeCompare(b.name || ""))
+                            );
+                            }}
+                        >
+                            Rename
+                        </button>
+
+                        <button
+                            className="text-xs px-1.5 py-0.5 rounded bg-red-700 hover:bg-red-600"
+                            title="Delete"
+                            onClick={async (e) => {
+                            e.stopPropagation();
+                            if (!window.confirm(`Delete folder "${f.name}"?`)) return;
+
+                            const ok = await removeFolder(f.id, userToken);
+                            if (!ok) { alert("Delete failed."); return; }
+
+                            setFolders(prev => prev.filter(x => x.id !== f.id));
+
+                            // If we just deleted the active folder, bounce back to “All”
+                            if (selectedFolderId === f.id) {
+                                setSelectedFolderId(null);
+                                await loadConversations(null);
+                            }
+                            }}
+                        >
+                            Delete
+                        </button>
+                    </div>
+
                 </li>
             ))}
         </ul>
