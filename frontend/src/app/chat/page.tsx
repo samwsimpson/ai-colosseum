@@ -125,43 +125,47 @@ function buildAuthHeaders(userToken?: string | null): Headers {
 // Helper: fetch with Authorization header and 1x retry on 401 using /api/refresh
 async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
     const url =
-        typeof pathOrUrl === 'string'
-        ? (pathOrUrl.startsWith('http') ? pathOrUrl : `${API_BASE}${pathOrUrl.startsWith('/') ? '' : '/'}${pathOrUrl}`)
+        typeof pathOrUrl === "string"
+        ? (pathOrUrl.startsWith("http")
+            ? pathOrUrl
+            : `${API_BASE}${pathOrUrl.startsWith("/") ? "" : "/"}${pathOrUrl}`)
         : pathOrUrl.toString();
 
-    // Use a temporary headers object to avoid modifying the original
+    // clone/normalize headers
     const finalHeaders = new Headers(init.headers || {});
-    
-    // Add the Authorization header
-    const access = typeof window !== 'undefined' ? localStorage.getItem('access_token') : null;
-    if (!finalHeaders.has('Authorization') && access) {
-        finalHeaders.set('Authorization', `Bearer ${access}`);
+
+    // attach Authorization from localStorage if absent
+    const access = typeof window !== "undefined" ? localStorage.getItem("access_token") : null;
+    if (!finalHeaders.has("Authorization") && access) {
+        finalHeaders.set("Authorization", `Bearer ${access}`);
     }
 
-
-    // Critically, do not set Content-Type if a FormData body is provided
+    // don't force content-type for FormData
     if (init.body instanceof FormData) {
-        finalHeaders.delete('Content-Type');
-    } else if (!finalHeaders.has('Content-Type')) {
-        // Set the default only if it's not FormData and not already set
-        finalHeaders.set('Content-Type', 'application/json');
+        finalHeaders.delete("Content-Type");
+    } else if (!finalHeaders.has("Content-Type")) {
+        finalHeaders.set("Content-Type", "application/json");
     }
 
-    let res = await fetch(url, { ...init, headers: finalHeaders, credentials: 'include' });
+    // first attempt
+    let res = await fetch(url, { ...init, headers: finalHeaders, credentials: "include" });
     if (res.status !== 401) return res;
-    
-    // Retry logic
-    const rr = await fetch(`${API_BASE}/api/refresh`, { method: 'POST', credentials: 'include' });
+
+    // try to refresh
+    const rr = await fetch(`${API_BASE}/api/refresh`, { method: "POST", credentials: "include" });
     if (!rr.ok) return res;
 
-    const { token } = await rr.json();
-    if (token) {
-        if (typeof window !== 'undefined') localStorage.setItem('access_token', token);
-        finalHeaders.set('Authorization', `Bearer ${token}`);
-        res = await fetch(url, { ...init, headers: finalHeaders, credentials: 'include' });
-    }
-    return res;
+    const rj = await rr.json();
+    const newToken: string | undefined = rj?.access_token || rj?.token; // accept both
+    if (!newToken) return res;
+
+    try { localStorage.setItem("access_token", newToken); } catch {}
+    finalHeaders.set("Authorization", `Bearer ${newToken}`);
+
+    // retry original request
+    return fetch(url, { ...init, headers: finalHeaders, credentials: "include" });
 }
+
 
 async function fetchFolders(token?: string | null): Promise<Folder[]> {
   const res = await apiFetch(`/api/folders`, {
@@ -1644,13 +1648,14 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                     parent_id: created.parent_id ?? null,
                 };
                 setFolders(prev => [...prev, made].sort((a, b) => (a.name || "").localeCompare(b.name || "")));
-                setSelectedFolderId(made.id);
-                await loadConversations(made.id);
+                //commented out the switch to new folder
+                //setSelectedFolderId(made.id);
+                //await loadConversations(made.id);
 
 
                 // Also refetch for a definitive, server-sorted list
                 const fresh = await fetchFolders(userToken);
-                if (Array.isArray(fresh) && fresh.length) setFolders(fresh);
+                if (Array.isArray(fresh)) setFolders(fresh);
             }}
 
             >
@@ -1662,7 +1667,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             <li>
             <button
                 className={`w-full text-left text-sm px-2 py-1 rounded ${selectedFolderId === null ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
-                onClick={() => { setSelectedFolderId(null); loadConversations(null); }}
+                onClick={async () => { setSelectedFolderId(null); await loadConversations(null); }}
             >
                 All
             </button>
@@ -1670,7 +1675,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             <li>
             <button
                 className={`w-full text-left text-sm px-2 py-1 rounded ${selectedFolderId === UNFILED_FOLDER_ID ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
-                onClick={() => { setSelectedFolderId(UNFILED_FOLDER_ID); loadConversations(UNFILED_FOLDER_ID); }}
+                onClick={async () => { setSelectedFolderId(UNFILED_FOLDER_ID); await loadConversations(UNFILED_FOLDER_ID); }}
             >
                 Unfiled
             </button>
