@@ -1635,9 +1635,20 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                     return;
                 }
 
-                // Refresh list on success
-                const f = await fetchFolders(userToken);
-                setFolders(f);
+                // Show it immediately
+                const created = await res.json();
+                const made = {
+                    id: String(created.id),
+                    name: String(created.name || name),
+                    color: created.color ?? null,
+                    emoji: created.emoji ?? null,
+                    parent_id: created.parent_id ?? null,
+                };
+                setFolders(prev => [...prev, made].sort((a, b) => (a.name || "").localeCompare(b.name || "")));
+
+                // Also refetch for a definitive, server-sorted list
+                const fresh = await fetchFolders(userToken);
+                if (Array.isArray(fresh) && fresh.length) setFolders(fresh);
             }}
 
             >
