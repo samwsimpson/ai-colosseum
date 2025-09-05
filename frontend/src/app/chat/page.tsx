@@ -1157,6 +1157,26 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
     if (!window.confirm(`Delete ${ids.length} conversation${ids.length > 1 ? 's' : ''}? This cannot be undone.`)) {
         return;
     }
+    const moveSelectedToFolder = useCallback(async () => {
+        if (!userToken) return;
+        const target = selectedFolderId === "__UNFILED__" ? null : selectedFolderId;
+
+        const h = buildAuthHeaders(userToken);
+        h.set("Content-Type", "application/json");
+
+        // Move each selected conversation (sequential keeps it simple)
+        for (const id of Array.from(selectedIds)) {
+            const res = await apiFetch(`/api/conversations/${id}`, {
+            method: "PATCH",
+            headers: h,
+            body: JSON.stringify({ folder_id: target }),
+            });
+            if (!res.ok) { alert(`Move failed for ${id}`); return; }
+        }
+
+        await loadConversations(selectedFolderId);
+        clearSelection();
+    }, [userToken, selectedIds, selectedFolderId, loadConversations, clearSelection]);
 
     // optimistic removal in UI
     setConversations(prev => prev.filter(c => !selectedIds.has(c.id)));
@@ -1561,7 +1581,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
 
         {/* LEFT SIDEBAR */}
-        <aside className="hidden md:flex md:flex-col fixed left-0 top-[72px] bottom-0 w-72 border-r border-gray-800 bg-gray-900 z-20">
+        <aside className="flex flex-col fixed left-0 top-[72px] bottom-0 w-72 border-r border-gray-800 bg-gray-900 z-20">
 
         <div className="p-4 border-b border-gray-800 flex items-center justify-between">
         <div className="font-semibold">Conversations</div>
@@ -1657,6 +1677,26 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             Delete selected
             </button>
             <span className="ml-auto text-[11px] text-gray-400">{selectedIds.size} selected</span>
+            {/* Bulk move */}
+<div className="flex items-center gap-2">
+  <select
+    className="text-xs px-2 py-1 rounded bg-gray-800 border border-gray-700"
+    onChange={(e) => setSelectedFolderId(e.target.value || null)}
+    value={selectedFolderId ?? ""}
+  >
+    <option value="">All (no filter)</option>
+    <option value="__UNFILED__">Unfiled</option>
+    {folders.map(f => <option key={f.id} value={f.id}>{f.emoji ? `${f.emoji} ` : ""}{f.name}</option>)}
+  </select>
+  <button
+    onClick={moveSelectedToFolder}
+    disabled={selectedIds.size === 0}
+    className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600 disabled:opacity-50"
+    title={selectedIds.size === 0 ? "No conversations selected" : "Move selected"}
+  >
+    Move selected
+  </button>
+</div>
         </div>
         )}
 
@@ -1705,9 +1745,9 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                             <div
                                 className={`${
                                     manageMode
-                                    ? 'hidden'
-                                    : 'opacity-0 group-hover:opacity-100 pointer-events-none group-hover:pointer-events-auto'
-                                } absolute right-3 top-2 w-16 sm:w-20 transition-opacity flex flex-col gap-1 items-stretch`}
+                                        ? 'hidden'
+                                        : 'opacity-100 pointer-events-auto md:opacity-0 md:group-hover:opacity-100 md:pointer-events-none md:group-hover:pointer-events-auto'
+                                    } absolute right-3 top-2 w-16 sm:w-20 transition-opacity flex flex-col gap-1 items-stretch`}
                             >
                                 <button
                                     onClick={(e) => { e.stopPropagation(); handleMoveConversation(c.id); }}
