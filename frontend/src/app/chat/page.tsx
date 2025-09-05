@@ -1698,7 +1698,8 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             </button>
         </div>
 
-        <ul className="space-y-1 max-h-56 overflow-y-auto pr-1 custom-scrollbar-subtle">
+        <ul className="space-y-1 max-h-56 overflow-y-auto custom-scrollbar-subtle pr-0 -mr-2">
+
 
             <li>
             <button
@@ -1857,92 +1858,48 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                     <li
                         key={c.id}
                         onClick={() => manageMode ? toggleSelect(c.id) : handleOpenConversation(c.id)}
-                        className={`group relative w-full px-3 py-2 cursor-pointer overflow-hidden ${                
+                        className={`group relative w-full px-3 py-2 cursor-pointer overflow-visible ${
+                
                             conversationId === c.id ? 'bg-gray-800' : 'hover:bg-gray-800/60'
                         }`}
                     >
 
-                        <div className="flex items-center justify-between gap-2">
-                            <div
-                                className={`flex items-center gap-2 min-w-0 ${manageMode ? 'pr-2' : 'pr-2'}`}
-                            >
+                        <div className="flex flex-col gap-1">
 
-                            {manageMode && (
-                                <input
-                                type="checkbox"
-                                className="h-4 w-4"
-                                checked={selectedIds.has(c.id)}
-                                onChange={(e) => { e.stopPropagation(); toggleSelect(c.id); }}
-                                onClick={(e) => e.stopPropagation()}
-                                />
-                            )}
-                            <span className="flex-1 text-left break-words whitespace-normal leading-snug" title={c.title}>
-                                {c.title || 'Untitled'}
-                            </span>
-                            </div>
-
-                            {/* Hide per-item actions in manage mode */}
-                            <div
-                                className={`${
-                                    manageMode
-                                        ? 'hidden'
-                                        : 'opacity-100 pointer-events-auto md:opacity-0 md:group-hover:opacity-100 md:pointer-events-none md:group-hover:pointer-events-auto'
-                                } w-16 sm:w-20 transition-opacity flex flex-col gap-1 items-stretch shrink-0`}
-
-                            >
-                                <select
-                                onClick={(e) => e.stopPropagation()}
-                                onChange={async (e) => {
-                                    const val = e.target.value;
-                                    if (val === "") return; // no-op on placeholder
-                                    const target = val === "__UNFILED__" ? null : val;
-
-                                    const h = buildAuthHeaders(userToken);
-                                    h.set("Content-Type", "application/json");
-                                    const res = await apiFetch(`/api/conversations/${c.id}`, {
-                                    method: "PATCH",
-                                    headers: h,
-                                    body: JSON.stringify({ folder_id: target }),
-                                    });
-                                    if (!res.ok) { alert("Move failed."); return; }
-
-                                    // reset the dropdown back to its placeholder and refresh list
-                                    e.currentTarget.value = "";
-                                    await loadConversations(selectedFolderId);
-                                }}
-                                defaultValue=""
-                                className="w-full text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
-                                title="Move to folder"
-                                >
-                                <option value="">Move…</option>
-                                <option value="__UNFILED__">Unfiled</option>
-                                {folders.map(f => (
-                                    <option key={f.id} value={f.id}>{f.name}</option>
-                                ))}
-                                </select>
-
-                                <button
+                            <div className={`${manageMode ? 'hidden' : 'hidden group-hover:flex'} w-full mt-1 gap-1 flex-wrap`}>
+                                <div className="flex flex-wrap gap-1">
+                                    {/* keep your existing controls; only classes change to be inline-friendly */}
+                                    <button
+                                    onClick={(e) => { e.stopPropagation(); handleMoveConversation(c.id); }}
+                                    className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+                                    title="Move"
+                                    >
+                                    Move
+                                    </button>
+                                    <button
                                     onClick={(e) => { e.stopPropagation(); handleRenameConversation(c.id); }}
-                                    className="w-full text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+                                    className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
                                     title="Rename"
-                                >
+                                    >
                                     Rename
-                                </button>                                
-                                <button
+                                    </button>
+                                    <button
                                     onClick={(e) => { e.stopPropagation(); handleExportConversation(c.id); }}
-                                    className="w-full text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+                                    className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
                                     title="Export"
-                                >
+                                    >
                                     Export
-                                </button>                                
-                                <button
+                                    </button>
+                                    <button
                                     onClick={(e) => { e.stopPropagation(); handleDeleteConversation(c.id); }}
-                                    className="w-full text-xs px-2 py-1 rounded bg-red-700 hover:bg-red-600"
+                                    className="text-xs px-2 py-1 rounded bg-red-700 hover:bg-red-600"
                                     title="Delete"
-                                >
+                                    >
                                     Delete
-                                </button>
+                                    </button>
+                                </div>
                             </div>
+
                         </div>
 
                         {(c.updated_at || c.created_at) && (
