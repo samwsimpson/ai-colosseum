@@ -1636,8 +1636,9 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
         </div>
         </div>
         {/* FOLDERS */}
-        <div className="px-4 py-2 border-b border-gray-800">
-        <div className="flex items-center justify-between mb-2">
+        <div className="py-2 border-b border-gray-800">
+        <div className="px-3 flex items-center justify-between mb-2">
+
             <h3 className="text-sm font-semibold text-gray-300">Folders</h3>
             <button
             className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
@@ -1698,7 +1699,12 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             </button>
         </div>
 
-        <ul className="space-y-1 max-h-56 overflow-y-auto custom-scrollbar-subtle pr-0 -mr-2">
+        <div className="max-h-56 overflow-y-auto custom-scrollbar-subtle">
+            <ul className="space-y-1 px-3">
+                {/* keep all your existing <li> items here, unchanged */}
+            </ul>
+        </div>
+
 
 
             <li>
@@ -1865,6 +1871,25 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                     >
 
                         <div className="flex flex-col gap-1">
+                            <div className="flex items-center gap-2 min-w-0">
+                                {/* Checkbox in Manage mode */}
+                                {manageMode && (
+                                    <input
+                                    type="checkbox"
+                                    checked={selectedIds.has(c.id)}
+                                    onChange={(e) => { e.stopPropagation(); toggleSelect(c.id); }}
+                                    onClick={(e) => e.stopPropagation()}
+                                    className="h-3.5 w-3.5 accent-indigo-600"
+                                    title="Select"
+                                    />
+                                )}
+
+                                {/* Title (truncates nicely) */}
+                                <div className="flex-1 min-w-0">
+                                    <div className="truncate text-sm">{c.title}</div>
+                                </div>
+                            </div>
+
 
                             <div className={`${manageMode ? 'hidden' : 'hidden group-hover:flex'} w-full mt-1 gap-1 flex-wrap`}>
                                 <div className="flex flex-wrap gap-1">
