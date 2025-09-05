@@ -1616,8 +1616,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
 
         {/* LEFT SIDEBAR */}
-        <aside className="flex flex-col fixed left-0 top-[72px] bottom-0 w-72 border-r border-gray-800 bg-gray-900 z-20">
-
+        <aside className="flex flex-col min-h-0 fixed left-0 top-[72px] bottom-0 w-72 border-r border-gray-800 bg-gray-900 z-20">
         <div className="p-4 border-b border-gray-800 flex items-center justify-between">
         <div className="font-semibold">Conversations</div>
         <div className="flex items-center gap-2">
@@ -1699,7 +1698,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             </button>
         </div>
 
-        <ul className="space-y-1">
+        <ul className="space-y-1 max-h-56 overflow-y-auto pr-1 custom-scrollbar">
             <li>
             <button
                 className={`w-full text-left text-sm px-2 py-1 rounded ${selectedFolderId === null ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
@@ -1794,16 +1793,16 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
         </ul>
         </div>
         {manageMode && (
-        <div className="px-4 py-2 border-b border-gray-800 flex items-center gap-2">
+        <div className="px-3 py-2 border-b border-gray-800 flex items-center gap-1 flex-wrap">
             <button
             onClick={selectAll}
-            className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+            className="text-[11px] whitespace-nowrap px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
             >
             Select all
             </button>
             <button
             onClick={clearSelection}
-            className="text-xs px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
+            className="text-[11px] whitespace-nowrap px-2 py-1 rounded bg-gray-700 hover:bg-gray-600"
             >
             Clear
             </button>
@@ -1820,7 +1819,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             <div className="flex items-center gap-2">
                 {/* Filter dropdown (unchanged) */}
                 <select
-                className="text-xs px-2 py-1 rounded bg-gray-800 border border-gray-700"
+                className="text-xs px-2 py-1 rounded bg-gray-800 border border-gray-700 w-[160px] shrink-0"
                 onChange={(e) => setSelectedFolderId(e.target.value || null)}
                 value={selectedFolderId ?? ""}
                 />
@@ -1828,7 +1827,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
                 {/* Bulk move TARGET dropdown (new) */}
                 <select
-                className="text-xs px-2 py-1 rounded bg-gray-800 border border-gray-700"
+                className="text-xs px-2 py-1 rounded bg-gray-800 border border-gray-700 w-[160px] shrink-0"
                 onChange={(e) => setBulkMoveTarget(e.target.value)}
                 value={bulkMoveTarget}
                 >
@@ -1844,7 +1843,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                 <button
                 onClick={moveSelectedToFolder}
                 disabled={selectedIds.size === 0 || bulkMoveTarget === ""}
-                className="text-xs px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50"
+                className="text-xs whitespace-nowrap px-2 py-1 rounded bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50"
                 >
                 Move selected
                 </button>
@@ -1865,7 +1864,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                     <li
                         key={c.id}
                         onClick={() => manageMode ? toggleSelect(c.id) : handleOpenConversation(c.id)}
-                        className={`group relative w-full px-3 py-2 cursor-pointer ${
+                        className={`group relative w-full px-3 py-2 cursor-pointer overflow-hidden ${                
                             conversationId === c.id ? 'bg-gray-800' : 'hover:bg-gray-800/60'
                         }`}
                     >
@@ -1875,7 +1874,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                                 className={`flex items-center gap-2 min-w-0 ${
                                     manageMode
                                     ? 'pr-2'
-                                    : 'pr-6 group-hover:pr-20 md:group-hover:pr-24 transition-[padding-right] duration-200'
+                                    : 'pr-20 md:pr-24 transition-[padding-right] duration-200'
                                 }`}
                             >
 
