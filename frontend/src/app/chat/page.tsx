@@ -763,7 +763,8 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
         (async () => {
             try {
                 const f = await fetchFolders(undefined);
-                if (Array.isArray(f)) setFolders(f);
+                // Only hydrate if we got some folders; avoid stomping later loads with []
+                if (Array.isArray(f) && f.length) setFolders(f);
             } catch {}
         })();
     }, []);    
@@ -1661,7 +1662,9 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
                 // Also refetch for a definitive, server-sorted list
                 const fresh = await fetchFolders(userToken);
-                if (Array.isArray(fresh)) setFolders(fresh);
+                // Only replace if server returned a non-empty list;
+                // otherwise keep the optimistic item we just added.
+                if (Array.isArray(fresh) && fresh.length) setFolders(fresh);
             }}
 
             >

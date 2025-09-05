@@ -643,13 +643,9 @@ async def update_conversation(conv_id: str, body: ConversationUpdate, user=Depen
 @app.get("/api/folders")
 async def list_folders(user=Depends(get_current_user)):
     items: List[FolderOut] = []
-    q = (
-        db.collection("folders")
-        .where("owner_id", "==", user["id"])
-        .order_by("sort_order", direction=firestore.Query.ASCENDING)
-        .order_by("name", direction=firestore.Query.ASCENDING)
-        .limit(500)
-    )
+    q = db.collection("folders").where("owner_id", "==", user["id"]).limit(500)
+
+    items: List[FolderOut] = []
     async for d in q.stream():
         f = d.to_dict() or {}
         items.append({
@@ -662,6 +658,9 @@ async def list_folders(user=Depends(get_current_user)):
             "created_at": _ts_iso(f.get("created_at")),
             "updated_at": _ts_iso(f.get("updated_at")),
         })
+
+    # Sort in Python to avoid composite index requirements
+    items.sort(key=lambda x: ((x.get("sort_order") or 0), (x.get("name") or "").lower()))
     return {"items": items}
 
 @app.post("/api/folders")
