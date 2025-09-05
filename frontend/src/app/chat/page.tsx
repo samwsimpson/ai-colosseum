@@ -493,20 +493,20 @@ async function handleFilePick(e: React.ChangeEvent<HTMLInputElement>) {
 const removePending = (id: string) => setPendingFiles(prev => prev.filter(p => p.id !== id));
 
     // Hydrate conversations from localStorage on mount
-    useEffect(() => {
-        if (typeof window === 'undefined') return; // avoid SSR access
-        try {
-            const cached = localStorage.getItem('conversations_cache');
-            if (cached) {
-                const parsed = JSON.parse(cached) as ConversationListItem[];
-                if (Array.isArray(parsed)) {
-                    setConversations(parsed);
-                }
-            }
-        } catch {
+    //useEffect(() => {
+    //    if (typeof window === 'undefined') return; // avoid SSR access
+    //    try {
+    //        const cached = localStorage.getItem('conversations_cache');
+    //        if (cached) {
+    //           const parsed = JSON.parse(cached) as ConversationListItem[];
+    //            if (Array.isArray(parsed)) {
+    //                setConversations(parsed);
+    //            }
+    //        }
+    //    } catch {
             // ignore parse/storage errors
-        }
-    }, []);
+    //    }
+    //}, []);
 
     // Persist conversations to localStorage whenever they change
     useEffect(() => {
@@ -1667,7 +1667,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             <li>
             <button
                 className={`w-full text-left text-sm px-2 py-1 rounded ${selectedFolderId === null ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
-                onClick={async () => { setSelectedFolderId(null); await loadConversations(null); }}
+                onClick={async () => { setSelectedFolderId(UNFILED_FOLDER_ID); await loadConversations(UNFILED_FOLDER_ID); }}
             >
                 All
             </button>
@@ -1685,7 +1685,8 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             <li key={f.id}>
                 <button
                 className={`w-full text-left text-sm px-2 py-1 rounded ${selectedFolderId === f.id ? 'bg-gray-700' : 'hover:bg-gray-700'}`}
-                onClick={() => { setSelectedFolderId(f.id); loadConversations(f.id); }}
+                onClick={async () => { setSelectedFolderId(f.id); await loadConversations(f.id); }}
+
                 title={f.name}
                 >
                 {f.emoji ? `${f.emoji} ` : ''}{f.name}
