@@ -1096,6 +1096,7 @@ async def get_credits(current_user: dict = Depends(get_current_user)):
     used = int(data.get("monthly_usage") or 0)
     limit = data.get("monthly_limit", None)
     remaining = None if limit is None else max(int(limit) - used, 0)
+    print(f"WS CREDIT_GATE used={used} limit={monthly_limit}", flush=True)
 
     # Also include the user's plan name for UI
     user_doc = await db.collection("users").document(current_user["id"]).get()
@@ -1753,6 +1754,8 @@ PLAN_CREDIT_QUOTA = {
 async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(default=None)):
     try:
         await websocket.accept()
+        print("WS: accepted connection", flush=True)
+
 
         # ---- auth & monthly limit ----
         if not token:
@@ -2662,6 +2665,16 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
         print("AGENTS IN GROUPCHAT:")
         for a in agents:
             print(f" - {a.name}")
+        if not agents:
+            print("WS: no agents configured; aborting turn", flush=True)
+            await websocket.send_json({
+                "type": "error",
+                "code": "NO_MODELS",
+                "message": "No AI models are configured on the server."
+            })
+            await websocket.close(code=1011)
+            return
+
         if len(agents) < 2:
             await websocket.send_json({"sender": "System", "text": "No AIs available for your subscription."})
             return
@@ -2877,6 +2890,30 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                             ])
                         })
 
+                    # --- PRE-RUN CREDIT GATE: don't start the team if user is out of credits ---
+                    try:
+                        # Simple check: try a dry-run deduction of 0 (or call your existing usage calc)
+                        # Replace this with your own helper if you have one that returns (used, limit, remaining)
+                        usage = await get_user_usage_summary(user["id"])  # your existing usage function if present
+                        remaining = (usage or {}).get("remaining", 0)
+                    except Exception:
+                        remaining = 0  # fail-safe: treat as no balance if usage can't be read
+
+                    if remaining <= 0:
+                        try:
+                            await websocket.send_json({
+                                "sender": "System",
+                                "type": "limit",
+                                "text": "You’re out of credits for your current plan."
+                            })
+                        except Exception:
+                            pass
+                        try:
+                            await websocket.close(code=1008, reason="Out of credits")
+                        except Exception:
+                            pass
+                        return
+                    # --- /PRE-RUN CREDIT GATE ---
 
                     # Kick off or feed the manager loop
                     if chat_task is None or chat_task.done():

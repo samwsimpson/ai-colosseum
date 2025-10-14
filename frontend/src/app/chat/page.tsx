@@ -1513,6 +1513,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                     // Credit update (push)
                     if (msg.type === 'credit_update') {
                         void refreshUsage();
+                        setCreditNotice(prev => prev ?? 'Your credits were updated. You can keep chatting if you have remaining credits.');
                         const plan =
                         typeof m.plan_name === 'string' ? (m.plan_name as string) : undefined;
                         if (plan && plan.trim()) setUserPlanName(plan);
@@ -1580,21 +1581,6 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                         return;
                     }
 
-
-
-                    // Unified error from backend if a send was denied
-                    if (msg.type === 'error' && (msg as ErrorMessage).code === 'OUT_OF_CREDITS') {
-                        const em = msg as ErrorMessage;
-                        setIsOutOfCredits(true);
-                        setCreditNotice(
-                            (typeof em.message === 'string' && em.message) ||
-                            "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset."
-                        );
-                        return;
-                    }
-
-
-
                     if (msg.type === 'ping' || msg.type === 'pong') return;
                     if (sender && typeof msg.typing === 'boolean' && ALLOWED_AGENTS.includes(sender as AgentName)) {
                         // Any typing signal proves the pipeline is alive → hide the global fallback
@@ -1602,19 +1588,6 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                         setTypingWithDelayAndTTL(sender as AgentName, msg.typing === true);
                         return;
                     }
-
-                    // --- credit-related push messages (added) ---
-                    if (typeof (m as Record<string, unknown>).type === 'string' && (m as Record<string, unknown>).type === 'credit_update') {
-                        void refreshUsage();
-
-                        const planVal = (m as Record<string, unknown>)['plan_name'];
-                        const plan = typeof planVal === 'string' ? planVal : undefined;
-                        if (plan && plan.trim()) setUserPlanName(plan);
-
-                        return;
-                    }
-
-
 
                     // Accept multiple server payload shapes, not just `text`
                     const unifiedText = normalizeToPlainText(
