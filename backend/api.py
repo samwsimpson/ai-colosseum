@@ -1097,7 +1097,7 @@ async def get_credits(current_user: dict = Depends(get_current_user)):
     used = int(data.get("monthly_usage") or 0)
     limit = data.get("monthly_limit", None)
     remaining = None if limit is None else max(int(limit) - used, 0)
-    print(f"WS CREDIT_GATE used={used} limit={monthly_limit}", flush=True)
+    print(f"WS CREDIT_GATE used={used} limit={limit}", flush=True)
 
     # Also include the user's plan name for UI
     user_doc = await db.collection("users").document(current_user["id"]).get()
@@ -1754,7 +1754,9 @@ PLAN_CREDIT_QUOTA = {
 @app.websocket("/ws/colosseum-chat")
 async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(default=None)):
     # --- WS: accept first so failures report cleanly through proxies ---
-    await websocket.accept()
+    
+    await websocket.send_json({"type": "ws_ready"})
+
     print("WS: accepted connection for /ws/colosseum-chat", flush=True)
 
     # Optional: log Origin to debug strict Origin checks (if any)

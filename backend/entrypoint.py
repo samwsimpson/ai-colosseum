@@ -21,7 +21,7 @@ print(f"ENTRYPOINT: launching uvicorn on 0.0.0.0:{port}", flush=True)
 run(
     app,
     host="0.0.0.0",
-    port=port,
+    port=int(os.environ.get("PORT", 8080)),
     proxy_headers=True,          # trust X-Forwarded-* from Cloud Run
     forwarded_allow_ips="*",     # allow proxy ips
     ws="websockets",             # explicit WS implementation
