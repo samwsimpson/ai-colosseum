@@ -50,18 +50,6 @@ interface Folder {
 // Virtual ids for UI filters
 const UNFILED_FOLDER_ID = "__UNFILED__";
 
-// Typed shape used when sorting/choosing newest in preselects
-type SidebarConvo = ConversationListItem;
-
-interface StoredMessage {
-  sender: string;
-  content: string;
-  role?: string;
-  created_at?: string;
-}
-
-/** Helper types to avoid `any` while staying flexible */
-type ContentFragment = string | { text?: string } | { type?: string; text?: string } | unknown[];
 
 interface BackendMessageLike {
   sender?: string;
@@ -191,19 +179,6 @@ async function fetchFolders(token?: string | null): Promise<Folder[]> {
 
 }
 
-async function createFolder(name: string, token?: string | null): Promise<Folder | null> {
-  const h = buildAuthHeaders(token);
-  h.set("Content-Type", "application/json");
-  const res = await apiFetch(`/api/folders`, {
-    method: "POST",
-    headers: h,
-    body: JSON.stringify({ name }),
-  });
-  if (!res.ok) return null;
-  const json = await res.json();
-  return { id: json.id, name: json.name, color: json.color ?? null, emoji: json.emoji ?? null, parent_id: json.parent_id ?? null };
-}
-
 async function renameFolder(id: string, newName: string, token?: string | null): Promise<boolean> {
   const name = (newName ?? "").trim();
   if (!name || name.length > 64) return false;
@@ -283,9 +258,8 @@ export default function ChatPage() {
 const { userName, userToken } = useUser();
 const router = useRouter();
 const pathname = usePathname();
-const [authChecked, setAuthChecked] = useState(false);
-const [authed, setAuthed] = useState(false);
-
+const [_authChecked, setAuthChecked] = useState(false);
+const [_authed, setAuthed] = useState(false);
 
 // === State for the UI and chat logic ===
 const [message, setMessage] = useState<string>('');
@@ -298,11 +272,13 @@ const [wsReconnectNonce, setWsReconnectNonce] = useState(0);
 const [credits, setCredits] = useState<number>(0);
 const [isOutOfCredits, setIsOutOfCredits] = useState<boolean>(false);
 // Usage/plan state (new)
-const [creditsRemaining, setCreditsRemaining] = useState<number | null>(null);
-const [creditsResetAt, setCreditsResetAt] = useState<string | null>(null);
-const [userPlanName, setUserPlanName] = useState<string>("Free");
-const [monthlyUsage, setMonthlyUsage] = useState<number>(0);
-const [monthlyLimit, setMonthlyLimit] = useState<number | null>(null);
+const [_creditsRemaining, _setCreditsRemaining] = useState<number | null>(null);
+const [_creditsResetAt, _setCreditsResetAt] = useState<string | null>(null);
+const [_userPlanName, setUserPlanName] = useState<string>("Free");
+const [_monthlyUsage, setMonthlyUsage] = useState<number>(0);
+const [_monthlyLimit, setMonthlyLimit] = useState<number | null>(null);
+const [_planName, _setPlanName] = useState<string | null>(null);
+
 
 // Helper to load usage from backend
 const refreshUsage = useCallback(async () => {
@@ -339,7 +315,7 @@ const refreshUsage = useCallback(async () => {
 
 const [creditNotice, setCreditNotice] = useState<string | null>(null);
 const [creditsLeft, setCreditsLeft] = useState<number | null>(null);
-const [planName, setPlanName] = useState<string | null>(null);
+
 
 const [conversationId, setConversationId] = useState<string | null>(null);
 const [pendingFiles, setPendingFiles] = useState<UploadedAttachment[]>([]);
