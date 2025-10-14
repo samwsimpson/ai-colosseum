@@ -1082,8 +1082,36 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
 
 @app.get("/api/credits")
 async def get_credits(current_user: dict = Depends(get_current_user)):
-    # Return the same shape as /api/users/me/usage
-    return await get_user_usage(current_user)  # reuse the function above
+    """
+    Return a stable, UI-friendly shape with remaining credits + aliases.
+    """
+    # Reuse usage calculation
+    usage_resp = await get_user_usage(current_user)
+    # get_user_usage returns JSONResponse
+    import json  # add at top of file if not present
+    data = json.loads(
+        usage_resp.body.decode() if isinstance(usage_resp.body, (bytes, bytearray)) else usage_resp.body
+    )
+
+    used = int(data.get("monthly_usage") or 0)
+    limit = data.get("monthly_limit", None)
+    remaining = None if limit is None else max(int(limit) - used, 0)
+
+    # Also include the user's plan name for UI
+    user_doc = await db.collection("users").document(current_user["id"]).get()
+    plan_name = (user_doc.to_dict() or {}).get("subscription_id") or "Free"
+
+    payload = {
+        "plan_name": plan_name,
+        "monthly_usage": used,
+        "monthly_limit": limit,
+        "remaining_credits": remaining,
+        # Back-compat aliases many UIs check:
+        "credits_remaining": remaining,
+        "credit_balance": remaining,
+    }
+    return JSONResponse(payload)
+
 
 
 @app.post("/api/google-auth", response_model=Token)
@@ -2569,6 +2597,65 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
             name="get_upload_text"
         )(get_upload_text_tool)
         # === END Registration ===
+        # === CREDIT GATE (block running/starting the assistants if out) ===
+        try:
+            # Load user + plan
+            user_snap = await db.collection("users").document(user_id).get()
+            user_data = user_snap.to_dict() or {}
+            sub_id = user_data.get("subscription_id") or "Free"
+
+            sub_snap = await db.collection("subscriptions").document(sub_id).get()
+            sub_data = sub_snap.to_dict() or {}
+            monthly_limit = sub_data.get("monthly_limit", None)
+
+            # Unlimited plans (None) skip gating
+            if monthly_limit is not None:
+                # Determine billing window start (same logic as /api/users/me/usage)
+                period_start = user_data.get("billing_period_start")
+                if isinstance(period_start, str):
+                    try:
+                        from datetime import datetime
+                        period_start = datetime.fromisoformat(period_start)
+                    except Exception:
+                        period_start = None
+                if not period_start:
+                    from datetime import datetime, timezone
+                    period_start = datetime.now(timezone.utc).replace(
+                        day=1, hour=0, minute=0, second=0, microsecond=0
+                    )
+
+                # Sum usage from ledger
+                used = 0
+                q = (
+                    db.collection("usage_ledger")
+                    .where("user_id", "==", user_id)
+                    .where("subscription_id", "==", sub_id)
+                    .where("created_at", ">=", period_start)
+                )
+                async for d in q.stream():
+                    row = d.to_dict() or {}
+                    used += int(row.get("credits_spent") or 1)
+
+                if used >= int(monthly_limit):
+                    # Tell the client immediately and do not start the assistants
+                    await websocket.send_json({
+                        "type": "limit",
+                        "monthly_usage": used,
+                        "monthly_limit": monthly_limit,
+                        "remaining_credits": max(int(monthly_limit) - used, 0),
+                        "message": "You're out of credits for this billing period."
+                    })
+                    continue  # skip starting the team for this turn
+        except Exception as _e:
+            # If the check fails, fail open (optional) or fail closed.
+            # Safer is fail closed:
+            await websocket.send_json({
+                "type": "error",
+                "code": "LIMIT_CHECK_FAILED",
+                "message": "Could not verify credits."
+            })
+            continue
+        # === END CREDIT GATE ===
 
         print("AGENTS IN GROUPCHAT:")
         for a in agents:

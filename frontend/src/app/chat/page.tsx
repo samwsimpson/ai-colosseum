@@ -297,6 +297,22 @@ const refreshUsage = useCallback(async () => {
 
     setMonthlyUsage(Number.isFinite(used) ? used : 0);
     setMonthlyLimit(limit);
+    if (limit === null) {
+        // Unlimited: you can hide the pill or show ∞
+        setCreditsLeft(null);
+    } else {
+        setCreditsLeft(Math.max(0, limit - used));
+    }
+    // Keep UI state in sync with the number we just computed
+    if (limit === null) {
+        setIsOutOfCredits(false);
+    } else {
+        const remaining = Math.max(0, limit - used);
+        setIsOutOfCredits(remaining <= 0);
+        if (remaining <= 0) {
+            setCreditNotice("You're out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset.");
+        }
+    }
 
     // UI plan name can still come from elsewhere if you like; here we leave it as-is
     // Unlimited handling:
@@ -1449,6 +1465,32 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                     let msg: ServerMessage;
                     try { msg = JSON.parse(event.data); }
                     catch { return; }
+                        // --- CREDIT LIMIT MESSAGE FROM SERVER ---
+                        // If backend says you're at limit, reflect it immediately and stop processing the event.
+                        if (msg.type === 'limit') {
+                            const limit = typeof (msg as any).monthly_limit === 'number' ? (msg as any).monthly_limit : null;
+                            const used = typeof (msg as any).monthly_usage === 'number' ? (msg as any).monthly_usage : 0;
+                            const remaining = limit === null ? null : Math.max(0, limit - used);
+
+                            setIsOutOfCredits(limit !== null && used >= limit);
+                            setCreditsLeft(remaining);
+                            setCreditNotice(
+                                (typeof (msg as any).message === 'string' && (msg as any).message) ||
+                                (remaining === 0
+                                    ? "You're out of credits for this billing period."
+                                    : `You have ${remaining} credits left.`)
+                            );
+
+                            // Stop any “thinking” indicators
+                            stopTeamThinking();
+                            setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+
+                            // Stay in sync with server-side numbers
+                            refreshUsage().catch(() => {});
+                            return;
+                        }
+                        // --- END CREDIT LIMIT MESSAGE ---
+
                     // Out-of-credits signal from backend
                     // Hard stop if server says we're out of credits
                     // --- credit-related push messages ---
@@ -1471,15 +1513,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
 
 
-                    if ((msg as ServerMessage)?.type === 'insufficient_credits') {
-                        /* ... */
-                        setCreditNotice(
-                            typeof msg.text === 'string' && msg.text.trim()
-                            ? msg.text.trim()
-                            : "You are out of credits. Please upgrade to continue."
-                        );
-                        return;
-                    }
+
 
 
 
@@ -1542,21 +1576,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                         return;
                     }
 
-                    // NEW: credit / usage exhaustion messages from server
-                    if (msg.type === 'limit' || msg.type === 'insufficient_credits') {
-                        const reason =
-                            (typeof msg.text === 'string' && msg.text.trim())
-                            ? msg.text.trim()
-                            : "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset.";
 
-                        // Stop any global/agent typing indicators and surface the banner
-                        stopTeamThinking();
-                        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
-
-                        setIsOutOfCredits(true);
-                        setCreditNotice(reason);
-                        return;
-                    }
 
                     if (msg.type === 'ping' || msg.type === 'pong') return;
                     if (sender && typeof msg.typing === 'boolean' && ALLOWED_AGENTS.includes(sender as AgentName)) {
@@ -1565,14 +1585,17 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                         setTypingWithDelayAndTTL(sender as AgentName, msg.typing === true);
                         return;
                     }
-                    if (msg.type === 'insufficient_credits') {
-                        const mm = msg as ServerMessage & { message?: string };
-                        setIsOutOfCredits(true);
-                        setCreditNotice(
-                            typeof mm.message === 'string' && mm.message.trim()
-                            ? mm.message
-                            : "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset."
-                        );
+
+                    // --- credit-related push messages (added) ---
+                    if ((msg as any).type === 'credit_update') {
+                        // Single source of truth: re-pull usage/limit from the API
+                        refreshUsage();
+
+                        // Optional: update plan name if backend included it
+                        const plan = (msg as any)?.plan_name;
+                        if (typeof plan === 'string' && plan.trim()) {
+                            setUserPlanName(plan);
+                        }
                         return;
                     }
 
