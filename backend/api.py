@@ -1754,10 +1754,9 @@ PLAN_CREDIT_QUOTA = {
 @app.websocket("/ws/colosseum-chat")
 async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(default=None)):
     # --- WS: accept first so failures report cleanly through proxies ---
-    
-    await websocket.send_json({"type": "ws_ready"})
-
+    await websocket.accept()
     print("WS: accepted connection for /ws/colosseum-chat", flush=True)
+
 
     # Optional: log Origin to debug strict Origin checks (if any)
     try:
@@ -1779,7 +1778,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
     # Validate token (wrap your existing decode in try/except)
     try:
         # Use **your** existing decode function/SECRET here (don’t change your key)
-        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        payload = pyjwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = payload.get("sub")
         if not user_id:
             raise ValueError("Token missing sub")
