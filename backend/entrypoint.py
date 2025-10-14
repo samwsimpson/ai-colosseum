@@ -18,4 +18,13 @@ except Exception as e:
 from uvicorn import run
 port = int(os.environ.get("PORT", "8080"))
 print(f"ENTRYPOINT: launching uvicorn on 0.0.0.0:{port}", flush=True)
-run(app, host="0.0.0.0", port=port)
+run(
+    app,
+    host="0.0.0.0",
+    port=port,
+    proxy_headers=True,          # trust X-Forwarded-* from Cloud Run
+    forwarded_allow_ips="*",     # allow proxy ips
+    ws="websockets",             # explicit WS implementation
+    http="httptools",            # faster HTTP parser (optional)
+    access_log=False             # optional: quieter logs
+)

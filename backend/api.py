@@ -1801,13 +1801,34 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
             except Exception as e:
                 print("[ws] ledger query failed; allowing session but not counting:", e)
 
+            # Tell the client what we think the monthly usage is right now
+            try:
+                await websocket.send_json({
+                    "type": "credit_update",
+                    "limit": int(limit) if limit is not None else None,
+                    "used": int(used),
+                })
+            except Exception as _e:
+                # Non-fatal if we can’t push the snapshot; just continue.
+                print("[ws] credit_update push failed:", repr(_e))
+
+
             if used >= int(limit):
                 await websocket.send_json({"sender": "System", "type": "limit", "text": "Monthly conversation limit reached."})
                 await websocket.close(code=4000, reason="Monthly limit reached")
                 return
 
 
-        
+        # Tell the client their current monthly credit status (or unlimited if None)
+        try:
+            await websocket.send_json({
+                "type": "credit_update",
+                "limit": int(limit) if limit is not None else None,
+                "used": int(used),
+            })
+        except Exception as e:
+            print("WS: failed to send initial credit_update:", e)
+
         # ---- init from client ----
         initial_config = await websocket.receive_json()
 
@@ -1816,6 +1837,18 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
             **(initial_config or {}),
             "subscription_id": user_data.get("subscription_id"),
         })
+
+        # Let the client know which conversation this socket is bound to
+        try:
+            await websocket.send_json({
+                "type": "conversation_id",
+                "id": conv_ref.id,
+            })
+        except Exception as _e:
+            print("[ws] failed to send conversation_id:", repr(_e))
+
+        await websocket.send_json({"type": "conversation_id", "id": conv_ref.id})
+
         # --- Ensure conversation doc is materialized & listable ---
 
         try:
