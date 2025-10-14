@@ -258,8 +258,8 @@ export default function ChatPage() {
 const { userName, userToken } = useUser();
 const router = useRouter();
 const pathname = usePathname();
-const [_authChecked, setAuthChecked] = useState(false);
-const [_authed, setAuthed] = useState(false);
+const setAuthChecked = useState(false)[1];
+const setAuthed = useState(false)[1];
 
 // === State for the UI and chat logic ===
 const [message, setMessage] = useState<string>('');
@@ -272,12 +272,10 @@ const [wsReconnectNonce, setWsReconnectNonce] = useState(0);
 const [credits, setCredits] = useState<number>(0);
 const [isOutOfCredits, setIsOutOfCredits] = useState<boolean>(false);
 // Usage/plan state (new)
-const [_creditsRemaining, _setCreditsRemaining] = useState<number | null>(null);
-const [_creditsResetAt, _setCreditsResetAt] = useState<string | null>(null);
-const [_userPlanName, setUserPlanName] = useState<string>("Free");
-const [_monthlyUsage, setMonthlyUsage] = useState<number>(0);
-const [_monthlyLimit, setMonthlyLimit] = useState<number | null>(null);
-const [_planName, _setPlanName] = useState<string | null>(null);
+const [, setUserPlanName] = useState<string>("Free");
+const [, setMonthlyUsage] = useState<number>(0);
+const [, setMonthlyLimit] = useState<number | null>(null);
+
 
 
 // Helper to load usage from backend
@@ -435,8 +433,6 @@ const reconnectRef = useRef<{ tries: number; timer: number | null }>({
 });
 const authFailedRef = useRef(false);
 const reconnectBackoffRef = useRef(1000); // start at 1s, exponential up to 15s
-const refreshInFlight = useRef<Promise<void> | null>(null);
-const lastRefreshAt = useRef<number>(0);
 const fileInputRef = useRef<HTMLInputElement>(null);
 // Normalize a wide variety of LLM message payloads into a plain string
 function normalizeToPlainText(input: unknown): string {
@@ -814,7 +810,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
     // Covers refreshes where context isn't ready yet.
     useEffect(() => {
         loadConversations();        
-    }, []);
+    }, [loadConversations]);
 
     const handleOpenConversation = async (id: string) => {
     if (ws.current && (ws.current.readyState === WebSocket.OPEN || ws.current.readyState === WebSocket.CONNECTING)) {
