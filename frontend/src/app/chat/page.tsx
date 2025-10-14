@@ -1509,15 +1509,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                         return;
                     }
 
-                    if ((msg as any).type === 'credit_update') {
-                        // Single source of truth: re-pull usage/limit from the API
-                        refreshUsage();
-                        const plan = (msg as any)?.plan_name;
-                        if (typeof plan === 'string' && plan.trim()) {
-                            setUserPlanName(plan);
-                        }
-                        return;
-                    }
+
 
                     // Normalize a sender string we can trust for typing + message routing
                     const m = msg as Record<string, unknown>;
@@ -1563,28 +1555,8 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                         setLoadedSummary(msg.summary);
                         return;
                     }
-                    // Credits/plan updates pushed by the backend
-                    if (msg.type === 'credit_update') {
-                        // One source of truth: re-fetch usage/limit and let that drive UI
-                        refreshUsage();
-                        // (Optional) If your backend also pushes a new plan name, you can still set it:
-                        const plan = (msg as any)?.plan_name;
-                        if (typeof plan === "string" && plan.trim()) {
-                            setUserPlanName(plan);
-                        }
-                    }
 
-                        if (typeof resetAt === "string" && resetAt.trim()) {
-                            setCreditsResetAt(resetAt);
-                        }
-                        // Optional banner if we just crossed zero
-                        if (typeof remaining === "number" && remaining <= 0) {
-                            setCreditNotice(prev =>
-                            prev ?? "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset."
-                            );
-                        }
-                        return;
-                        }
+
 
                         // Unified error from backend if a send was denied
                         if (msg.type === 'error' && (msg as any).code === 'OUT_OF_CREDITS') {
