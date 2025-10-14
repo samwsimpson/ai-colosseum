@@ -329,7 +329,7 @@ const refreshUsage = useCallback(async () => {
 
 const [creditNotice, setCreditNotice] = useState<string | null>(null);
 const [creditsLeft, setCreditsLeft] = useState<number | null>(null);
-const [creditsLoading, setCreditsLoading] = useState(false);
+const [_creditsLoading, setCreditsLoading] = useState(false);
 const [conversationId, setConversationId] = useState<string | null>(null);
 const [pendingFiles, setPendingFiles] = useState<UploadedAttachment[]>([]);
 const [, setIsUploading] = useState<boolean>(false);
@@ -1463,62 +1463,80 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             
                 onmessage: (event: MessageEvent<string>) => {
                     let msg: ServerMessage;
-                    try { msg = JSON.parse(event.data); }
-                    catch { return; }
-                        // --- CREDIT LIMIT MESSAGE FROM SERVER ---
-                        // If backend says you're at limit, reflect it immediately and stop processing the event.
-                        if (msg.type === 'limit') {
-                            const limit = typeof (msg as any).monthly_limit === 'number' ? (msg as any).monthly_limit : null;
-                            const used = typeof (msg as any).monthly_usage === 'number' ? (msg as any).monthly_usage : 0;
-                            const remaining = limit === null ? null : Math.max(0, limit - used);
+                    try {
+                        msg = JSON.parse(event.data);
+                    } catch {
+                        return;
+                    }
 
-                            setIsOutOfCredits(limit !== null && used >= limit);
-                            setCreditsLeft(remaining);
-                            setCreditNotice(
-                                (typeof (msg as any).message === 'string' && (msg as any).message) ||
-                                (remaining === 0
-                                    ? "You're out of credits for this billing period."
-                                    : `You have ${remaining} credits left.`)
-                            );
+                    // Work with a safe bag of unknowns (no `any`)
+                    const m = msg as Record<string, unknown>;
 
-                            // Stop any “thinking” indicators
-                            stopTeamThinking();
-                            setIsTyping({ ChatGPT:false, Claude:false, Gemini:false, Mistral:false });
+                    // --- CREDIT LIMIT MESSAGE FROM SERVER ---
+                    if (msg.type === 'limit') {
+                        const limit =
+                        typeof m.monthly_limit === 'number' ? (m.monthly_limit as number) : null;
+                        const used =
+                        typeof m.monthly_usage === 'number' ? (m.monthly_usage as number) : 0;
+                        const remaining = limit === null ? null : Math.max(0, limit - used);
 
-                            // Stay in sync with server-side numbers
-                            refreshUsage().catch(() => {});
-                            return;
-                        }
-                        // --- END CREDIT LIMIT MESSAGE ---
+                        setIsOutOfCredits(limit !== null && used >= limit);
+                        setCreditsLeft(remaining);
+                        setCreditNotice(
+                        typeof m.message === 'string'
+                            ? (m.message as string)
+                            : remaining === 0
+                            ? "You're out of credits for this billing period."
+                            : `You have ${remaining} credits left.`
+                        );
 
-                    // Out-of-credits signal from backend
-                    // Hard stop if server says we're out of credits
-                    // --- credit-related push messages ---
-                    if ((msg as ServerMessage).type === 'insufficient_credits') {
+                        // stop “thinking” indicators + stay in sync
+                        stopTeamThinking?.();
+                        setIsTyping?.({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+                        void refreshUsage();
+                        return;
+                    }
+                    // --- END CREDIT LIMIT MESSAGE ---
+
+                    // Out-of-credits (push)
+                    if (msg.type === 'insufficient_credits') {
                         setIsOutOfCredits(true);
                         setCreditNotice(prev =>
-                            prev ?? "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset."
+                        prev ??
+                        (typeof m.text === 'string'
+                            ? (m.text as string).trim()
+                            : "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset.")
                         );
                         return;
                     }
 
-                    if ((msg as ServerMessage).type === 'credit_update') {
-                        refreshUsage();
-                        const plan = (msg as CreditUpdateMessage).plan_name;
-                        if (typeof plan === "string" && plan.trim()) {
-                            setUserPlanName(plan);
-                        }
+                    // Credit update (push)
+                    if (msg.type === 'credit_update') {
+                        void refreshUsage();
+                        const plan =
+                        typeof m.plan_name === 'string' ? (m.plan_name as string) : undefined;
+                        if (plan && plan.trim()) setUserPlanName(plan);
                         return;
                     }
 
+                    // Unified backend error for denied send (e.g., out of credits)
+                    if (
+                        msg.type === 'error' &&
+                        typeof m.code === 'string' &&
+                        (m.code as string) === 'OUT_OF_CREDITS'
+                    ) {
+                        setIsOutOfCredits(true);
+                        setCreditNotice(
+                        typeof m.message === 'string'
+                            ? (m.message as string)
+                            : "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset."
+                        );
+                        return;
+                    }
 
+                    // (the rest of your handler continues here, starting from the
+                    // “// Normalize a sender string we can trust …” line that’s already in your file)
 
-
-
-
-
-
-                    // Normalize a sender string we can trust for typing + message routing
                     const m = msg as Record<string, unknown>;
                     const sender =
                     (typeof m.sender === 'string' && m.sender.trim()) ? m.sender.trim()
