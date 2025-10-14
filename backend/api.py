@@ -2645,7 +2645,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                         "remaining_credits": max(int(monthly_limit) - used, 0),
                         "message": "You're out of credits for this billing period."
                     })
-                    continue  # skip starting the team for this turn
+                    await websocket.close(code=1000)
+                    return  # stop handling this WebSocket turn
         except Exception as _e:
             # If the check fails, fail open (optional) or fail closed.
             # Safer is fail closed:
@@ -2654,7 +2655,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                 "code": "LIMIT_CHECK_FAILED",
                 "message": "Could not verify credits."
             })
-            continue
+            await websocket.close(code=1011)  # 1011 = internal error / service condition
+            return
         # === END CREDIT GATE ===
 
         print("AGENTS IN GROUPCHAT:")
