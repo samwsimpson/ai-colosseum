@@ -477,7 +477,6 @@ function normalizeToPlainText(input: unknown): string {
   return '';
 }
 
-
 // 1) single-responsibility upload helper: returns the uploaded attachment but DOES NOT set state
 
 const uploadOne = async (file: File): Promise<UploadedAttachment> => {
