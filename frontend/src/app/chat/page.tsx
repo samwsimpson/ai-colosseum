@@ -834,7 +834,6 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
         const cid = localStorage.getItem('conversationId');
         if (cid) setConversationId(cid);
     } catch {}
-    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
     useEffect(() => {
@@ -897,7 +896,8 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
     checkAuthAndLoad();
     return () => { cancelled = true; };
-    }, [userToken, pathname, router, loadConversations]);
+    }, [userToken, pathname, router, loadConversations, setAuthed, setAuthChecked]);
+
 
 
 
@@ -1112,7 +1112,8 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
         } catch (err) {
             console.error('Send failed:', err);
         }
-    }, [message, userName, addMessageToChat, pendingFiles, conversationId]);
+    }, [message, userName, addMessageToChat, pendingFiles, conversationId, isOutOfCredits]);
+
 
     // Create a brand-new conversation
     const handleNewConversation = useCallback(() => {  
@@ -1409,6 +1410,10 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             setIsWsOpen(false);
 
             const currentWs = socket;            
+            // ---- WS message helpers (added) ----
+            type CreditUpdateMessage = ServerMessage & { plan_name?: string };
+            type ErrorMessage = { type: 'error'; code?: string; message?: string };
+            // ------------------------------------
 
             Object.assign(currentWs, {
                 onopen: () => {
@@ -1449,7 +1454,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                     // Out-of-credits signal from backend
                     // Hard stop if server says we're out of credits
                     // --- credit-related push messages ---
-                    if ((msg as any).type === 'insufficient_credits') {
+                    if ((msg as ServerMessage).type === 'insufficient_credits') {
                         setIsOutOfCredits(true);
                         setCreditNotice(prev =>
                             prev ?? "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset."
@@ -1457,11 +1462,9 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                         return;
                     }
 
-                    if ((msg as any).type === 'credit_update') {
-                        // One source of truth: pull authoritative monthly usage/limit
+                    if ((msg as ServerMessage).type === 'credit_update') {
                         refreshUsage();
-                        // (Optional) Still allow plan_name to update if provided:
-                        const plan = (msg as any)?.plan_name;
+                        const plan = (msg as CreditUpdateMessage).plan_name;
                         if (typeof plan === "string" && plan.trim()) {
                             setUserPlanName(plan);
                         }
@@ -1469,17 +1472,17 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                     }
 
 
-                    if ((msg as any)?.type === 'insufficient_credits') {
-                        stopTeamThinking();
-                        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
-                        setIsOutOfCredits(true);
+
+                    if ((msg as ServerMessage)?.type === 'insufficient_credits') {
+                        /* ... */
                         setCreditNotice(
-                            typeof (msg as any).text === 'string' && (msg as any).text.trim()
-                            ? (msg as any).text.trim()
+                            typeof msg.text === 'string' && msg.text.trim()
+                            ? msg.text.trim()
                             : "You are out of credits. Please upgrade to continue."
                         );
                         return;
                     }
+
 
 
 
@@ -1530,11 +1533,12 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
 
 
-                        // Unified error from backend if a send was denied
-                        if (msg.type === 'error' && (msg as any).code === 'OUT_OF_CREDITS') {
+                    // Unified error from backend if a send was denied
+                    if (msg.type === 'error' && (msg as ErrorMessage).code === 'OUT_OF_CREDITS') {
+                        const em = msg as ErrorMessage;
                         setIsOutOfCredits(true);
                         setCreditNotice(
-                            (typeof (msg as any).message === 'string' && (msg as any).message) ||
+                            (typeof em.message === 'string' && em.message) ||
                             "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset."
                         );
                         return;
@@ -1564,14 +1568,16 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                         return;
                     }
                     if (msg.type === 'insufficient_credits') {
+                        const mm = msg as ServerMessage & { message?: string };
                         setIsOutOfCredits(true);
                         setCreditNotice(
-                            typeof msg.message === 'string' && msg.message.trim()
-                            ? msg.message
+                            typeof mm.message === 'string' && mm.message.trim()
+                            ? mm.message
                             : "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset."
                         );
                         return;
                     }
+
 
                     // Accept multiple server payload shapes, not just `text`
                     const unifiedText = normalizeToPlainText(
@@ -1709,7 +1715,23 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
         });
         return () => { if (cleanup) cleanup(); };
 
-    }, [userToken, userName, addMessageToChat, wsReconnectNonce, conversationId, hydrateConversation, loadConversations, setTypingWithDelayAndTTL]);
+    }, [
+  userToken,
+  userName,
+  pathname,
+  router,
+  addMessageToChat,
+  wsReconnectNonce,
+  conversationId,
+  hydrateConversation,
+  loadConversations,
+  refreshUsage,
+  resetWebSocket,
+  stopTeamThinking,
+  setTypingWithDelayAndTTL,
+  extractUploadsFromRawMessage
+]);
+
 
 
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
