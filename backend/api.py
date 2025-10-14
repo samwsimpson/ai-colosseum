@@ -313,33 +313,6 @@ def _tokens_to_credits(token_count: int, model_name: str) -> float:
     mult = MODEL_MULTIPLIER.get(model_name, 1.0)
     return base * mult
 
-    # now = firestore.SERVER_TIMESTAMP
-    data = {
-        "role": role,
-        "sender": sender,
-        "content": content,
-        "created_at": FS_TS,
-    }
-
-    # Back-compat: keep the old single-file field if present
-    if file_metadata:
-        data["file_metadata"] = file_metadata
-
-    # Preferred: a normalized list of attachments
-    if file_metadata_list:
-        data["attachments"] = file_metadata_list
-
-    # save the message
-    await conv_ref.collection("messages").add(data)
-
-    # update parent conversation
-    await conv_ref.set({
-        "updated_at": FS_TS,
-        "message_count": Increment(1),
-    }, merge=True)
-
-
-
 # --- End Conversation persistence helpers ---
 # --- Credit helpers (MVP) ---
 
