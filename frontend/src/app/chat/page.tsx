@@ -314,9 +314,6 @@ const refreshUsage = useCallback(async () => {
 const [creditNotice, setCreditNotice] = useState<string | null>(null);
 const [creditsLeft, setCreditsLeft] = useState<number | null>(null);
 const [creditsLoading, setCreditsLoading] = useState(false);
-
-
-
 const [conversationId, setConversationId] = useState<string | null>(null);
 const [pendingFiles, setPendingFiles] = useState<UploadedAttachment[]>([]);
 const [, setIsUploading] = useState<boolean>(false);
