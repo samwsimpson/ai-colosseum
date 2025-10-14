@@ -1,6 +1,6 @@
+print("TOP OF api.py: reached", flush=True)
 import sys
 import traceback
-print("TOP OF api.py: Script starting...", file=sys.stderr)
 from fastapi import FastAPI, Depends, Query, HTTPException, status, WebSocket, WebSocketDisconnect, UploadFile, File
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
