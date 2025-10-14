@@ -16,6 +16,7 @@ RUN find /usr/local/lib/python3.11/site-packages/ -name "flow.py" -ls
 COPY api.py .
 COPY run.py .
 COPY test_anthropic.py .
+COPY entrypoint.py .
 
 # Expose port 8080 as required by Google Cloud Run
 EXPOSE 8080
