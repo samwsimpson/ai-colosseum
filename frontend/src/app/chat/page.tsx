@@ -1536,8 +1536,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
                     // (the rest of your handler continues here, starting from the
                     // “// Normalize a sender string we can trust …” line that’s already in your file)
-
-                    const m = msg as Record<string, unknown>;
+                    
                     const sender =
                     (typeof m.sender === 'string' && m.sender.trim()) ? m.sender.trim()
                         : (typeof m.model === 'string' && m.model.trim()) ? m.model.trim()
