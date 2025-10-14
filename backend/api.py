@@ -1,4 +1,5 @@
 print("TOP OF api.py: reached", flush=True)
+from starlette.websockets import WebSocketState  # add this import at the top of file if not present
 import sys
 import traceback
 from fastapi import FastAPI, Depends, Query, HTTPException, status, WebSocket, WebSocketDisconnect, UploadFile, File
@@ -1752,6 +1753,43 @@ PLAN_CREDIT_QUOTA = {
 
 @app.websocket("/ws/colosseum-chat")
 async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(default=None)):
+    # --- WS: accept first so failures report cleanly through proxies ---
+    await websocket.accept()
+    print("WS: accepted connection for /ws/colosseum-chat", flush=True)
+
+    # Optional: log Origin to debug strict Origin checks (if any)
+    try:
+        print(f"WS Origin: {websocket.headers.get('origin')}", flush=True)
+    except Exception:
+        pass
+
+    # Pull token from query string
+    token = websocket.query_params.get("token")
+    if not token:
+        try:
+            await websocket.send_json({"sender": "System", "type": "limit", "text": "Missing token"})
+        except Exception:
+            pass
+        print("WS: closing 4401 (missing token)", flush=True)
+        await websocket.close(code=4401, reason="Missing token")
+        return
+
+    # Validate token (wrap your existing decode in try/except)
+    try:
+        # Use **your** existing decode function/SECRET here (don’t change your key)
+        payload = jwt.decode(token, SECRET_KEY, algorithms=["HS256"])
+        user_id = payload.get("sub")
+        if not user_id:
+            raise ValueError("Token missing sub")
+    except Exception as e:
+        try:
+            await websocket.send_json({"sender": "System", "type": "limit", "text": "Invalid or expired token"})
+        except Exception:
+            pass
+        print(f"WS: closing 4401 (bad token): {e}", flush=True)
+        await websocket.close(code=4401, reason="Invalid or expired token")
+        return
+
     try:
         await websocket.accept()
         print("WS: accepted connection", flush=True)
@@ -1759,12 +1797,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
 
         # ---- auth & monthly limit ----
         if not token:
+            print("WS: closing 4401 (missing token)", flush=True)
             await websocket.close(code=4401, reason="Missing token")
             return
         try:
             user = await get_current_user(token=token)
         except HTTPException:
             # Invalid/expired token -> close explicitly so the client can refresh
+            print("WS: closing 4401 (Unauthorized)", flush=True)
             await websocket.close(code=4401, reason="Unauthorized")
             return
 
@@ -1815,6 +1855,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
 
             if used >= int(limit):
                 await websocket.send_json({"sender": "System", "type": "limit", "text": "Monthly conversation limit reached."})
+                print("WS: closing 440 (Monly limite reached)", flush=True)
                 await websocket.close(code=4000, reason="Monthly limit reached")
                 return
 
@@ -1958,6 +1999,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                     except Exception:
                         pass
                     try:
+                        print("WS: closing 1008 (insuffient credits)", flush=True)
                         await websocket.close(code=1008, reason="Insufficient credits")
                     except Exception:
                         pass
@@ -2326,6 +2368,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                             except Exception:
                                 pass
                             try:
+                                print("WS: closing 4400 (out of credits for plan)", flush=True)
                                 await websocket.close(code=4000, reason="You’re out of credits for your current plan.")
                             except Exception:
                                 pass
@@ -2538,6 +2581,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                         except Exception:
                             pass
                         try:
+                            print("WS: closing 4400 (out of credits for plan)", flush=True)
                             await websocket.close(code=4000, reason="You’re out of credits for your current plan.")
                         except Exception:
                             pass
@@ -2681,6 +2725,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                         "remaining_credits": max(int(monthly_limit) - used, 0),
                         "message": "You're out of credits for this billing period."
                     })
+                    print("WS: closing 1000 (not sure)", flush=True)
                     await websocket.close(code=1000)
                     return  # stop handling this WebSocket turn
         except Exception as _e:
@@ -2691,6 +2736,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                 "code": "LIMIT_CHECK_FAILED",
                 "message": "Could not verify credits."
             })
+            print("WS: closing 1011 (internal error)", flush=True)
             await websocket.close(code=1011)  # 1011 = internal error / service condition
             return
         # === END CREDIT GATE ===
@@ -2705,6 +2751,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                 "code": "NO_MODELS",
                 "message": "No AI models are configured on the server."
             })
+            print("WS: closing 1011 (not sure)", flush=True)
             await websocket.close(code=1011)
             return
 
@@ -2942,6 +2989,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                         except Exception:
                             pass
                         try:
+                            print("WS: closing 1008 (out of credits)", flush=True)
                             await websocket.close(code=1008, reason="Out of credits")
                         except Exception:
                             pass
@@ -3061,7 +3109,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                     # --- /CREDITS deduct ---
 
         
-        from starlette.websockets import WebSocketState  # add this import at the top of file if not present
+  
 
         async def keepalive_task(ws: WebSocket):
             try:
@@ -3116,3 +3164,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
             await websocket.send_json({"sender": "System", "text": f"Error: {e}"})
         except WebSocketDisconnect:
             pass
+@app.websocket("/ws/ping")
+async def ws_ping(ws: WebSocket):
+    await ws.accept()
+    await ws.send_text("pong")
+    await ws.close()
