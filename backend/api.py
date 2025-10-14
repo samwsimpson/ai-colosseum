@@ -1739,6 +1739,30 @@ async def get_upload_text(upload_id: str, max_chars: int = 20000):
     return JSONResponse({"upload_id": upload_id, "mime": mime, "text": text})
 
 # --- CREDITS: helpers -------------------------------------------------
+
+# Simple credit decrement with a floor check.
+# Returns the new balance, or -1 if there weren’t enough credits.
+async def deduct_credits_simple(user_id: str, amount: float) -> float:
+    try:
+        user_ref = db.collection('users').document(user_id)
+        snap = await user_ref.get()
+        data = snap.to_dict() or {}
+        current = float(data.get("credit_balance", 0.0))
+        # Not enough? signal caller to stop.
+        if current < amount:
+            return -1.0
+        new_bal = round(current - float(amount), 4)
+
+        # Persist the new balance.
+        await user_ref.update({"credit_balance": new_bal})
+
+        return new_bal
+    except Exception as e:
+        # On failure, be safe and signal "no credits" so the caller closes politely.
+        print(f"[credits] deduct_credits_simple error for {user_id}: {e}")
+        return -1.0
+
+
 from datetime import datetime, timedelta, timezone
 
 # Per-plan monthly credit quotas (tune these to your pricing)
@@ -1755,6 +1779,7 @@ PLAN_CREDIT_QUOTA = {
 async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(default=None)):
     # --- WS: accept first so failures report cleanly through proxies ---
     await websocket.accept()
+    await websocket.send_json({"type": "ws_ready"})
     print("WS: accepted connection for /ws/colosseum-chat", flush=True)
 
 
@@ -1791,8 +1816,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
         await websocket.close(code=4401, reason="Invalid or expired token")
         return
 
-    try:
-        await websocket.accept()
+    try:        
         print("WS: accepted connection", flush=True)
 
 
@@ -3069,7 +3093,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                     # --- CREDITS: deduct 1 per assistant message (starter policy) ---
                     # Only deduct when a model speaks (not when the human/system speaks)
                     if sender in agent_name_set and text:
-                        new_bal = await deduct_credits_simple(user["id"], 1)
+                        new_bal = await deduct_credits_simple(user["id"], 1)                        
                         if new_bal < 0:
                             # Couldn't deduct → notify and close as out-of-credits
                             try:
