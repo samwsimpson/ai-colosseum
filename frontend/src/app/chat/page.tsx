@@ -1425,8 +1425,8 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
             const currentWs = socket;            
             // ---- WS message helpers (added) ----
-            type CreditUpdateMessage = ServerMessage & { plan_name?: string };
             type ErrorMessage = { type: 'error'; code?: string; message?: string };
+
             // ------------------------------------
 
             Object.assign(currentWs, {
@@ -1604,17 +1604,16 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                     }
 
                     // --- credit-related push messages (added) ---
-                    if ((msg as any).type === 'credit_update') {
-                        // Single source of truth: re-pull usage/limit from the API
-                        refreshUsage();
+                    if (typeof (m as Record<string, unknown>).type === 'string' && (m as Record<string, unknown>).type === 'credit_update') {
+                        void refreshUsage();
 
-                        // Optional: update plan name if backend included it
-                        const plan = (msg as any)?.plan_name;
-                        if (typeof plan === 'string' && plan.trim()) {
-                            setUserPlanName(plan);
-                        }
+                        const planVal = (m as Record<string, unknown>)['plan_name'];
+                        const plan = typeof planVal === 'string' ? planVal : undefined;
+                        if (plan && plan.trim()) setUserPlanName(plan);
+
                         return;
                     }
+
 
 
                     // Accept multiple server payload shapes, not just `text`
