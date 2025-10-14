@@ -105,6 +105,7 @@ MISTRAL_SYSTEM = _env(
 # ==== end system prompts ====
 REFRESH_TOKEN_EXPIRE_SECONDS = 14 * 24 * 60 * 60  # 14 days
 FS_TS = SERVER_TIMESTAMP
+
 # ===== Retry & fallback helpers for LLM calls =====
 import random
 
@@ -292,45 +293,26 @@ async def get_or_create_conversation(user_id: str, initial_config: dict):
 
     doc = await conv_ref.get()
     return conv_ref, (doc.to_dict() or {})
-async def mark_conversation_debited_once(conv_ref, *, user_id: str, subscription_id: str | None):
-    """
-    Idempotently charge ONE conversation credit the first time the user participates.
-    Safe to call on every user message.
-    """
-    try:
-        snap = await conv_ref.get()
-        doc = snap.to_dict() or {}
-        if doc.get("debited"):
-            return False  # already charged
 
-        # Append to usage_ledger (the thing your monthly limit counts)
-        await db.collection("usage_ledger").add({
-            "user_id": user_id,
-            "subscription_id": subscription_id or "Free",
-            "conv_id": conv_ref.id,
-            "created_at": FS_TS,
-        })
+    
+# --- Credits helpers (tokens -> credits) ---
 
-        # Mark the conversation so we won't double-charge later
-        await conv_ref.set({
-            "debited": True,
-            "first_user_message_at": FS_TS
-        }, merge=True)
+# How many tokens per 1 credit (tune these)
+CREDITS_PER_1000_TOKENS = 1000
 
-        return True
-    except Exception as e:
-        print("[usage_ledger] debit failed:", e)
-        return False
+# Relative multipliers by model (tune these)
+MODEL_MULTIPLIER = {
+    "ChatGPT": 1.5,     # GPT-4o family
+    "Claude": 1.3,      # Claude 3.5 Sonnet
+    "Gemini": 1.1,      # Gemini Advanced
+    "Mistral": 1.0,     # Mistral-medium (baseline)
+}
 
-async def save_message(
-    conv_ref,
-    *,
-    role: str,
-    sender: str,
-    content: str,
-    file_metadata: Optional[dict] = None,
-    file_metadata_list: Optional[List[dict]] = None,
-):
+def _tokens_to_credits(token_count: int, model_name: str) -> float:
+    base = (token_count or 0) / CREDITS_PER_1000_TOKENS
+    mult = MODEL_MULTIPLIER.get(model_name, 1.0)
+    return base * mult
+
     # now = firestore.SERVER_TIMESTAMP
     data = {
         "role": role,
@@ -359,6 +341,22 @@ async def save_message(
 
 
 # --- End Conversation persistence helpers ---
+# --- Credit helpers (MVP) ---
+
+class CreditAdjustment(BaseModel):
+    delta: int
+    reason: Optional[str] = None
+
+async def _get_user_ref_from_ws_token(token: str):
+    """Helper to decode your bearer token and return (user_id, user_ref)."""
+    try:
+        payload = pyjwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id = payload.get("sub")
+        if not user_id:
+            raise ValueError("No sub in token")
+        return user_id, db.collection("users").document(user_id)
+    except Exception as e:
+        raise HTTPException(status_code=401, detail="Invalid token") from e
 
 @app.on_event("startup")
 async def startup_event():
@@ -1086,7 +1084,7 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
     if not period_start:
         period_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
 
-    # Count usage from ledger
+    # Sum usage from ledger
     used = 0
     q = (
         db.collection("usage_ledger")
@@ -1095,16 +1093,24 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
         .where("created_at", ">=", period_start)
     )
     try:
-        async for _ in q.stream():
-            used += 1
+        async for d in q.stream():
+            doc = d.to_dict() or {}
+            used += int(doc.get("credits_spent") or 1)  # default 1 for legacy rows
     except Exception as e:
-        # Likely missing composite index — return limit so UI still shows the plan
         print("[/api/users/me/usage] ledger query failed; returning limit only:", e)
-        return JSONResponse({"monthly_usage": 0, "monthly_limit": monthly_limit, "degraded": True}, status_code=200)
+        return JSONResponse(
+            {"monthly_usage": 0, "monthly_limit": monthly_limit, "degraded": True},
+            status_code=200,
+        )
 
     return JSONResponse({"monthly_usage": used, "monthly_limit": monthly_limit})
 
 
+
+@app.get("/api/credits")
+async def get_credits(current_user: dict = Depends(get_current_user)):
+    # Return the same shape as /api/users/me/usage
+    return await get_user_usage(current_user)  # reuse the function above
 
 
 @app.post("/api/google-auth", response_model=Token)
@@ -1488,6 +1494,28 @@ async def stripe_webhook(request: Request):
 
             if fields:
                 await users_ref.document(user_docs[0].id).update(fields)
+            # Also reset monthly credits based on the user's plan
+            try:
+                # Load latest user doc to get subscription_id
+                uref = users_ref.document(user_docs[0].id)
+                usnap = await uref.get()
+                udata = usnap.to_dict() or {}
+                plan = (udata.get("subscription_id") or "Free")
+
+                # Map plan -> monthly credits (tune these numbers)
+                PLAN_CREDIT_ALLOTMENT = {
+                    "Free":        50.0,
+                    "Starter":     500.0,
+                    "Pro":        2000.0,
+                    "Colosseum": 10000.0,
+                    "Enterprise":  None,   # None => skip reset; treat as unlimited
+                }
+
+                allotment = PLAN_CREDIT_ALLOTMENT.get(plan, 0.0)
+                if allotment is not None:
+                    await uref.set({"credit_balance": float(allotment)}, merge=True)
+            except Exception as _e:
+                print("[stripe] failed to reset credits on invoice:", _e)
 
     return {"status": "success"}
 
@@ -1707,10 +1735,18 @@ async def get_upload_text(upload_id: str, max_chars: int = 20000):
 
     return JSONResponse({"upload_id": upload_id, "mime": mime, "text": text})
 
+# --- CREDITS: helpers -------------------------------------------------
+from datetime import datetime, timedelta, timezone
+
+# Per-plan monthly credit quotas (tune these to your pricing)
+PLAN_CREDIT_QUOTA = {
+    "free": 50,
+    "pro": 2000,
+    "colosseum": 10000,
+}
 
 
-
-
+# --- /CREDITS helpers ---
 
 @app.websocket("/ws/colosseum-chat")
 async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(default=None)):
@@ -1754,8 +1790,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                     .where("subscription_id", "==", user_data.get("subscription_id") or "Free")
                     .where("created_at", ">=", period_start)
                 )
-                async for _ in q.stream():
-                    used += 1
+                async for d in q.stream():
+                    doc = d.to_dict() or {}
+                    used += int(doc.get("credits_spent") or 1)
+
             except Exception as e:
                 print("[ws] ledger query failed; allowing session but not counting:", e)
 
@@ -1765,7 +1803,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                 return
 
 
-
+        
         # ---- init from client ----
         initial_config = await websocket.receive_json()
 
@@ -1858,6 +1896,51 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
 
         # Keep this list in one place
         agent_names = ["ChatGPT", "Claude", "Gemini", "Mistral"]
+        # === Credits deduction helper (inline, websocket scope) ===
+        async def _deduct_credits_inline(*, model_label: str, prompt_tokens: int = 0, completion_tokens: int = 0, approx_text: str | None = None) -> bool:
+            """
+            Returns True if ok to continue, False if the user is out of credits (and the WS is closed).
+            """
+            total = int(prompt_tokens or 0) + int(completion_tokens or 0)
+            if total <= 0 and approx_text:
+                total = max(1, int(len(approx_text) / 4))  # cheap token estimate (~4 chars/token)
+
+            # Tune these as you like
+            MODEL_MULT = {"ChatGPT": 1.5, "Claude": 1.3, "Gemini": 1.1, "Mistral": 1.0}
+            used_credits = (total * MODEL_MULT.get(model_label, 1.0)) / 1000.0
+            used_credits = round(used_credits, 3)
+
+            try:
+                uref = db.collection("users").document(user["id"])
+                snap = await uref.get()
+                bal = float((snap.to_dict() or {}).get("credit_balance") or 0.0)
+
+                if bal < used_credits:
+                    try:
+                        await websocket.send_json({"sender": "System", "type": "insufficient_credits", "text": "You have no credits remaining."})
+                    except Exception:
+                        pass
+                    try:
+                        await websocket.close(code=1008, reason="Insufficient credits")
+                    except Exception:
+                        pass
+                    return False
+
+                await uref.update({"credit_balance": Increment(-used_credits)})
+                await db.collection("usage_ledger").add({
+                    "user_id": user["id"],
+                    "model": model_label,
+                    "prompt_tokens": int(prompt_tokens or 0),
+                    "completion_tokens": int(completion_tokens or 0),
+                    "approx_tokens": None if (prompt_tokens or completion_tokens) else int(total),
+                    "credits_spent": used_credits,
+                    "created_at": FS_TS,
+                })
+                return True
+            except Exception as _e:
+                print("[credits] deduction failed:", _e)
+                # never break the chat for accounting issues
+                return True
 
         # === TOOL: get_upload_text (for assistants) ===
         # REPLACE the entire get_upload_text_tool function with THIS
@@ -2116,6 +2199,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                                     max_tokens = 800,
                                 )
                                 out_text = ((resp.choices[0].message.content or "").strip())
+                                # CREDIT DEDUCTION (OpenAI vision)
+                                u = getattr(resp, "usage", None) or {}
+                                p = int(getattr(u, "prompt_tokens", 0) or (u.get("prompt_tokens") if isinstance(u, dict) else 0) or 0)
+                                c = int(getattr(u, "completion_tokens", 0) or (u.get("completion_tokens") if isinstance(u, dict) else 0) or 0)
+                                _ok = await _deduct_credits_inline(model_label=self.name, prompt_tokens=p, completion_tokens=c, approx_text=out_text)
+                                if not _ok:
+                                    return {"content": "", "name": self.name}
+
 
                         elif which == "anthropic":
                             # Claude 3.x (URL-based images)
@@ -2136,6 +2227,14 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                                 )
                                 # Anthropic returns content blocks; join text parts only
                                 out_text = "".join([getattr(b, "text", "") for b in (ar.content or [])]).strip()
+                                # CREDIT DEDUCTION (Anthropic vision)
+                                au = getattr(ar, "usage", None)
+                                p = int(getattr(au, "input_tokens", 0) or 0)
+                                c = int(getattr(au, "output_tokens", 0) or 0)
+                                _ok = await _deduct_credits_inline(model_label=self.name, prompt_tokens=p, completion_tokens=c, approx_text=out_text)
+                                if not _ok:
+                                    return {"content": "", "name": self.name}
+
                             except Exception:
                                 pass  # fall through to normal path
 
@@ -2163,6 +2262,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                                     res = m.generate_content(inline_parts)
                                     return (getattr(res, "text", "") or "").strip()
                                 out_text = await loop.run_in_executor(None, _call_gemini)
+                                # CREDIT DEDUCTION (Gemini vision; usage not exposed -> estimate from text)
+                                _ok = await _deduct_credits_inline(model_label=self.name, approx_text=out_text)
+                                if not _ok:
+                                    return {"content": "", "name": self.name}
+
                             except Exception:
                                 pass  # fall through to normal path
 
@@ -2172,6 +2276,25 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                         out_text = ""
 
                     if out_text:
+                        # === CREDIT DEDUCTION (image path) ===
+                        approx_tokens = max(1, int(len(out_text) / 4))
+                        ok, _spent = await deduct_credits_for_tokens(
+                            user_id=user["id"],            # captured from outer scope
+                            tokens=approx_tokens,
+                            model_label=str(self.name or "").strip() or "Assistant",
+                        )
+                        if not ok:
+                            try:
+                                await websocket.send_json({"type": "error", "reason": "insufficient_credits"})
+                            except Exception:
+                                pass
+                            try:
+                                await websocket.close(code=4000, reason="You’re out of credits for your current plan.")
+                            except Exception:
+                                pass
+                            return
+                        # === END CREDIT DEDUCTION ===
+
                         try:
                             # Emit as the assistant’s message & stop
                             self._message_output_queue.put_nowait({"sender": self.name, "text": out_text})
@@ -2269,6 +2392,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
 
                     # NEW: proactively forward the assistant's reply to the browser
                     if out_text:
+                        # CREDIT DEDUCTION (normal path)
+                        _ok = await _deduct_credits_inline(model_label=self.name, approx_text=out_text)
+                        if not _ok:
+                            return {"content": "", "name": self.name}
+
                         try:
                             self._message_output_queue.put_nowait({
                                 "sender": self.name,
@@ -2357,6 +2485,28 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                 # Forward to browser
                 if text:
                     payload = {"sender": speaker, "text": text}
+                    # === CREDIT DEDUCTION (general path) ===
+                    # Approximate tokens from output text (fallback when provider usage not available here)
+                    approx_tokens = max(1, int(len(text) / 4))
+
+                    ok, _spent = await deduct_credits_for_tokens(
+                        user_id=user["id"],            # captured from outer scope
+                        tokens=approx_tokens,          # output tokens only (conservative)
+                        model_label=str(speaker or "").strip() or "Assistant",
+                    )
+                    if not ok:
+                        # Stop and notify the browser; also close the socket with a policy code
+                        try:
+                            await websocket.send_json({"type": "error", "reason": "insufficient_credits"})
+                        except Exception:
+                            pass
+                        try:
+                            await websocket.close(code=4000, reason="You’re out of credits for your current plan.")
+                        except Exception:
+                            pass
+                        return {"content": "", "name": speaker}
+                    # === END CREDIT DEDUCTION ===
+
                     try:
                         self._message_output_queue.put_nowait(payload)
                     except Exception:
@@ -2664,12 +2814,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                                 "Hello! Ready when you are.",
                             ])
                         })
-                    # Charge one conversation credit the first time the user participates
-                    await mark_conversation_debited_once(
-                        conv_ref,
-                        user_id=user["id"],
-                        subscription_id=user_data.get("subscription_id"),
-                    )
+
 
                     # Kick off or feed the manager loop
                     if chat_task is None or chat_task.done():
@@ -2740,6 +2885,48 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                     role = "assistant" if sender in agent_name_set else "system"
                     await save_message(conv_ref, role=role, sender=sender, content=text)
                     await maybe_refresh_summary(conv_ref)
+                    # --- CREDITS: deduct 1 per assistant message (starter policy) ---
+                    # Only deduct when a model speaks (not when the human/system speaks)
+                    if sender in agent_name_set and text:
+                        new_bal = await deduct_credits_simple(user["id"], 1)
+                        if new_bal < 0:
+                            # Couldn't deduct → notify and close as out-of-credits
+                            try:
+                                await ws.send_json({
+                                    "sender": "System",
+                                    "type": "limit",
+                                    "text": "You’ve run out of credits."
+                                })
+                            except Exception:
+                                pass
+                            await ws.close(code=1008, reason="Out of credits")
+                            return
+                        else:
+                            # Record this spend in the monthly ledger (the usage API will sum this)
+                            try:
+                                await db.collection("usage_ledger").add({
+                                    "user_id": user["id"],
+                                    "subscription_id": (user_data or {}).get("subscription_id") or "Free",
+                                    "conv_id": conv_ref.id,
+                                    "credits_spent": 1,            # we deducted 1 credit for this assistant message
+                                    "event": "assistant_message",
+                                    "model": sender,                # optional: which assistant spoke
+                                    "created_at": FS_TS,
+                                })
+                            except Exception as e:
+                                print("[usage_ledger] write failed:", e)
+
+                            # (keep your existing live update to the client here)
+                            try:
+                                await ws.send_json({
+                                    "sender": "System",
+                                    "type": "credit_update"
+                                })
+
+                            except Exception:
+                                pass
+
+                    # --- /CREDITS deduct ---
 
         
         from starlette.websockets import WebSocketState  # add this import at the top of file if not present

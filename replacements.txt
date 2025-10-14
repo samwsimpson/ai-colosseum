@@ -1,0 +1,10 @@
+# Add literal lines with exact old values if you know them.
+# literal:sk-live_... ==> *****STRIPE_KEY_REDACTED*****
+# literal:sk_test_... ==> *****STRIPE_TEST_KEY_REDACTED*****
+
+# Broad regex fallbacks:
+regex:\bsk-live-[A-Za-z0-9]+\b ==> *****STRIPE_KEY_REDACTED*****
+regex:\bsk_test_[A-Za-z0-9]+\b ==> *****STRIPE_TEST_KEY_REDACTED*****
+regex:\b(OPENAI|ANTHROPIC)_API_KEY=[^\s]+\b ==> \1_API_KEY=REDACTED
+regex:\bGOOGLE_CLIENT_SECRET=[^\s]+\b ==> GOOGLE_CLIENT_SECRET=REDACTED
+regex:\bGOOGLE_CLIENT_ID=[^\s]+\b ==> GOOGLE_CLIENT_ID=REDACTED

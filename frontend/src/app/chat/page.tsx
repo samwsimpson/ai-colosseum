@@ -17,16 +17,17 @@ interface TypingState {
 }
 
 interface ServerMessage {
-  sender?: string | null;
-  text?: string;
-  typing?: boolean;
-  type?: 'ping' | 'pong' | 'conversation_id' | 'context_summary' | 'conversation_meta' | string;
-  id?: string;
-  summary?: string;
+    sender?: string | null;
+    text?: string;
+    typing?: boolean;
+    type?: 'ping' | 'pong' | 'conversation_id' | 'conversation_meta' | 'context_summary' | 'limit' | 'insufficient_credits' | string;
 
-  // add these for conversation_meta payloads
-  title?: string;
-  updated_at?: string;
+    id?: string;
+    summary?: string;
+
+    // add these for conversation_meta payloads
+    title?: string;
+    updated_at?: string;
 }
 
 // Past-convo list item returned by the API
@@ -294,8 +295,52 @@ const [isWsOpen, setIsWsOpen] = useState<boolean>(false);
 const [loadedSummary, setLoadedSummary] = useState<string | null>(null);
 const [showSummary, setShowSummary] = useState(false);
 const [wsReconnectNonce, setWsReconnectNonce] = useState(0);
-const [isOutOfCredits, setIsOutOfCredits] = useState(false);
+const [credits, setCredits] = useState<number>(0);
+const [isOutOfCredits, setIsOutOfCredits] = useState<boolean>(false);
+// Usage/plan state (new)
+const [creditsRemaining, setCreditsRemaining] = useState<number | null>(null);
+const [creditsResetAt, setCreditsResetAt] = useState<string | null>(null);
+const [userPlanName, setUserPlanName] = useState<string>("Free");
+const [monthlyUsage, setMonthlyUsage] = useState<number>(0);
+const [monthlyLimit, setMonthlyLimit] = useState<number | null>(null);
+
+// Helper to load usage from backend
+const refreshUsage = useCallback(async () => {
+  try {
+    const res = await apiFetch("/api/users/me/usage", {
+      headers: buildAuthHeaders(userToken ?? undefined),
+      cache: "no-store",
+    });
+    if (!res.ok) return;
+
+    const data = await res.json();
+    // Expecting: { monthly_usage: number, monthly_limit: number|null }
+    const used = Number(data?.monthly_usage ?? 0);
+    const limit =
+      data?.monthly_limit === null
+        ? null
+        : (typeof data?.monthly_limit === "number" ? data.monthly_limit : 0);
+
+    setMonthlyUsage(Number.isFinite(used) ? used : 0);
+    setMonthlyLimit(limit);
+
+    // UI plan name can still come from elsewhere if you like; here we leave it as-is
+    // Unlimited handling:
+    if (limit === null) {
+      setIsOutOfCredits(false);
+    } else {
+      setIsOutOfCredits(used >= limit);
+    }
+  } catch {
+    // ignore
+  }
+}, [userToken]);
+
+
 const [creditNotice, setCreditNotice] = useState<string | null>(null);
+const [creditsLeft, setCreditsLeft] = useState<number | null>(null);
+const [planName, setPlanName] = useState<string | null>(null);
+
 const [conversationId, setConversationId] = useState<string | null>(null);
 const [pendingFiles, setPendingFiles] = useState<UploadedAttachment[]>([]);
 const [, setIsUploading] = useState<boolean>(false);
@@ -661,6 +706,7 @@ const removePending = (id: string) => setPendingFiles(prev => prev.filter(p => p
             hydrateConversation(conversationId);
         }
     }, [conversationId, chatHistory.length, hydrateConversation]);
+
     // Fetch the list of conversations
 const loadConversations = useCallback(async (folderId?: string | null) => {
     const activeFolder = (typeof folderId !== 'undefined') ? folderId : selectedFolderId;
@@ -884,15 +930,90 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
 
     useEffect(() => {
-    const onVisible = () => {
-        if (document.visibilityState === 'visible' && !ws.current) {
-        // nudge a reconnect attempt
-        setWsReconnectNonce((n) => n + 1);
-        }
-    };
-    document.addEventListener('visibilitychange', onVisible);
-    return () => document.removeEventListener('visibilitychange', onVisible);
+        const onVisible = () => {
+            if (document.visibilityState === 'visible' && !ws.current) {
+            // nudge a reconnect attempt
+            setWsReconnectNonce((n) => n + 1);
+            }
+        };
+        document.addEventListener('visibilitychange', onVisible);
+        return () => document.removeEventListener('visibilitychange', onVisible);
     }, []);
+    // Load current credits when we have a token (or after refresh)
+    // Load usage/plan once we have a token
+    useEffect(() => {
+        if (userToken) {
+            refreshUsage();
+        }
+    }, [userToken, refreshUsage]);
+
+    useEffect(() => {
+        if (!userToken) return;
+
+        let cancelled = false;
+
+        (async () => {
+            try {
+            setCreditsLoading(true);
+            const res = await apiFetch('/api/credits'); // uses your existing apiFetch
+            if (!cancelled && res.ok) {
+                const data = await res.json();
+                const remaining =
+                typeof data.remaining_credits === 'number' ? data.remaining_credits : null;
+
+                setCreditsLeft(remaining);
+                setIsOutOfCredits(!remaining || remaining <= 0);
+            }
+            } catch (e) {
+            console.error('Failed to fetch credits', e);
+            } finally {
+            if (!cancelled) setCreditsLoading(false);
+            }
+        })();
+
+        return () => { cancelled = true; };
+    }, [userToken]);
+
+    useEffect(() => {
+        let ignore = false;
+        (async () => {
+            try {
+            const res = await apiFetch('/api/credits');
+            if (!ignore && res.ok) {
+                const data = await res.json();
+                const bal =
+                typeof data.credits_remaining === 'number'
+                    ? data.credits_remaining
+                    : (typeof data.balance === 'number' ? data.balance : 0);
+                setCreditsLeft(bal);
+                setIsOutOfCredits(bal <= 0);
+                setCreditNotice(bal <= 0 ? "You are out of credits. Please upgrade to continue." : null);
+            }
+            } catch {
+            // ignore
+            }
+        })();
+        return () => { ignore = true; };
+    }, [userToken, wsReconnectNonce]);
+
+    useEffect(() => {
+        if (!userToken) return;
+        (async () => {
+            try {
+            const headers = buildAuthHeaders(userToken);
+            const res = await apiFetch('/api/credits', { headers });
+            if (res.ok) {
+                const data = await res.json();
+                const bal = typeof data?.credit_balance === 'number' ? data.credit_balance : 0;
+                setCredits(bal);
+                setIsOutOfCredits(bal <= 0);
+                setCreditNotice(bal <= 0 ? "You are out of credits. Please upgrade to continue." : null);
+            }
+            } catch {
+            // ignore
+            }
+        })();
+    }, [userToken]);
 
     // Use useCallback to memoize the function, preventing unnecessary re-renders
     const addMessageToChat = useCallback((msg: { sender: string; text: string }) => {
@@ -1329,6 +1450,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                     setIsOutOfCredits(false);
                     setCreditNotice(null);
                     loadConversations();
+                    refreshUsage();
                     authFailedRef.current = false;
                     reconnectBackoffRef.current = 1000;
             
@@ -1352,6 +1474,50 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                     let msg: ServerMessage;
                     try { msg = JSON.parse(event.data); }
                     catch { return; }
+                    // Out-of-credits signal from backend
+                    // Hard stop if server says we're out of credits
+                    // --- credit-related push messages ---
+                    if ((msg as any).type === 'insufficient_credits') {
+                        setIsOutOfCredits(true);
+                        setCreditNotice(prev =>
+                            prev ?? "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset."
+                        );
+                        return;
+                    }
+
+                    if ((msg as any).type === 'credit_update') {
+                        // One source of truth: pull authoritative monthly usage/limit
+                        refreshUsage();
+                        // (Optional) Still allow plan_name to update if provided:
+                        const plan = (msg as any)?.plan_name;
+                        if (typeof plan === "string" && plan.trim()) {
+                            setUserPlanName(plan);
+                        }
+                        return;
+                    }
+
+
+                    if ((msg as any)?.type === 'insufficient_credits') {
+                        stopTeamThinking();
+                        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+                        setIsOutOfCredits(true);
+                        setCreditNotice(
+                            typeof (msg as any).text === 'string' && (msg as any).text.trim()
+                            ? (msg as any).text.trim()
+                            : "You are out of credits. Please upgrade to continue."
+                        );
+                        return;
+                    }
+
+                    if ((msg as any).type === 'credit_update') {
+                        // Single source of truth: re-pull usage/limit from the API
+                        refreshUsage();
+                        const plan = (msg as any)?.plan_name;
+                        if (typeof plan === 'string' && plan.trim()) {
+                            setUserPlanName(plan);
+                        }
+                        return;
+                    }
 
                     // Normalize a sender string we can trust for typing + message routing
                     const m = msg as Record<string, unknown>;
@@ -1359,8 +1525,6 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                     (typeof m.sender === 'string' && m.sender.trim()) ? m.sender.trim()
                         : (typeof m.model === 'string' && m.model.trim()) ? m.model.trim()
                         : '';
-
-
 
 
                     if (msg.type === 'conversation_id' && typeof msg.id === 'string') {
@@ -1399,11 +1563,69 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                         setLoadedSummary(msg.summary);
                         return;
                     }
+                    // Credits/plan updates pushed by the backend
+                    if (msg.type === 'credit_update') {
+                        // One source of truth: re-fetch usage/limit and let that drive UI
+                        refreshUsage();
+                        // (Optional) If your backend also pushes a new plan name, you can still set it:
+                        const plan = (msg as any)?.plan_name;
+                        if (typeof plan === "string" && plan.trim()) {
+                            setUserPlanName(plan);
+                        }
+                    }
+
+                        if (typeof resetAt === "string" && resetAt.trim()) {
+                            setCreditsResetAt(resetAt);
+                        }
+                        // Optional banner if we just crossed zero
+                        if (typeof remaining === "number" && remaining <= 0) {
+                            setCreditNotice(prev =>
+                            prev ?? "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset."
+                            );
+                        }
+                        return;
+                        }
+
+                        // Unified error from backend if a send was denied
+                        if (msg.type === 'error' && (msg as any).code === 'OUT_OF_CREDITS') {
+                        setIsOutOfCredits(true);
+                        setCreditNotice(
+                            (typeof (msg as any).message === 'string' && (msg as any).message) ||
+                            "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset."
+                        );
+                        return;
+                    }
+
+                    // NEW: credit / usage exhaustion messages from server
+                    if (msg.type === 'limit' || msg.type === 'insufficient_credits') {
+                        const reason =
+                            (typeof msg.text === 'string' && msg.text.trim())
+                            ? msg.text.trim()
+                            : "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset.";
+
+                        // Stop any global/agent typing indicators and surface the banner
+                        stopTeamThinking();
+                        setIsTyping({ ChatGPT: false, Claude: false, Gemini: false, Mistral: false });
+
+                        setIsOutOfCredits(true);
+                        setCreditNotice(reason);
+                        return;
+                    }
+
                     if (msg.type === 'ping' || msg.type === 'pong') return;
                     if (sender && typeof msg.typing === 'boolean' && ALLOWED_AGENTS.includes(sender as AgentName)) {
                         // Any typing signal proves the pipeline is alive → hide the global fallback
                         stopTeamThinking();
                         setTypingWithDelayAndTTL(sender as AgentName, msg.typing === true);
+                        return;
+                    }
+                    if (msg.type === 'insufficient_credits') {
+                        setIsOutOfCredits(true);
+                        setCreditNotice(
+                            typeof msg.message === 'string' && msg.message.trim()
+                            ? msg.message
+                            : "You’re out of credits for your current plan. Upgrade to continue chatting, or wait for your monthly reset."
+                        );
                         return;
                     }
 
@@ -1418,6 +1640,24 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                         stopTeamThinking();
                         setTypingWithDelayAndTTL(sender as AgentName, false);
                         addMessageToChat({ sender, text: unifiedText });
+                        // Refresh credits after assistant turn
+                        (async () => {
+                            try {
+                                const res = await apiFetch('/api/credits');
+                                if (res.ok) {
+                                const data = await res.json();
+                                const bal =
+                                    typeof data.credits_remaining === 'number'
+                                    ? data.credits_remaining
+                                    : (typeof data.balance === 'number' ? data.balance : 0);
+                                setCreditsLeft(bal);
+                                setIsOutOfCredits(bal <= 0);
+                                if (bal <= 0) {
+                                    setCreditNotice("You are out of credits. Please upgrade to continue.");
+                                }
+                                }
+                            } catch {}
+                        })();
 
                         // Also capture any uploads attached to this payload
                         const got = extractUploadsFromRawMessage(msg);
@@ -1560,6 +1800,10 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
     return (
     <div className="flex h-screen w-full bg-gray-900 text-white font-sans antialiased pt-[72px]">
+        <div className="fixed top-[72px] right-3 z-50 text-xs opacity-80 bg-gray-800/70 px-2 py-1 rounded border border-gray-700">
+            Credits: {credits}
+        </div>
+
         {creditNotice && (
         <div
             role="alert"
@@ -2117,6 +2361,12 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             </div>
         )}
         <div className="flex gap-4">
+            {typeof creditsLeft === 'number' && (
+            <div className="self-end h-11 md:h-12 px-3 flex items-center rounded-xl border border-gray-700 text-gray-300">
+                <span className="text-xs md:text-sm">{creditsLeft} credits</span>
+            </div>
+            )}
+
             <input
                 type="file"
                 ref={fileInputRef}
