@@ -3,19 +3,29 @@ import type { NextConfig } from 'next';
 
 const CSP = [
   "default-src 'self'",
-  // REST + WebSocket + Stripe telemetry
-  "connect-src 'self' https://api.aicolosseum.app wss://api.aicolosseum.app https://m.stripe.network",
-  // IMPORTANT: allow inline scripts so Next.js and your page can run
-  "script-src 'self' 'unsafe-inline' https://js.stripe.com https://m.stripe.network",
-  // Allow inline styles + your cdnjs stylesheet
+
+  // Allow API + WebSocket + Stripe + Google auth calls
+  "connect-src 'self' https://api.aicolosseum.app wss://api.aicolosseum.app https://m.stripe.network https://accounts.google.com https://oauth2.googleapis.com https://www.googleapis.com",
+
+  // Scripts: allow inline (for now), Stripe, and Google Identity Services
+  "script-src 'self' 'unsafe-inline' https://js.stripe.com https://m.stripe.network https://accounts.google.com https://accounts.google.com/gsi/client",
+
+  // Styles: allow inline + your cdnjs stylesheet
   "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com",
-  "img-src 'self' data: blob:",
-  "font-src 'self' data:",
-  // Stripe iframes
-  "frame-src 'self' https://js.stripe.com",
+
+  // Images: local + data/blob + Google user avatars
+  "img-src 'self' data: blob: https://*.googleusercontent.com",
+
+  // Fonts: allow local data: and cdnjs Font Awesome webfonts
+  "font-src 'self' data: https://cdnjs.cloudflare.com",
+
+  // Frames: allow Stripe + Google auth popups/iframes
+  "frame-src 'self' https://js.stripe.com https://accounts.google.com",
+
   "base-uri 'self'",
   "frame-ancestors 'self'",
 ].join('; ');
+
 
 
 const securityHeaders = [
