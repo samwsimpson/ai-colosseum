@@ -112,48 +112,47 @@ function buildAuthHeaders(userToken?: string | null): Headers {
 }
 
 // Helper: fetch with Authorization header and 1x retry on 401 using /api/refresh
-async function apiFetch(pathOrUrl: string | URL, init: RequestInit = {}) {
-    const url =
-        typeof pathOrUrl === "string"
-        ? (pathOrUrl.startsWith("http")
-            ? pathOrUrl
-            : `${API_BASE}${pathOrUrl.startsWith("/") ? "" : "/"}${pathOrUrl}`)
-        : pathOrUrl.toString();
+// Always hit the backend API host even if callers pass a relative URL.
+async function apiFetch(
+  url: string,
+  init: RequestInit = {},
+): Promise<Response> {
+  // Normalize to absolute API URL
+  const absolutize = (u: string) => {
+    if (/^https?:\/\//i.test(u)) return u;             // already absolute
+    if (u.startsWith('/')) return `${API_BASE}${u}`;    // "/api/..." -> "https://api.aicolosseum.app/api/..."
+    return `${API_BASE}/${u.replace(/^\/+/, '')}`;      // "api/..."  -> ".../api/..."
+  };
 
-    // clone/normalize headers
-    const finalHeaders = new Headers(init.headers || {});
+  const finalHeaders = new Headers(init.headers || {});
+  const token = (() => { try { return localStorage.getItem('access_token') || undefined; } catch { return undefined; } })();
+  if (token && !finalHeaders.has('Authorization')) {
+    finalHeaders.set('Authorization', `Bearer ${token}`);
+  }
 
-    // attach Authorization from localStorage if absent
-    const access = typeof window !== "undefined" ? localStorage.getItem("access_token") : null;
-    if (!finalHeaders.has("Authorization") && access) {
-        finalHeaders.set("Authorization", `Bearer ${access}`);
+  // 1st attempt
+  let target = absolutize(url);
+  let res = await fetch(target, { ...init, headers: finalHeaders, credentials: 'include' });
+  if (res.status !== 401) return res;
+
+  // Try to refresh (to the API host, never the frontend)
+  try {
+    const rr = await fetch(absolutize('/api/refresh'), { method: 'POST', credentials: 'include' });
+    if (rr.ok) {
+      const rj = await rr.json();
+      const newToken: string | undefined = rj?.access_token || rj?.token;
+      if (newToken) {
+        try { localStorage.setItem('access_token', newToken); } catch {}
+        finalHeaders.set('Authorization', `Bearer ${newToken}`);
+      }
     }
+  } catch { /* ignore */ }
 
-    // don't force content-type for FormData
-    if (init.body instanceof FormData) {
-        finalHeaders.delete("Content-Type");
-    } else if (!finalHeaders.has("Content-Type")) {
-        finalHeaders.set("Content-Type", "application/json");
-    }
-
-    // first attempt
-    const res = await fetch(url, { ...init, headers: finalHeaders, credentials: "include" });
-    if (res.status !== 401) return res;
-
-    // try to refresh
-    const rr = await fetch(`${API_BASE}/api/refresh`, { method: "POST", credentials: "include" });
-    if (!rr.ok) return res;
-
-    const rj = await rr.json();
-    const newToken: string | undefined = rj?.access_token || rj?.token; // accept both
-    if (!newToken) return res;
-
-    try { localStorage.setItem("access_token", newToken); } catch {}
-    finalHeaders.set("Authorization", `Bearer ${newToken}`);
-
-    // retry original request
-    return fetch(url, { ...init, headers: finalHeaders, credentials: "include" });
+  // Retry original request to the API host
+  target = absolutize(url);
+  return fetch(target, { ...init, headers: finalHeaders, credentials: 'include' });
 }
+
 
 
 async function fetchFolders(token?: string | null): Promise<Folder[]> {
@@ -870,17 +869,21 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             return;
         }
 
-        // 2) Ask backend for a fresh access token if the HttpOnly refresh cookie exists
-        //    (middleware ensures guests don't reach this page, but this covers race cases)
-        const res = await fetch('/api/refresh', { method: 'POST', credentials: 'include' });
-        if (res.ok) {
+        // 2) Ask backend for a fresh access token if the HttpOnly refresh cookie exists.
+        //    Use apiFetch so this always goes to API_BASE (not the frontend origin).
+        const res = await apiFetch('/api/refresh', { method: 'POST' });
+            if (res.ok) {
             const body = await res.json();
-            try { localStorage.setItem('access_token', body.access_token); } catch {}
+            const newTok = body?.access_token || body?.token;
+            if (newTok) {
+                try { localStorage.setItem('access_token', newTok); } catch {}
+            }
             if (!cancelled) { setAuthed(true); setAuthChecked(true); }
             loadConversations();
             setWsReconnectNonce(n => n + 1);
             return;
         }
+
         } catch {
         // ignore
         }
