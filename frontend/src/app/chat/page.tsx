@@ -1387,7 +1387,9 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             return token;
         }
 
-        getTokenForWs().then(tokenToSend => {
+        getTokenForWs().then(async (initialToken) => {
+            let tokenToSend = initialToken;
+
             if (!tokenToSend) {
                 // If we couldn't get a valid token, don't connect.
                 return;
@@ -1396,18 +1398,23 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             try {
                 const rr = await fetch(`${API_BASE}/api/refresh`, { method: 'POST', credentials: 'include' });
                 if (rr.ok) {
-                    const rj = await rr.json();
-                    const fresh = rj?.access_token || rj?.token;
-                    if (fresh) {
+                const rj = await rr.json();
+                const fresh = rj?.access_token || rj?.token;
+                if (fresh) {
                     try { localStorage.setItem('access_token', fresh); } catch {}
-                    tokenToSend = fresh;
-                    }
+                    tokenToSend = fresh; // OK now (local mutable var)
                 }
-            } catch { /* ignore */ }
+                }
+            } catch {
+                // ignore refresh errors; we'll try with whatever token we have
+            }
+
+            // If we truly have no token, bail quietly
+            if (!tokenToSend) return;
 
             u.search = `?token=${encodeURIComponent(tokenToSend)}`;
-            // Add this line for visibility (optional):
             console.debug('[WS] connecting to', u.toString());
+
             const socket = new WebSocket(u.toString());
             ws.current = socket;
             setIsWsOpen(false);
