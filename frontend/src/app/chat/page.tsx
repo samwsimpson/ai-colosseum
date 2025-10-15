@@ -132,7 +132,7 @@ async function apiFetch(
 
   // 1st attempt
   let target = absolutize(url);
-  let res = await fetch(target, { ...init, headers: finalHeaders, credentials: 'include' });
+  const res = await fetch(target, { ...init, headers: finalHeaders, credentials: 'include' });
   if (res.status !== 401) return res;
 
   // Try to refresh (to the API host, never the frontend)
@@ -328,7 +328,7 @@ const refreshUsage = useCallback(async () => {
 
 const [creditNotice, setCreditNotice] = useState<string | null>(null);
 const [creditsLeft, setCreditsLeft] = useState<number | null>(null);
-const [_creditsLoading, setCreditsLoading] = useState(false);
+const [, setCreditsLoading] = useState(false);
 const [conversationId, setConversationId] = useState<string | null>(null);
 const [pendingFiles, setPendingFiles] = useState<UploadedAttachment[]>([]);
 const [, setIsUploading] = useState<boolean>(false);
