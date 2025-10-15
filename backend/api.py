@@ -1782,6 +1782,21 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
     await websocket.send_json({"type": "ws_ready"})
     print("WS: accepted connection for /ws/colosseum-chat", flush=True)
 
+    # --- Keep-alive ping: helps some LBs/proxies keep the socket open ---
+    async def _ws_keepalive(ws):
+        try:
+            while True:
+                # a tiny heartbeat every 25s is usually enough
+                await asyncio.sleep(25)
+                try:
+                    await ws.send_json({"type": "ping", "ts": datetime.now(timezone.utc).isoformat()})
+                except Exception:
+                    break
+        except Exception:
+            pass
+
+    _keepalive_task = asyncio.create_task(_ws_keepalive(websocket))
+
 
     # Optional: log Origin to debug strict Origin checks (if any)
     try:
@@ -1805,6 +1820,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
         # Use **your** existing decode function/SECRET here (don’t change your key)
         payload = pyjwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         user_id = payload.get("sub")
+        print(f"WS: token decoded for user_id={user_id}", flush=True)
+
         if not user_id:
             raise ValueError("Token missing sub")
     except Exception as e:
@@ -1814,6 +1831,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
             pass
         print(f"WS: closing 4401 (bad token): {e}", flush=True)
         await websocket.close(code=4401, reason="Invalid or expired token")
+        try:
+            _keepalive_task.cancel()
+        except Exception:
+            pass
         return
 
     try:        
@@ -1824,6 +1845,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
         if not token:
             print("WS: closing 4401 (missing token)", flush=True)
             await websocket.close(code=4401, reason="Missing token")
+            try:
+                _keepalive_task.cancel()
+            except Exception:
+                pass            
             return
         try:
             user = await get_current_user(token=token)
@@ -1831,6 +1856,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
             # Invalid/expired token -> close explicitly so the client can refresh
             print("WS: closing 4401 (Unauthorized)", flush=True)
             await websocket.close(code=4401, reason="Unauthorized")
+            try:
+                _keepalive_task.cancel()
+            except Exception:
+                pass            
             return
 
         user_doc = await db.collection('users').document(user['id']).get()
@@ -1882,6 +1911,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                 await websocket.send_json({"sender": "System", "type": "limit", "text": "Monthly conversation limit reached."})
                 print("WS: closing 440 (Monly limite reached)", flush=True)
                 await websocket.close(code=4000, reason="Monthly limit reached")
+                try:
+                    _keepalive_task.cancel()
+                except Exception:
+                    pass                
                 return
 
 
@@ -2026,6 +2059,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                     try:
                         print("WS: closing 1008 (insuffient credits)", flush=True)
                         await websocket.close(code=1008, reason="Insufficient credits")
+                        try:
+                            _keepalive_task.cancel()
+                        except Exception:
+                            pass                        
                     except Exception:
                         pass
                     return False
@@ -2752,6 +2789,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                     })
                     print("WS: closing 1000 (not sure)", flush=True)
                     await websocket.close(code=1000)
+                    try:
+                        _keepalive_task.cancel()
+                    except Exception:
+                        pass                    
                     return  # stop handling this WebSocket turn
         except Exception as _e:
             # If the check fails, fail open (optional) or fail closed.
@@ -2778,6 +2819,11 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
             })
             print("WS: closing 1011 (not sure)", flush=True)
             await websocket.close(code=1011)
+            try:
+                _keepalive_task.cancel()
+            except Exception:
+                pass            
+            
             return
 
         if len(agents) < 2:

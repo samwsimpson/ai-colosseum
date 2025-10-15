@@ -933,73 +933,47 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
         }
     }, [userToken, refreshUsage]);
 
+    // Unified credits fetch (replaces the 3 separate effects)
     useEffect(() => {
-        if (!userToken) return;
+    if (!userToken) return;
 
-        let cancelled = false;
+    let ignore = false;
 
-        (async () => {
-            try {
-            setCreditsLoading(true);
-            const res = await apiFetch('/api/credits'); // uses your existing apiFetch
-            if (!cancelled && res.ok) {
-                const data = await res.json();
-                const remaining =
-                typeof data.remaining_credits === 'number' ? data.remaining_credits : null;
+    (async () => {
+        try {
+        setCreditsLoading(true);
 
-                setCreditsLeft(remaining);
-                setIsOutOfCredits(!remaining || remaining <= 0);
-            }
-            } catch (e) {
-            console.error('Failed to fetch credits', e);
-            } finally {
-            if (!cancelled) setCreditsLoading(false);
-            }
-        })();
+        const res = await apiFetch('/api/credits', {
+            headers: buildAuthHeaders(userToken),
+        });
+        if (!ignore && res.ok) {
+            const data = await res.json();
 
-        return () => { cancelled = true; };
-    }, [userToken]);
+            // Accept any of the server's fields
+            const remaining =
+            typeof data.remaining_credits === 'number' ? data.remaining_credits :
+            typeof data.credits_remaining === 'number' ? data.credits_remaining :
+            typeof data.credit_balance === 'number' ? data.credit_balance :
+            typeof data.balance === 'number' ? data.balance : 0;
 
-    useEffect(() => {
-        let ignore = false;
-        (async () => {
-            try {
-            const res = await apiFetch('/api/credits');
-            if (!ignore && res.ok) {
-                const data = await res.json();
-                const bal =
-                typeof data.credits_remaining === 'number'
-                    ? data.credits_remaining
-                    : (typeof data.balance === 'number' ? data.balance : 0);
-                setCreditsLeft(bal);
-                setIsOutOfCredits(bal <= 0);
-                setCreditNotice(bal <= 0 ? "You are out of credits. Please upgrade to continue." : null);
-            }
-            } catch {
-            // ignore
-            }
-        })();
-        return () => { ignore = true; };
+            // Drive both displays from the same source of truth
+            setCreditsLeft(remaining);
+            setCredits(remaining);
+
+            const out = remaining <= 0;
+            setIsOutOfCredits(out);
+            setCreditNotice(out ? "You are out of credits. Please upgrade to continue." : null);
+        }
+        } catch {
+        // optional: console.warn('Failed to fetch credits', e);
+        } finally {
+        if (!ignore) setCreditsLoading(false);
+        }
+    })();
+
+    return () => { ignore = true; };
     }, [userToken, wsReconnectNonce]);
 
-    useEffect(() => {
-        if (!userToken) return;
-        (async () => {
-            try {
-            const headers = buildAuthHeaders(userToken);
-            const res = await apiFetch('/api/credits', { headers });
-            if (res.ok) {
-                const data = await res.json();
-                const bal = typeof data?.credit_balance === 'number' ? data.credit_balance : 0;
-                setCredits(bal);
-                setIsOutOfCredits(bal <= 0);
-                setCreditNotice(bal <= 0 ? "You are out of credits. Please upgrade to continue." : null);
-            }
-            } catch {
-            // ignore
-            }
-        })();
-    }, [userToken]);
 
     // Use useCallback to memoize the function, preventing unnecessary re-renders
     const addMessageToChat = useCallback((msg: { sender: string; text: string }) => {
@@ -1419,6 +1393,8 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                 return;
             }
             u.search = `?token=${encodeURIComponent(tokenToSend)}`;
+            // Add this line for visibility (optional):
+            console.debug('[WS] connecting to', u.toString());
             const socket = new WebSocket(u.toString());
             ws.current = socket;
             setIsWsOpen(false);
@@ -1643,6 +1619,11 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
 
                 },
                 onclose: (ev: CloseEvent) => {
+                    console.warn('WebSocket closed:', {
+                        code: ev.code,
+                        reason: ev.reason,
+                        wasClean: ev.wasClean
+                    });                    
                 resetWebSocket();
 
                 // Handle auth failures from the server explicitly
