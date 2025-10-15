@@ -1339,7 +1339,7 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
             u = new URL('http://localhost:8000');
         }
 
-        u.protocol = (u.protocol === 'https:' || u.protocol === 'wss:') ? 'wss:' : 'ws:';
+        u.protocol = (typeof window !== 'undefined' && window.location.protocol === 'https:') ? 'wss:' : 'ws:';
         u.pathname = '/ws/colosseum-chat';
         
         let cleanup: (() => void) | null = null;
@@ -1392,6 +1392,19 @@ const loadConversations = useCallback(async (folderId?: string | null) => {
                 // If we couldn't get a valid token, don't connect.
                 return;
             }
+            // Ensure the WS opens with a fresh token (avoid "connect-then-close" if almost expired)
+            try {
+                const rr = await fetch(`${API_BASE}/api/refresh`, { method: 'POST', credentials: 'include' });
+                if (rr.ok) {
+                    const rj = await rr.json();
+                    const fresh = rj?.access_token || rj?.token;
+                    if (fresh) {
+                    try { localStorage.setItem('access_token', fresh); } catch {}
+                    tokenToSend = fresh;
+                    }
+                }
+            } catch { /* ignore */ }
+
             u.search = `?token=${encodeURIComponent(tokenToSend)}`;
             // Add this line for visibility (optional):
             console.debug('[WS] connecting to', u.toString());
