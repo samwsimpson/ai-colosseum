@@ -3,15 +3,20 @@ import type { NextConfig } from 'next';
 
 const CSP = [
   "default-src 'self'",
+  // REST + WebSocket + Stripe telemetry
   "connect-src 'self' https://api.aicolosseum.app wss://api.aicolosseum.app https://m.stripe.network",
-  "script-src 'self' https://js.stripe.com https://m.stripe.network",
-  "style-src 'self' 'unsafe-inline'",
+  // IMPORTANT: allow inline scripts so Next.js and your page can run
+  "script-src 'self' 'unsafe-inline' https://js.stripe.com https://m.stripe.network",
+  // Allow inline styles + your cdnjs stylesheet
+  "style-src 'self' 'unsafe-inline' https://cdnjs.cloudflare.com",
   "img-src 'self' data: blob:",
   "font-src 'self' data:",
+  // Stripe iframes
   "frame-src 'self' https://js.stripe.com",
   "base-uri 'self'",
   "frame-ancestors 'self'",
 ].join('; ');
+
 
 const securityHeaders = [
   { key: 'Content-Security-Policy', value: CSP },
