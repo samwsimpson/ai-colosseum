@@ -3053,31 +3053,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                             ])
                         })
 
-                    # --- PRE-RUN CREDIT GATE: don't start the team if user is out of credits ---
-                    try:
-                        # Simple check: try a dry-run deduction of 0 (or call your existing usage calc)
-                        # Replace this with your own helper if you have one that returns (used, limit, remaining)
-                        usage = await get_user_usage_summary(user["id"])  # your existing usage function if present
-                        remaining = (usage or {}).get("remaining", 0)
-                    except Exception:
-                        remaining = 0  # fail-safe: treat as no balance if usage can't be read
 
-                    if remaining <= 0:
-                        try:
-                            await websocket.send_json({
-                                "sender": "System",
-                                "type": "limit",
-                                "text": "You’re out of credits for your current plan."
-                            })
-                        except Exception:
-                            pass
-                        try:
-                            print("WS: closing 1008 (out of credits)", flush=True)
-                            await websocket.close(code=1008, reason="Out of credits")
-                        except Exception:
-                            pass
-                        return
-                    # --- /PRE-RUN CREDIT GATE ---
 
                     # Kick off or feed the manager loop
                     if chat_task is None or chat_task.done():
@@ -3170,12 +3146,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                                 await db.collection("usage_ledger").add({
                                     "user_id": user["id"],
                                     "subscription_id": (user_data or {}).get("subscription_id") or "Free",
-                                    "conv_id": conv_ref.id,
-                                    "credits_spent": 1,            # we deducted 1 credit for this assistant message
-                                    "event": "assistant_message",
-                                    "model": sender,                # optional: which assistant spoke
+                                    "credits_spent": 1,
                                     "created_at": FS_TS,
                                 })
+
                             except Exception as e:
                                 print("[usage_ledger] write failed:", e)
 
