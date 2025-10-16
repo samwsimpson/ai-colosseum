@@ -1763,7 +1763,7 @@ async def deduct_credits_simple(user_id: str, amount: float) -> float:
         return -1.0
 
 
-from datetime import datetime, timedelta, timezone
+
 
 # Per-plan monthly credit quotas (tune these to your pricing)
 PLAN_CREDIT_QUOTA = {
@@ -2429,13 +2429,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                         out_text = ""
 
                     if out_text:
-                        # === CREDIT DEDUCTION (image path) ===
-                        approx_tokens = max(1, int(len(out_text) / 4))
-                        ok, _spent = await deduct_credits_for_tokens(
-                            user_id=user["id"],            # captured from outer scope
-                            tokens=approx_tokens,
-                            model_label=str(self.name or "").strip() or "Assistant",
-                        )
+
                         if not ok:
                             try:
                                 await websocket.send_json({"type": "error", "reason": "insufficient_credits"})
@@ -2483,7 +2477,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                                     for tc in result.get("tool_calls", []):
                                         fn = (tc.get("function") or {}).get("name")
                                         if fn == "get_upload_text":
-                                            import json  # ok if already imported elsewhere
+                                            
                                             args_raw = (tc.get("function") or {}).get("arguments") or "{}"
                                             try:
                                                 args = json.loads(args_raw)
@@ -2799,8 +2793,8 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                         "remaining_credits": max(int(monthly_limit) - used, 0),
                         "message": "You're out of credits for this billing period."
                     })
-                    print("WS: closing 1000 (not sure)", flush=True)
-                    await websocket.close(code=1000)
+                    print("WS: closing 4000 (monthly limit reached)", flush=True)
+                    await websocket.close(code=4000, reason="Monthly credit limit reached.")
                     try:
                         _keepalive_task.cancel()
                     except Exception:
