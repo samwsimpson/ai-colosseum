@@ -1763,7 +1763,14 @@ async def deduct_credits_simple(user_id: str, amount: float) -> float:
         return -1.0
 
 
-
+# Credits: per-plan monthly allotment used to seed or reset balances
+PLAN_CREDIT_ALLOTMENT = {
+    "Free":        50.0,
+    "Starter":     500.0,
+    "Pro":        2000.0,
+    "Colosseum": 10000.0,
+    "Enterprise":  None,   # None => treat as unlimited; don't seed
+}
 
 # Per-plan monthly credit quotas (tune these to your pricing)
 PLAN_CREDIT_QUOTA = {
@@ -2761,8 +2768,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                 # Determine billing window start (same logic as /api/users/me/usage)
                 period_start = user_data.get("billing_period_start")
                 if isinstance(period_start, str):
-                    try:
-                        from datetime import datetime
+                    try:                        
                         period_start = datetime.fromisoformat(period_start)
                     except Exception:
                         period_start = None
@@ -3047,6 +3053,27 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                             ])
                         })
 
+                    # --- Pre-run credit gate: if balance is 0, notify and skip starting the loop
+                    try:
+                        uref = db.collection("users").document(user["id"])
+                        usnap = await uref.get()
+                        udata = usnap.to_dict() or {}
+                        bal = float(udata.get("credit_balance", 0.0))
+                        if bal <= 0.0:
+                            try:
+                                await websocket.send_json({
+                                    "sender": "System",
+                                    "type": "limit",
+                                    "text": "You’re out of credits. Upgrade your plan or add credits to continue."
+                                })
+                            except Exception:
+                                pass
+                            # do not start the manager loop; let the socket stay open so the UI can show upgrade
+                            continue  # move to next incoming message instead
+                    except Exception as _e:
+                        # If this fails, fall through; the later deduct will still protect us
+                        pass
+                    # --- /Pre-run credit gate ---
 
 
                     # Kick off or feed the manager loop
