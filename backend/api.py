@@ -1049,6 +1049,7 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
         return JSONResponse({"monthly_usage": 0, "monthly_limit": None})
 
     # Anchor usage window to billing period if present; else start of current month (UTC)
+    # Determine billing window start (same logic as /api/users/me/usage)
     period_start = user_data.get("billing_period_start")
     if isinstance(period_start, str):
         try:
@@ -1056,7 +1057,10 @@ async def get_user_usage(current_user: dict = Depends(get_current_user)):
         except Exception:
             period_start = None
     if not period_start:
-        period_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        period_start = datetime.now(timezone.utc).replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+
 
     # Sum usage from ledger
     used = 0
@@ -1458,10 +1462,13 @@ async def stripe_webhook(request: Request):
 
             # Seed the initial billing period window so usage anchors to the paid term
             try:
-                sub = stripe.Subscription.retrieve(update_fields['stripe_subscription_id'])
-                from datetime import datetime, timezone as _tz
-                update_fields['billing_period_start'] = datetime.fromtimestamp(sub.current_period_start, tz=_tz.utc)
-                update_fields['billing_period_end']   = datetime.fromtimestamp(sub.current_period_end,   tz=_tz.utc)
+                sub = stripe.Subscription.retrieve(update_fields['stripe_subscription_id'])            
+                update_fields['billing_period_start'] = datetime.fromtimestamp(
+                    sub.current_period_start, tz=timezone.utc
+                )
+                update_fields['billing_period_end'] = datetime.fromtimestamp(
+                    sub.current_period_end, tz=timezone.utc
+                )
                 update_fields['subscription_status']  = sub.status  # e.g., 'active'
             except Exception as _e:
                 # If this fails, we'll still fill it at the first invoice.payment_succeeded
@@ -1890,6 +1897,7 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
         # Enforce monthly limit if the plan is capped
         limit = user_subscription_data.get("monthly_limit")
         if limit is not None:
+            # Determine billing window start (same logic as /api/users/me/usage)
             period_start = user_data.get("billing_period_start")
             if isinstance(period_start, str):
                 try:
@@ -1897,7 +1905,10 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
                 except Exception:
                     period_start = None
             if not period_start:
-                period_start = datetime.now(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+                period_start = datetime.now(timezone.utc).replace(
+                    day=1, hour=0, minute=0, second=0, microsecond=0
+                )
+
 
             used = 0
             try:
@@ -2764,19 +2775,19 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
             monthly_limit = sub_data.get("monthly_limit", None)
 
             # Unlimited plans (None) skip gating
-            if monthly_limit is not None:
+            if monthly_limit is not None:                
                 # Determine billing window start (same logic as /api/users/me/usage)
                 period_start = user_data.get("billing_period_start")
                 if isinstance(period_start, str):
-                    try:                        
+                    try:
                         period_start = datetime.fromisoformat(period_start)
                     except Exception:
                         period_start = None
                 if not period_start:
-                    from datetime import datetime, timezone
                     period_start = datetime.now(timezone.utc).replace(
                         day=1, hour=0, minute=0, second=0, microsecond=0
                     )
+
 
                 # Sum usage from ledger
                 used = 0
