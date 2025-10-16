@@ -1803,15 +1803,37 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
         print(f"WS Origin: {websocket.headers.get('origin')}", flush=True)
     except Exception:
         pass
+    # Normalize token from header, query, or cookie
+    # 1) Authorization: Bearer <token>
+    authz = websocket.headers.get("authorization") or websocket.headers.get("Authorization")
+    if authz and authz.lower().startswith("bearer "):
+        token = authz.split(" ", 1)[1].strip()
 
-    # Pull token from query string
-    token = websocket.query_params.get("token")
+    # 2) Query string (kept for backwards compat). If still no token, fallback.
+    if not token:
+        token = websocket.query_params.get("token")
+
+    # 3) Cookie fallback (optional; keep if your front-end ever uses cookies)
+    if not token:
+        raw_cookie = websocket.headers.get("cookie") or ""
+        if "colosseum_access_token=" in raw_cookie:
+            for part in raw_cookie.split(";"):
+                part = part.strip()
+                if part.startswith("colosseum_access_token="):
+                    token = part.split("=", 1)[1].strip()
+                    break
+
+    # If still nothing, close politely and cancel keepalive
     if not token:
         try:
             await websocket.send_json({"sender": "System", "type": "limit", "text": "Missing token"})
         except Exception:
             pass
         print("WS: closing 4401 (missing token)", flush=True)
+        try:
+            _keepalive_task.cancel()
+        except Exception:
+            pass
         await websocket.close(code=4401, reason="Missing token")
         return
 
@@ -1840,16 +1862,6 @@ async def websocket_endpoint(websocket: WebSocket, token: str | None = Query(def
     try:        
         print("WS: accepted connection", flush=True)
 
-
-        # ---- auth & monthly limit ----
-        if not token:
-            print("WS: closing 4401 (missing token)", flush=True)
-            await websocket.close(code=4401, reason="Missing token")
-            try:
-                _keepalive_task.cancel()
-            except Exception:
-                pass            
-            return
         try:
             user = await get_current_user(token=token)
         except HTTPException:
